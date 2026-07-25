@@ -1,7 +1,8 @@
 -- ============================================================================
 -- public.profiles — hồ sơ người dùng Nexus
 --
--- Chạy file này trong Supabase SQL Editor (một lần) trước khi gọi POST /api/auth/register.
+-- Migration đầu tiên. Áp lên remote bằng `npx supabase db push` (đừng sửa file
+-- này sau khi đã push — tạo migration mới cho mọi thay đổi tiếp theo).
 --
 -- auth.users chỉ giữ email + mật khẩu. Tên đăng nhập, tên hiển thị và ngày sinh
 -- nằm ở đây vì user_metadata KHÔNG ép được ràng buộc duy nhất — hai người có thể

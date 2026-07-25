@@ -1,5 +1,16 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import type { User } from '@supabase/supabase-js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { AuthService, RegisteredUser } from './auth.service';
+import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { RegisterDto } from './dto/register.dto';
 
 @Controller('auth')
@@ -19,5 +30,25 @@ export class AuthController {
   @HttpCode(HttpStatus.CREATED)
   register(@Body() dto: RegisterDto): Promise<RegisteredUser> {
     return this.auth.register(dto);
+  }
+
+  /**
+   * POST /api/auth/complete-profile
+   *
+   * Dành cho tài khoản đăng nhập bằng Google/SĐT: `auth.users` đã có sẵn nhưng
+   * chưa có hồ sơ `profiles`. `SupabaseAuthGuard` xác thực access token rồi cho
+   * biết đây là ai — client không tự khai id được.
+   */
+  @Post('complete-profile')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(SupabaseAuthGuard)
+  completeProfile(
+    @CurrentUser() user: User,
+    @Body() dto: CompleteProfileDto,
+  ): Promise<RegisteredUser> {
+    return this.auth.completeProfile(
+      { id: user.id, email: user.email ?? null },
+      dto,
+    );
   }
 }
