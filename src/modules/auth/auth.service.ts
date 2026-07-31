@@ -3,9 +3,11 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
+import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 
 export interface RegisteredUser {
@@ -15,8 +17,42 @@ export interface RegisteredUser {
   displayName: string | null;
 }
 
+/** Hồ sơ trả về cho frontend. Không lộ cột nội bộ nào ngoài các trường này. */
+export interface ProfileView {
+  id: string;
+  username: string;
+  displayName: string | null;
+  email: string;
+  birthdate: string;
+}
+
+export interface LoginSession {
+  accessToken: string;
+  refreshToken: string;
+  /** Giây Unix. Null nếu Supabase không trả về. */
+  expiresAt: number | null;
+}
+
 /** Mã lỗi Postgres cho vi phạm ràng buộc duy nhất. */
 const UNIQUE_VIOLATION = '23505';
+
+/**
+ * Câu duy nhất trả về cho MỌI kiểu đăng nhập hỏng.
+ *
+ * Không được tách thành "tài khoản không tồn tại" / "sai mật khẩu" / "chưa xác
+ * nhận email": chênh lệch đó đủ để dò xem một email hay tên đăng nhập đã có
+ * người dùng hay chưa.
+ */
+const INVALID_LOGIN = 'Email/tên đăng nhập hoặc mật khẩu không đúng.';
+
+/**
+ * Email không thể tồn tại (TLD `.invalid` được RFC 2606 dành riêng).
+ *
+ * Khi không tra ra tên đăng nhập, vẫn gọi Supabase bằng địa chỉ này thay vì trả
+ * lỗi ngay: hai nhánh chạy cùng một lượng việc nên thời gian phản hồi không tố
+ * cáo tài khoản có tồn tại hay không.
+ */
+const UNRESOLVABLE_EMAIL = 'khong-ton-tai@nexus.invalid';
 
 @Injectable()
 export class AuthService {
@@ -88,7 +124,97 @@ export class AuthService {
   }
 
   /**
-   * Điền hồ sơ cho tài khoản đã đăng nhập bằng Google/SĐT.
+   * Đăng nhập bằng email HOẶC tên đăng nhập.
+   *
+   * Việc đổi tên đăng nhập thành email phải nằm ở đây, không được tách thành một
+   * endpoint riêng cho frontend gọi: một endpoint "tên đăng nhập này có tồn tại
+   * không" chính là công cụ dò tài khoản.
+   */
+  async login(dto: LoginDto): Promise<LoginSession> {
+    const email =
+      (await this.resolveEmail(dto.identifier)) ?? UNRESOLVABLE_EMAIL;
+
+    const { data, error } =
+      await this.supabase.authClient.auth.signInWithPassword({
+        email,
+        password: dto.password,
+      });
+
+    if (error || !data.session) {
+      // Cố tình không phân loại lỗi: mọi nguyên nhân đều ra cùng một câu.
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    return {
+      accessToken: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+      expiresAt: data.session.expires_at ?? null,
+    };
+  }
+
+  /**
+   * Hồ sơ của người đang đăng nhập, hoặc null nếu chưa tạo.
+   *
+   * Frontend không được tự đọc bảng `profiles` (NEXUS_CONTEXT §3.4), nên đây là
+   * đường duy nhất để biết "tài khoản này đã hoàn tất hồ sơ chưa" — thứ mà
+   * `profileGuard` cần trước mỗi trang.
+   *
+   * Trả null thay vì ném 404: chưa có hồ sơ là trạng thái bình thường của tài
+   * khoản Google mới, không phải lỗi.
+   */
+  async getProfile(userId: string): Promise<ProfileView | null> {
+    const { data, error } = await this.supabase.client
+      .from('profiles')
+      .select('id, username, display_name, birthdate, email')
+      .eq('id', userId)
+      .maybeSingle<{
+        id: string;
+        username: string;
+        display_name: string | null;
+        birthdate: string;
+        email: string;
+      }>();
+
+    if (error) {
+      this.logger.error(`Đọc hồ sơ thất bại: ${error.message}`);
+      throw new InternalServerErrorException(
+        'Không đọc được hồ sơ. Vui lòng thử lại.',
+      );
+    }
+    if (!data) {
+      return null;
+    }
+
+    return {
+      id: data.id,
+      username: data.username,
+      displayName: data.display_name,
+      email: data.email,
+      birthdate: data.birthdate,
+    };
+  }
+
+  /** Có '@' thì coi là email; ngược lại tra tên đăng nhập. Null nếu không có ai. */
+  private async resolveEmail(identifier: string): Promise<string | null> {
+    if (identifier.includes('@')) {
+      return identifier.toLowerCase();
+    }
+
+    const { data, error } = await this.supabase.client
+      .from('profiles')
+      .select('email')
+      .eq('username', identifier.toLowerCase())
+      .maybeSingle<{ email: string }>();
+
+    if (error) {
+      this.logger.error(`Tra tên đăng nhập thất bại: ${error.message}`);
+      return null;
+    }
+    return data?.email ?? null;
+  }
+
+  /**
+   * Điền hồ sơ cho tài khoản đã đăng nhập bằng Google.
    *
    * `auth.users` đã do Supabase tạo lúc OAuth/OTP, nên ở đây chỉ ghi `profiles`.
    * Không có bước rollback: nếu ghi hồ sơ hỏng, tài khoản auth vẫn dùng lại được

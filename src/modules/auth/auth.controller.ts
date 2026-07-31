@@ -1,17 +1,28 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
-import { AuthService, RegisteredUser } from './auth.service';
+import {
+  AuthService,
+  LoginSession,
+  ProfileView,
+  RegisteredUser,
+} from './auth.service';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
+import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+
+/** Đủ cho người gõ nhầm vài lần, không đủ để dò mật khẩu. */
+const STRICT_RATE_LIMIT = { default: { limit: 5, ttl: 60_000 } };
 
 @Controller('auth')
 export class AuthController {
@@ -20,16 +31,42 @@ export class AuthController {
   /**
    * POST /api/auth/register
    *
-   * Chỉ tạo tài khoản, không trả phiên đăng nhập: frontend tự gọi Supabase để
-   * đăng nhập, giống hệt trang /login. Nhờ vậy backend không phải cầm token.
-   *
-   * TODO: gắn rate limit (@nestjs/throttler) trước khi lên production —
-   * hiện endpoint này tạo tài khoản không giới hạn.
+   * Chỉ tạo tài khoản, không trả phiên đăng nhập: frontend gọi tiếp /auth/login.
    */
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle(STRICT_RATE_LIMIT)
   register(@Body() dto: RegisterDto): Promise<RegisteredUser> {
     return this.auth.register(dto);
+  }
+
+  /**
+   * POST /api/auth/login
+   *
+   * Nhận email HOẶC tên đăng nhập. Phải chạy ở backend vì tra tên đăng nhập cần
+   * đọc bảng `profiles` — frontend không được phép đọc bảng (NEXUS_CONTEXT §3.4).
+   *
+   * Trả token về cho frontend tự nạp vào Supabase client bằng `setSession`.
+   */
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(STRICT_RATE_LIMIT)
+  login(@Body() dto: LoginDto): Promise<LoginSession> {
+    return this.auth.login(dto);
+  }
+
+  /**
+   * GET /api/auth/me
+   *
+   * `profile` là null khi tài khoản chưa hoàn tất hồ sơ (đăng nhập Google lần đầu).
+   * Frontend dựa vào đây thay vì tự đọc bảng `profiles`.
+   */
+  @Get('me')
+  @UseGuards(SupabaseAuthGuard)
+  async me(
+    @CurrentUser() user: User,
+  ): Promise<{ profile: ProfileView | null }> {
+    return { profile: await this.auth.getProfile(user.id) };
   }
 
   /**
