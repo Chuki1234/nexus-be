@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import type { Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -18,13 +19,7 @@ export interface RegisteredUser {
 }
 
 /** Hồ sơ trả về cho frontend. Không lộ cột nội bộ nào ngoài các trường này. */
-export interface ProfileView {
-  id: string;
-  username: string;
-  displayName: string | null;
-  email: string;
-  birthdate: string;
-}
+export type ProfileView = Profile;
 
 export interface LoginSession {
   accessToken: string;
@@ -98,7 +93,7 @@ export class AuthService {
         id: userId,
         username: dto.username,
         display_name: displayName,
-        birthdate: dto.birthdate,
+        date_of_birth: dto.dateOfBirth,
       });
 
     if (profileError) {
@@ -165,13 +160,13 @@ export class AuthService {
   async getProfile(userId: string): Promise<ProfileView | null> {
     const { data, error } = await this.supabase.client
       .from('profiles')
-      .select('id, username, display_name, birthdate, email')
+      .select('id, username, display_name, date_of_birth, email')
       .eq('id', userId)
       .maybeSingle<{
         id: string;
         username: string;
         display_name: string | null;
-        birthdate: string;
+        date_of_birth: string;
         email: string;
       }>();
 
@@ -190,7 +185,7 @@ export class AuthService {
       username: data.username,
       displayName: data.display_name,
       email: data.email,
-      birthdate: data.birthdate,
+      dateOfBirth: data.date_of_birth,
     };
   }
 
@@ -242,7 +237,7 @@ export class AuthService {
       id: user.id,
       username: dto.username,
       display_name: displayName,
-      birthdate: dto.birthdate,
+      date_of_birth: dto.dateOfBirth,
     });
 
     if (error) {

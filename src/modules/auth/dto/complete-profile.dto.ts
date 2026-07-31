@@ -1,7 +1,11 @@
 import { Transform, TransformFnParams } from 'class-transformer';
 import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { IsBirthdate } from '../../../common/decorators/is-birthdate.decorator';
-import { MIN_AGE_YEARS, USERNAME_PATTERN } from './register.dto';
+import {
+  DISPLAY_NAME_MAX_LENGTH,
+  MIN_AGE_YEARS,
+  USERNAME_PATTERN,
+} from '../../../shared/dto/auth';
 
 const trim = ({ value }: TransformFnParams): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -33,11 +37,13 @@ export class CompleteProfileDto {
   @Transform(emptyToUndefined)
   @IsOptional()
   @IsString({ message: 'Tên hiển thị không hợp lệ.' })
-  @MaxLength(32, { message: 'Tên hiển thị tối đa 32 ký tự.' })
+  @MaxLength(DISPLAY_NAME_MAX_LENGTH, {
+    message: `Tên hiển thị tối đa ${DISPLAY_NAME_MAX_LENGTH} ký tự.`,
+  })
   displayName?: string;
 
   @IsBirthdate(MIN_AGE_YEARS, {
     message: `Ngày sinh không hợp lệ hoặc bạn chưa đủ ${MIN_AGE_YEARS} tuổi.`,
   })
-  birthdate: string;
+  dateOfBirth: string;
 }
