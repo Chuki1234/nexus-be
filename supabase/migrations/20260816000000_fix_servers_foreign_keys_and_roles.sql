@@ -1,34 +1,41 @@
 -- ============================================================================
--- Migration: Bổ sung template_id cho servers và RPC tạo server kèm channels theo mẫu
+-- Migration: Sửa foreign key trỏ sang auth.users, bổ sung cột role và cập nhật RPC create_server_with_template
 -- ============================================================================
 
--- ---------------------------------------------------------------------------
--- 1. Bổ sung cột template_id vào bảng public.servers
--- ---------------------------------------------------------------------------
-alter table public.servers
-  add column if not exists template_id text not null default 'custom';
+-- 1. Bổ sung cột role cho bảng public.server_members
+alter table public.server_members
+  add column if not exists role text not null default 'OWNER';
 
--- Thêm check constraint cho template_id nếu chưa có
+-- 2. Thêm check constraint cho role trong server_members
 do $$
 begin
   if not exists (
     select 1 from pg_constraint
-    where conname = 'servers_template_id_check'
+    where conname = 'server_members_role_check'
   ) then
-    alter table public.servers
-      add constraint servers_template_id_check
-      check (template_id in ('custom', 'gaming', 'friends', 'study', 'school_club'));
+    alter table public.server_members
+      add constraint server_members_role_check
+      check (role in ('OWNER', 'ADMIN', 'MEMBER'));
   end if;
 end $$;
 
--- ---------------------------------------------------------------------------
--- 2. Hàm RPC PostgreSQL: create_server_with_template
---
--- Thực thi trọn vẹn trong một transaction nguyên tử:
--- 1. Tạo bản ghi server kèm template_id
--- 2. Tạo membership OWNER cho người tạo
--- 3. Duyệt mảng JSON p_channels và tạo toàn bộ kênh theo đúng tên, loại, thứ tự
--- ---------------------------------------------------------------------------
+-- 3. Sửa foreign key servers.owner_id trỏ sang auth.users(id)
+alter table public.servers
+  drop constraint if exists servers_owner_id_fkey;
+
+alter table public.servers
+  add constraint servers_owner_id_fkey
+  foreign key (owner_id) references auth.users (id) on delete cascade;
+
+-- 4. Sửa foreign key server_members.user_id trỏ sang auth.users(id)
+alter table public.server_members
+  drop constraint if exists server_members_user_id_fkey;
+
+alter table public.server_members
+  add constraint server_members_user_id_fkey
+  foreign key (user_id) references auth.users (id) on delete cascade;
+
+-- 5. Cập nhật hàm RPC create_server_with_template để tương thích kiểu channel_type enum
 create or replace function public.create_server_with_template(
   p_owner_id uuid,
   p_name text,
@@ -76,7 +83,7 @@ begin
   insert into public.server_members (server_id, user_id, role)
   values (v_server_id, p_owner_id, 'OWNER');
 
-  -- 3. Thêm toàn bộ kênh từ mảng JSON
+  -- 3. Thêm toàn bộ kênh từ mảng JSON (cast v_chan_type::channel_type)
   for v_channel in select * from jsonb_to_recordset(p_channels) as x(name text, type text, position integer)
   loop
     v_chan_name := trim(v_channel.name);
@@ -118,7 +125,7 @@ begin
 end;
 $$;
 
--- Thu hồi quyền execute từ public/anon/authenticated, chỉ cấp cho service_role
+-- Phân quyền thực thi
 revoke execute on function public.create_server_with_template(uuid, text, text, jsonb) from public;
 revoke execute on function public.create_server_with_template(uuid, text, text, jsonb) from anon;
 revoke execute on function public.create_server_with_template(uuid, text, text, jsonb) from authenticated;
