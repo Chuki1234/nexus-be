@@ -23,8 +23,14 @@ async function bootstrap() {
     }),
   );
 
+  // Trình duyệt gửi Origin không có dấu "/" cuối, còn cors so sánh chuỗi chính
+  // xác. Cắt sẵn khoảng trắng và "/" thừa để một dấu gõ nhầm trong .env không
+  // làm chết toàn bộ request từ frontend.
   app.enableCors({
-    origin: (process.env.CORS_ORIGINS ?? 'http://localhost:4200').split(','),
+    origin: (process.env.CORS_ORIGINS ?? 'http://localhost:4200')
+      .split(',')
+      .map((origin) => origin.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
   });
 
   await app.listen(process.env.PORT ?? 3000);
