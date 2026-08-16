@@ -1,6 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { normalizeCorsOrigins } from './common/utils/cors.util';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -19,8 +20,21 @@ async function bootstrap() {
     }),
   );
 
+  const allowedOrigins = normalizeCorsOrigins(process.env.CORS_ORIGINS);
+
   app.enableCors({
-    origin: (process.env.CORS_ORIGINS ?? 'http://localhost:4200').split(','),
+    origin: (origin, callback) => {
+      // Cho phép request không có origin (server-to-server, curl, Postman)
+      // hoặc origin trùng khớp sau khi chuẩn hóa
+      if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ''))) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origin ${origin} is not allowed by CORS`));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Accept'],
   });
 
   await app.listen(process.env.PORT ?? 3000);
