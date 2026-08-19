@@ -8,10 +8,15 @@ import {
   MinLength,
 } from 'class-validator';
 import { IsBirthdate } from '../../../common/decorators/is-birthdate.decorator';
+import {
+  DISPLAY_NAME_MAX_LENGTH,
+  MIN_AGE_YEARS,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  USERNAME_PATTERN,
+} from '../../../shared/dto/auth';
 
-/** Giữ khớp với `profiles_username_format` trong migration create_profiles. */
-export const USERNAME_PATTERN = /^[a-z0-9_.]{3,32}$/;
-export const MIN_AGE_YEARS = 13;
+export { MIN_AGE_YEARS, USERNAME_PATTERN };
 
 const trim = ({ value }: TransformFnParams): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -43,17 +48,23 @@ export class RegisterDto {
   @Transform(emptyToUndefined)
   @IsOptional()
   @IsString({ message: 'Tên hiển thị không hợp lệ.' })
-  @MaxLength(32, { message: 'Tên hiển thị tối đa 32 ký tự.' })
+  @MaxLength(DISPLAY_NAME_MAX_LENGTH, {
+    message: `Tên hiển thị tối đa ${DISPLAY_NAME_MAX_LENGTH} ký tự.`,
+  })
   displayName?: string;
 
   @IsString({ message: 'Mật khẩu không hợp lệ.' })
-  @MinLength(8, { message: 'Mật khẩu phải có ít nhất 8 ký tự.' })
+  @MinLength(PASSWORD_MIN_LENGTH, {
+    message: `Mật khẩu phải có ít nhất ${PASSWORD_MIN_LENGTH} ký tự.`,
+  })
   // Supabase băm bằng bcrypt, vốn chỉ tính 72 byte đầu — cắt ở đây cho rõ ràng.
-  @MaxLength(72, { message: 'Mật khẩu tối đa 72 ký tự.' })
+  @MaxLength(PASSWORD_MAX_LENGTH, {
+    message: `Mật khẩu tối đa ${PASSWORD_MAX_LENGTH} ký tự.`,
+  })
   password: string;
 
   @IsBirthdate(MIN_AGE_YEARS, {
     message: `Ngày sinh không hợp lệ hoặc bạn chưa đủ ${MIN_AGE_YEARS} tuổi.`,
   })
-  birthdate: string;
+  dateOfBirth: string;
 }

@@ -34,7 +34,9 @@ export class SupabaseAuthGuard implements CanActivate {
 
     const { data, error } = await this.supabase.client.auth.getUser(token);
     if (error || !data.user) {
-      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ hoặc đã hết hạn.');
+      throw new UnauthorizedException(
+        'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.',
+      );
     }
 
     request.user = data.user;
