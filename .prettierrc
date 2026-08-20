@@ -1,4 +1,15 @@
 {
   "singleQuote": true,
-  "trailingComma": "all"
+  "trailingComma": "all",
+  "overrides": [
+    {
+      "comment": "src/shared được nhân bản y hệt sang nexus-fe, mà hai repo có printWidth khác nhau. Phải ghim cùng một cấu hình ở đây và ở nexus-fe/.prettierrc, nếu không mỗi bên format ra một kiểu và check:shared sẽ luôn báo lệch.",
+      "files": "src/shared/**/*.ts",
+      "options": {
+        "printWidth": 100,
+        "singleQuote": true,
+        "trailingComma": "all"
+      }
+    }
+  ]
 }
