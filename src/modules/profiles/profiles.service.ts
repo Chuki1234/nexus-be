@@ -13,42 +13,23 @@ import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { SEARCH_RESULT_LIMIT } from './dto/search-profiles.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
-export interface ProfileLink {
-  label: string;
-  url: string;
-}
+// Hình dạng dữ liệu trả ra lấy từ `src/shared/` — thư mục được nhân bản y hệt
+// sang nexus-fe (`npm run check:shared` canh cho không lệch). Khai báo lại ở
+// đây thì frontend sẽ chép tay một bản khác và hai bên trôi khỏi nhau, đúng
+// thứ mà `shared/` sinh ra để ngăn.
+export type {
+  OwnProfile,
+  ProfileLink,
+  ProfileSummary,
+  PublicProfile,
+} from '../../shared';
 
-/** Phần hồ sơ ai đăng nhập cũng xem được. */
-export interface PublicProfile {
-  id: string;
-  username: string;
-  displayName: string | null;
-  avatarUrl: string | null;
-  bannerUrl: string | null;
-  statusMessage: string | null;
-  bio: string | null;
-  location: string | null;
-  links: ProfileLink[];
-  /** Màu accent người dùng tự chọn. `null` = tự động (băm từ username). */
-  accentColor: string | null;
-  createdAt: string;
-  /** True khi người xem chính là chủ hồ sơ — frontend dựa vào đây để hiện nút sửa. */
-  isSelf: boolean;
-}
-
-/** Hồ sơ của chính mình: có thêm trường không công khai. */
-export interface OwnProfile extends PublicProfile {
-  /** Định dạng `YYYY-MM-DD`. Không trả về trong hồ sơ của người khác. */
-  birthdate: string;
-}
-
-/** Kết quả tìm kiếm — chỉ đủ để vẽ một dòng gợi ý. */
-export interface ProfileSummary {
-  id: string;
-  username: string;
-  displayName: string | null;
-  avatarUrl: string | null;
-}
+import type {
+  OwnProfile,
+  ProfileLink,
+  ProfileSummary,
+  PublicProfile,
+} from '../../shared';
 
 interface ProfileRow {
   id: string;
