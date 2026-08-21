@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import type { User } from '@supabase/supabase-js';
 import type { Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
@@ -273,6 +274,32 @@ export class AuthService {
       username: dto.username,
       displayName,
     };
+  }
+
+  /**
+   * Xóa auth user trước; khóa ngoại của dữ liệu thuộc người dùng phải cascade.
+   * Dọn hồ sơ lần nữa để tương thích với môi trường cũ chưa bật cascade.
+   */
+  async deleteAccount(user: User, confirmationEmail: string): Promise<void> {
+    if (!user.email || user.email.toLowerCase() !== confirmationEmail.toLowerCase()) {
+      throw new UnauthorizedException('Email xác nhận không khớp với tài khoản hiện tại.');
+    }
+
+    const { error } = await this.supabase.client.auth.admin.deleteUser(user.id);
+    if (error) {
+      this.logger.error(`Xóa tài khoản ${user.id} thất bại: ${error.message}`);
+      throw new InternalServerErrorException(
+        'Không xóa được tài khoản. Vui lòng thử lại.',
+      );
+    }
+
+    const { error: profileError } = await this.supabase.client
+      .from('profiles')
+      .delete()
+      .eq('id', user.id);
+    if (profileError) {
+      this.logger.warn(`Không dọn được hồ sơ ${user.id}: ${profileError.message}`);
+    }
   }
 
   private async rollbackUser(userId: string): Promise<void> {
