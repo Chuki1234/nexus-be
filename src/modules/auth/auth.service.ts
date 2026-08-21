@@ -126,8 +126,9 @@ export class AuthService {
    * không" chính là công cụ dò tài khoản.
    */
   async login(dto: LoginDto): Promise<LoginSession> {
+    const cleanIdentifier = dto.identifier.trim();
     const email =
-      (await this.resolveEmail(dto.identifier)) ?? UNRESOLVABLE_EMAIL;
+      (await this.resolveEmail(cleanIdentifier)) ?? UNRESOLVABLE_EMAIL;
 
     const { data, error } =
       await this.supabase.authClient.auth.signInWithPassword({
@@ -191,14 +192,15 @@ export class AuthService {
 
   /** Có '@' thì coi là email; ngược lại tra tên đăng nhập. Null nếu không có ai. */
   private async resolveEmail(identifier: string): Promise<string | null> {
-    if (identifier.includes('@')) {
-      return identifier.toLowerCase();
+    const clean = identifier.trim().toLowerCase();
+    if (clean.includes('@')) {
+      return clean;
     }
 
     const { data, error } = await this.supabase.client
       .from('profiles')
       .select('email')
-      .eq('username', identifier.toLowerCase())
+      .eq('username', clean)
       .maybeSingle<{ email: string }>();
 
     if (error) {
@@ -206,6 +208,21 @@ export class AuthService {
       return null;
     }
     return data?.email ?? null;
+  }
+
+  /** Kiểm tra xem tên đăng nhập đã được ai sử dụng chưa. */
+  async isUsernameTaken(username: string): Promise<boolean> {
+    const { data, error } = await this.supabase.client
+      .from('profiles')
+      .select('id')
+      .eq('username', username.toLowerCase())
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(`Kiểm tra tên đăng nhập thất bại: ${error.message}`);
+      return false;
+    }
+    return !!data;
   }
 
   /**
