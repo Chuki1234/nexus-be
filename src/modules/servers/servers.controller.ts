@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -11,12 +12,15 @@ import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { ServerTemplateDefinition } from './constants/server-templates.constant';
+import { CreateChannelDto } from './dto/create-channel.dto';
 import { CreateServerDto } from './dto/create-server.dto';
 import {
+  ChannelSummaryDto,
   CreateServerResponseDto,
   ServerWithChannelsDto,
 } from './dto/server-response.dto';
 import { ServersService } from './servers.service';
+
 
 @Controller('servers')
 @UseGuards(SupabaseAuthGuard)
@@ -59,7 +63,23 @@ export class ServersController {
   listServers(@CurrentUser() user: User): Promise<ServerWithChannelsDto[]> {
     return this.servers.listUserServers(user.id);
   }
+
+  /**
+   * POST /api/servers/:serverId/channels
+   *
+   * Tạo kênh mới (chữ hoặc thoại) trong máy chủ.
+   */
+  @Post(':serverId/channels')
+  @HttpCode(HttpStatus.CREATED)
+  createChannel(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: CreateChannelDto,
+  ): Promise<ChannelSummaryDto> {
+    return this.servers.createChannel(user.id, serverId, dto);
+  }
 }
+
 
 /**
  * Controller bổ sung để hỗ trợ trực tiếp endpoint GET /api/server-templates.

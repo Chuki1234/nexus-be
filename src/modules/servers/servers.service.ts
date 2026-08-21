@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -10,11 +11,14 @@ import {
   SERVER_TEMPLATES,
   ServerTemplateDefinition,
 } from './constants/server-templates.constant';
+import { CreateChannelDto } from './dto/create-channel.dto';
 import { CreateServerDto } from './dto/create-server.dto';
 import {
+  ChannelSummaryDto,
   CreateServerResponseDto,
   ServerWithChannelsDto,
 } from './dto/server-response.dto';
+
 
 interface RawServerRow {
   id: string;
@@ -202,4 +206,112 @@ export class ServersService {
       };
     });
   }
+
+  /**
+   * Tạo kênh mới trong một máy chủ cụ thể:
+   * 1. Kiểm tra user có phải thành viên của server đó không
+   * 2. Tính position tự động tăng
+   * 3. Insert vào bảng `public.channels`
+   */
+  async createChannel(
+    userId: string,
+    serverId: string,
+    dto: CreateChannelDto,
+  ): Promise<ChannelSummaryDto> {
+    const trimmedName = dto.name?.trim();
+    if (!trimmedName || trimmedName.length > 100) {
+      throw new BadRequestException('Tên kênh phải từ 1 đến 100 ký tự.');
+    }
+
+    if (dto.type !== 'text' && dto.type !== 'voice') {
+      throw new BadRequestException('Loại kênh chỉ có thể là "text" hoặc "voice".');
+    }
+
+    // 1. Kiểm tra membership trong server_members
+    const { data: membership, error: memberError } =
+      await this.supabase.client
+        .from('server_members')
+        .select('server_id')
+        .eq('server_id', serverId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (memberError) {
+      this.logger.error(
+        `Kiểm tra server membership thất bại: ${memberError.message}`,
+      );
+      throw new InternalServerErrorException('Lỗi xác thực thành viên máy chủ.');
+    }
+
+    if (!membership) {
+      throw new ForbiddenException(
+        'Bạn không có quyền tạo kênh trong máy chủ này (chưa tham gia máy chủ).',
+      );
+    }
+
+    // 2. Lấy position lớn nhất hiện có của channels trong server
+    const { data: maxPosChannels, error: posError } =
+      await this.supabase.client
+        .from('channels')
+        .select('position')
+        .eq('server_id', serverId)
+        .order('position', { ascending: false })
+        .limit(1);
+
+    if (posError) {
+      this.logger.error(`Lấy max position thất bại: ${posError.message}`);
+      throw new InternalServerErrorException('Không lấy được thứ tự kênh.');
+    }
+
+    const nextPosition =
+      maxPosChannels && maxPosChannels.length > 0
+        ? (maxPosChannels[0].position ?? 0) + 1
+        : 0;
+
+    // 3. Insert channel vào database
+    const trimmedTopic = dto.topic ? dto.topic.trim() : null;
+    const { data: createdChannel, error: insertError } =
+      await this.supabase.client
+        .from('channels')
+        .insert({
+          server_id: serverId,
+          name: trimmedName,
+          type: dto.type,
+          topic: trimmedTopic,
+          position: nextPosition,
+        })
+        .select('id, name, type, topic, position')
+        .single();
+
+    if (insertError) {
+      this.logger.error(`Tạo channel thất bại: ${insertError.message}`);
+      if (
+        insertError.code === '42P01' ||
+        insertError.message?.includes('relation')
+      ) {
+        throw new ServiceUnavailableException(
+          'Cơ sở dữ liệu chưa sẵn sàng: Bảng channels chưa được tạo trên Supabase.',
+        );
+      }
+      throw new InternalServerErrorException('Không thể tạo kênh trên cơ sở dữ liệu.');
+    }
+
+    if (!createdChannel) {
+      throw new InternalServerErrorException(
+        'Không nhận được dữ liệu phản hồi sau khi tạo kênh.',
+      );
+    }
+
+    return {
+      id: createdChannel.id,
+      name: createdChannel.name,
+      type: (createdChannel.type === 'voice' ? 'voice' : 'text') as
+        | 'text'
+        | 'voice',
+      topic: createdChannel.topic ?? null,
+      unread: false,
+      mentionCount: 0,
+    };
+  }
 }
+

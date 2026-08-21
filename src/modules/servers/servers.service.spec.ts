@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ForbiddenException,
   InternalServerErrorException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { SERVER_TEMPLATES } from './constants/server-templates.constant';
@@ -291,4 +293,123 @@ describe('ServersService', () => {
       ]);
     });
   });
+
+  describe('createChannel', () => {
+    it('should create a channel successfully if user is a server member', async () => {
+      const dto = {
+        name: 'thảo-luận-mới',
+        type: 'text' as const,
+        topic: 'Thảo luận các chủ đề mới',
+      };
+
+      const mockMembership = { server_id: 'server-1' };
+      const mockMaxPos = [{ position: 2 }];
+      const mockCreated = {
+        id: 'c-new-1',
+        name: 'thảo-luận-mới',
+        type: 'text',
+        topic: 'Thảo luận các chủ đề mới',
+        position: 3,
+      };
+
+      supabaseService.client.from.mockImplementation((table: string) => {
+        if (table === 'server_members') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn().mockResolvedValue({
+                    data: mockMembership,
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'channels') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                order: jest.fn().mockReturnValue({
+                  limit: jest.fn().mockResolvedValue({
+                    data: mockMaxPos,
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+            insert: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnValue({
+                single: jest.fn().mockResolvedValue({
+                  data: mockCreated,
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        return {};
+      });
+
+      const result = await service.createChannel('user-1', 'server-1', dto);
+
+      expect(result).toEqual({
+        id: 'c-new-1',
+        name: 'thảo-luận-mới',
+        type: 'text',
+        topic: 'Thảo luận các chủ đề mới',
+        unread: false,
+        mentionCount: 0,
+      });
+    });
+
+    it('should throw ForbiddenException if user is not in server_members', async () => {
+      const dto = {
+        name: 'kenh-cam',
+        type: 'text' as const,
+      };
+
+      supabaseService.client.from.mockImplementation((table: string) => {
+        if (table === 'server_members') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn().mockResolvedValue({
+                    data: null,
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        return {};
+      });
+
+      await expect(
+        service.createChannel('user-stranger', 'server-1', dto),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should throw BadRequestException if channel name is empty', async () => {
+      await expect(
+        service.createChannel('user-1', 'server-1', {
+          name: '   ',
+          type: 'text',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw BadRequestException if channel type is invalid', async () => {
+      await expect(
+        service.createChannel('user-1', 'server-1', {
+          name: 'kenh-loi',
+          type: 'invalid-type' as any,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
 });
+

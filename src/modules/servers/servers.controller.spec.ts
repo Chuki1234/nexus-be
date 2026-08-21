@@ -24,7 +24,9 @@ describe('ServersController', () => {
       getTemplates: jest.fn().mockReturnValue(SERVER_TEMPLATES),
       createServer: jest.fn(),
       listUserServers: jest.fn(),
+      createChannel: jest.fn(),
     };
+
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ServersController, ServerTemplatesController],
@@ -133,4 +135,34 @@ describe('ServersController', () => {
       expect(result).toEqual(expectedServers);
     });
   });
+
+  describe('createChannel', () => {
+    it('should call serversService.createChannel with user id, server id and dto', async () => {
+      const dto = {
+        name: 'kênh-mới',
+        type: 'text' as const,
+        topic: 'Chủ đề kênh',
+      };
+      const expectedChannel = {
+        id: 'chan-new-1',
+        name: 'kênh-mới',
+        type: 'text' as const,
+        topic: 'Chủ đề kênh',
+        unread: false,
+        mentionCount: 0,
+      };
+
+      serversService.createChannel.mockResolvedValue(expectedChannel);
+
+      const result = await controller.createChannel(mockUser, 'server-1', dto);
+
+      expect(serversService.createChannel).toHaveBeenCalledWith(
+        'user-123',
+        'server-1',
+        dto,
+      );
+      expect(result).toEqual(expectedChannel);
+    });
+  });
 });
+
