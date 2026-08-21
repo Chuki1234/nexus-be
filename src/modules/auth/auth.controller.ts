@@ -5,12 +5,14 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
+import { USERNAME_PATTERN } from '../../shared/dto/auth';
 import {
   AuthService,
   LoginSession,
@@ -23,10 +25,33 @@ import { RegisterDto } from './dto/register.dto';
 
 /** Đủ cho người gõ nhầm vài lần, không đủ để dò mật khẩu. */
 const STRICT_RATE_LIMIT = { default: { limit: 5, ttl: 60_000 } };
+const CHECK_USERNAME_LIMIT = { default: { limit: 60, ttl: 60_000 } };
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
+
+  /**
+   * GET /api/auth/check-username?username=...
+   *
+   * Kiểm tra tên đăng nhập đã được dùng chưa theo thời gian thực.
+   */
+  @Get('check-username')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(CHECK_USERNAME_LIMIT)
+  async checkUsername(
+    @Query('username') username: string,
+  ): Promise<{ available: boolean }> {
+    if (!username || typeof username !== 'string') {
+      return { available: false };
+    }
+    const clean = username.trim().toLowerCase();
+    if (!USERNAME_PATTERN.test(clean)) {
+      return { available: false };
+    }
+    const isTaken = await this.auth.isUsernameTaken(clean);
+    return { available: !isTaken };
+  }
 
   /**
    * POST /api/auth/register
@@ -35,7 +60,6 @@ export class AuthController {
    */
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  @Throttle(STRICT_RATE_LIMIT)
   register(@Body() dto: RegisterDto): Promise<RegisteredUser> {
     return this.auth.register(dto);
   }
@@ -50,7 +74,6 @@ export class AuthController {
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle(STRICT_RATE_LIMIT)
   login(@Body() dto: LoginDto): Promise<LoginSession> {
     return this.auth.login(dto);
   }

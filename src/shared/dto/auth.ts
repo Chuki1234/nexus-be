@@ -63,5 +63,7 @@ export const USERNAME_PATTERN = /^[a-z0-9_.]{3,32}$/;
 export const PASSWORD_MIN_LENGTH = 8;
 /** Supabase băm bằng bcrypt, vốn chỉ tính 72 byte đầu. */
 export const PASSWORD_MAX_LENGTH = 72;
+/** Mật khẩu phải chứa ít nhất một chữ cái và một số */
+export const PASSWORD_PATTERN = /^(?=.*[a-zA-Z])(?=.*\d)/;
 export const DISPLAY_NAME_MAX_LENGTH = 32;
 export const MIN_AGE_YEARS = 13;
