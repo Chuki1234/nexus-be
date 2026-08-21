@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -20,6 +21,7 @@ import {
   RegisteredUser,
 } from './auth.service';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 
@@ -110,5 +112,16 @@ export class AuthController {
       { id: user.id, email: user.email ?? null },
       dto,
     );
+  }
+
+  /** Xóa vĩnh viễn tài khoản của chính người đang đăng nhập. */
+  @Delete('account')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(SupabaseAuthGuard)
+  async deleteAccount(
+    @CurrentUser() user: User,
+    @Body() dto: DeleteAccountDto,
+  ): Promise<void> {
+    await this.auth.deleteAccount(user, dto.email);
   }
 }
