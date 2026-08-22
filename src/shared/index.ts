@@ -14,3 +14,4 @@ export * from './permissions';
 export * from './socket-events';
 export * from './dto/auth';
 export * from './dto/common';
+export * from './dto/profile';

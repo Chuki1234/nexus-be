@@ -13,6 +13,7 @@ import {
   MIN_AGE_YEARS,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
+  PASSWORD_PATTERN,
   USERNAME_PATTERN,
 } from '../../../shared/dto/auth';
 
@@ -56,6 +57,9 @@ export class RegisterDto {
   @IsString({ message: 'Mật khẩu không hợp lệ.' })
   @MinLength(PASSWORD_MIN_LENGTH, {
     message: `Mật khẩu phải có ít nhất ${PASSWORD_MIN_LENGTH} ký tự.`,
+  })
+  @Matches(PASSWORD_PATTERN, {
+    message: 'Mật khẩu phải bao gồm cả chữ cái và số.',
   })
   // Supabase băm bằng bcrypt, vốn chỉ tính 72 byte đầu — cắt ở đây cho rõ ràng.
   @MaxLength(PASSWORD_MAX_LENGTH, {

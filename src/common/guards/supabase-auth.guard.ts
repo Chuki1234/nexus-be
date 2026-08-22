@@ -2,6 +2,7 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
@@ -22,6 +23,8 @@ export interface AuthenticatedRequest extends Request {
  */
 @Injectable()
 export class SupabaseAuthGuard implements CanActivate {
+  private readonly logger = new Logger(SupabaseAuthGuard.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -34,6 +37,13 @@ export class SupabaseAuthGuard implements CanActivate {
 
     const { data, error } = await this.supabase.client.auth.getUser(token);
     if (error || !data.user) {
+      // Ghi lại lỗi gốc: không phải 401 nào cũng do token của người dùng. Sai
+      // SUPABASE_SERVICE_ROLE_KEY (hoặc key của project khác) cũng rơi vào đây
+      // với message "Invalid API key" — không log thì mọi request đều báo
+      // "phiên hết hạn" và người sửa lỗi đi tìm nhầm phía frontend.
+      this.logger.warn(
+        `Xác thực token thất bại: ${error?.message ?? 'không có user'}`,
+      );
       throw new UnauthorizedException(
         'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.',
       );

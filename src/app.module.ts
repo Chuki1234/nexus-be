@@ -6,6 +6,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { SupabaseModule } from './infra/supabase/supabase.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { ProfilesModule } from './modules/profiles/profiles.module';
 import { ServersModule } from './modules/servers/servers.module';
 import { VoiceModule } from './modules/voice/voice.module';
 import { FriendsModule } from './modules/friends/friends.module';
@@ -20,6 +21,7 @@ import { MessagesModule } from './modules/messages/messages.module';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     SupabaseModule,
     AuthModule,
+    ProfilesModule,
     ServersModule,
     VoiceModule,
     FriendsModule,
