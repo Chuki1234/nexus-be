@@ -186,7 +186,85 @@ Thay luồng “Thêm bạn” UI preview bằng dữ liệu thật qua Angular 
 - **Test BE:** service/controller cover 201/200/204 và 400/401/404/409, Supabase error mapping, không lộ dữ liệu nhạy cảm.
 - **Test FE:** form submit, pending, error, incoming/outgoing, accept/reject/cancel, demo-off dùng API thật.
 - Chạy `npm test` và `npm run build` ở cả nexus-fe và nexus-be; chạy `npm run check:shared` nếu sửa type dùng chung.
-- Không commit/push; Tài tự kiểm tra và commit.
+---
+
+### Phase DM-1 — Direct Messages: Conversations & Messages REST API
+
+Status: APPROVED
+
+> **Gate:** Đã duyệt bởi người dùng. Chỉ triển khai backend REST API, validation, phân quyền thành viên và unit test.
+>
+> 1. **Conversations REST Module (`src/modules/conversations/**`):**
+>    - `POST /api/conversations/dm`: Nhận `recipientId`, kiểm tra quan hệ bạn bè (`friendships` status = 'accepted'). Nếu đã có conversation giữa 2 người (dựa trên unique `dm_key = min(A,B) + ':' + max(A,B)`), trả về conversation hiện có; nếu chưa có, tạo mới và thêm cả 2 vào `conversation_participants`.
+>    - `GET /api/conversations`: Lấy danh sách DM của user hiện tại (kèm thông tin profile người bên kia và `unread_count` từ `read_states`).
+>    - `GET /api/conversations/:id`: Lấy chi tiết conversation, kiểm tra requester thuộc `conversation_participants` (nếu không thuộc trả 403 Forbidden).
+> 2. **Messages REST Module (`src/modules/messages/**`):**
+>    - Dùng chung `MessagesService` cho cả REST và Gateway (Phase DM-2).
+>    - `GET /api/conversations/:id/messages`: Tải lịch sử tin nhắn dùng Cursor Pagination (`id < $before ORDER BY id DESC LIMIT $limit`), kiểm tra quyền thành viên.
+>    - `POST /api/conversations/:id/messages`: Gửi tin nhắn mới có `client_nonce` (idempotency key chống gửi trùng), kiểm tra nội dung không rỗng (max 4000 ký tự), lưu vào DB và trả về message record đầy đủ.
+>    - `PATCH /api/messages/:id`: Sửa tin nhắn (chỉ cho phép chính tác giả `author_id`, set `edited_at = now()`).
+>    - `DELETE /api/messages/:id`: Xóa tin nhắn (soft delete: set `deleted_at = now()`, content được ẩn hoặc giữ trạng thái đã xóa).
+>    - `POST /api/conversations/:id/read`: Đánh dấu đã đọc, upsert vào `read_states` (`last_read_message_id = $messageId`).
+> 3. **Validation & Authorization:**
+>    - Bảo vệ bằng `SupabaseAuthGuard` (verify JWT qua Supabase Auth).
+>    - Chống tự nhắn tin cho chính mình (`recipientId !== user.id`).
+>    - DTO validation: `@IsString()`, `@IsNotEmpty()`, `@MaxLength(4000)`, `@IsUUID()`.
+
+#### File dự kiến thực hiện
+
+- `nexus-be/src/modules/conversations/conversations.module.ts`
+- `nexus-be/src/modules/conversations/conversations.controller.ts` & `spec.ts`
+- `nexus-be/src/modules/conversations/conversations.service.ts` & `spec.ts`
+- `nexus-be/src/modules/conversations/dto/*.ts`
+- `nexus-be/src/modules/messages/messages.module.ts`
+- `nexus-be/src/modules/messages/messages.controller.ts` & `spec.ts`
+- `nexus-be/src/modules/messages/messages.service.ts` & `spec.ts`
+- `nexus-be/src/modules/messages/dto/*.ts`
+- `nexus-be/src/app.module.ts`
+
+---
+
+### Phase DM-2 — Direct Messages: Realtime WebSocket Gateway (Socket.IO)
+
+Status: PENDING
+
+> Tích hợp Socket.IO Gateway hai chiều cho tin nhắn và trạng thái realtime:
+>
+> 1. **Handshake & Auth:** Xác thực socket connection bằng Supabase JWT access token từ query/auth headers.
+> 2. **Room Management:** `conversation:join`, `conversation:leave` (room `conversation:{id}`). Xác thực thành viên trước khi cho phép join.
+> 3. **Tin nhắn Realtime:**
+>    - Nhận `message:send` với `clientMessageId`, gọi qua `MessagesService` lưu DB.
+>    - Trả ACK cho người gửi gồm `{ id, clientMessageId, conversationId, createdAt, status }`.
+>    - Broadcast `message:created` tới room `conversation:{id}`.
+>    - Broadcast `message:edited`, `message:deleted`, `message:read`.
+> 4. **Typing Indicator:** `typing:start`, `typing:stop` broadcast tới room (in-memory, không lưu DB).
+
+---
+
+### Phase DM-3 — Direct Messages: Frontend API Service & Realtime Store
+
+Status: PENDING
+
+> Dựng tầng Client giao tiếp REST & WebSocket trên Angular 21:
+>
+> 1. `ChatApiService`: Gọi REST API tải lịch sử, tạo/mở DM, sửa/xóa tin, đánh dấu đã đọc.
+> 2. `ChatSocketService`: Quản lý kết nối Socket.IO, auto-reconnect, resync tin nhắn sau reconnect, join room, optimistic message queue.
+> 3. Tích hợp `FriendRow`: Bấm nút nhắn tin từ danh sách bạn bè gọi `getOrCreateDm` có loading state, chống double click, và điều hướng vào `/channels/@me/:conversationId`.
+
+---
+
+### Phase DM-4 — Direct Messages: UI/UX Conversation Page & Realtime E2E
+
+Status: PENDING
+
+> Hoàn thiện giao diện trang DM `/channels/@me/:conversationId`:
+>
+> 1. Lịch sử tin nhắn thật từ DB qua cursor pagination khi cuộn lên trên (Infinite scroll).
+> 2. Optimistic UI: hiển thị ngay tin nhắn đang gửi $\rightarrow$ đã gửi $\rightarrow$ lỗi kèm nút thử lại.
+> 3. Realtime typing indicator ("... đang nhập").
+> 4. Sửa/xóa tin nhắn trực tiếp với `MessageActions`.
+> 5. Trạng thái kết nối: loading, empty, sending, failed, offline, reconnecting banner.
+> 6. Không phá vỡ demo mode preview; khi demo mode tắt, dùng 100% dữ liệu thật.
 
 ---
 

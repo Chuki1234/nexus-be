@@ -9,6 +9,8 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ServersModule } from './modules/servers/servers.module';
 import { VoiceModule } from './modules/voice/voice.module';
 import { FriendsModule } from './modules/friends/friends.module';
+import { ConversationsModule } from './modules/conversations/conversations.module';
+import { MessagesModule } from './modules/messages/messages.module';
 
 @Module({
   imports: [
@@ -21,6 +23,8 @@ import { FriendsModule } from './modules/friends/friends.module';
     ServersModule,
     VoiceModule,
     FriendsModule,
+    ConversationsModule,
+    MessagesModule,
   ],
   controllers: [AppController],
   providers: [
