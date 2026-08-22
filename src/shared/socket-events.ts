@@ -2,12 +2,12 @@
  * Hợp đồng sự kiện Socket.IO giữa Angular và NestJS.
  *
  * `CLAUDE.md`: mọi socket event phải có interface ở đây TRƯỚC khi implement.
- * Các phase P5 / P6 / P11 / C2 / C4 sẽ hiện thực dần, nhưng tên và hình dạng
+ * Các phase P5 / P6 / P11 / C2 / C4 / DM-2 hiện thực dần, nhưng tên và hình dạng
  * payload chốt từ bây giờ để hai bên không tự đặt tên lệch nhau.
  *
  * Hai thứ cố tình KHÔNG đi qua socket:
- *   - Gửi tin nhắn: dùng `POST /api/channels/:id/messages`. Socket chỉ để nhận.
- *     Gửi qua socket sẽ phải tự dựng lại ack/timeout/retry mà HTTP đã có sẵn.
+ *   - Gửi tin nhắn: dùng `POST /api/channels/:id/messages` hoặc `POST /api/conversations/:id/messages`.
+ *     Socket chỉ để nhận. Gửi qua HTTP có ack/timeout/retry/idempotency chuẩn.
  *   - Trạng thái bên trong phòng gọi: lấy từ sự kiện của LiveKit. Các event
  *     `voice:*` dưới đây chỉ phục vụ người ĐỨNG NGOÀI phòng.
  *
@@ -16,6 +16,17 @@
 
 /** `messages.id` là bigint — truyền dạng chuỗi để không mất chính xác trong JS. */
 export type MessageId = string;
+
+export interface AttachmentPayload {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number | null;
+  height: number | null;
+  signedUrl: string | null;
+  isAvailable?: boolean;
+}
 
 export interface MessagePayload {
   id: MessageId;
@@ -28,6 +39,7 @@ export interface MessagePayload {
   clientNonce: string | null;
   editedAt: string | null;
   deletedAt: string | null;
+  attachments?: AttachmentPayload[];
   createdAt: string;
 }
 
@@ -38,17 +50,26 @@ export interface NotificationPayload {
   createdAt: string;
 }
 
+export interface JoinConversationResponse {
+  success: boolean;
+  error?: string;
+  status?: 'joined' | 'queued' | 'disconnected' | 'rejected' | 'timeout';
+}
+
 // ---------------------------------------------------------------------------
 // Client → Server
 // ---------------------------------------------------------------------------
 
 export interface ClientToServerEvents {
-  /** Vào phòng của một channel để nhận tin realtime. */
-  'channel:join': (payload: { channelId: string }) => void;
-  'channel:leave': (payload: { channelId: string }) => void;
+  /** Vào phòng của một conversation để nhận tin realtime. */
+  'conversation:join': (
+    payload: { conversationId: string },
+    callback?: (response: JoinConversationResponse) => void,
+  ) => void;
+  'conversation:leave': (payload: { conversationId: string }) => void;
 
-  'typing:start': (payload: { channelId: string }) => void;
-  'typing:stop': (payload: { channelId: string }) => void;
+  'typing:start': (payload: { conversationId: string }) => void;
+  'typing:stop': (payload: { conversationId: string }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,15 +77,30 @@ export interface ClientToServerEvents {
 // ---------------------------------------------------------------------------
 
 export interface ServerToClientEvents {
-  'message:new': (payload: { message: MessagePayload }) => void;
+  /** Chuẩn hóa tên event tin nhắn duy nhất */
+  'message:created': (payload: { message: MessagePayload }) => void;
   'message:updated': (payload: { message: MessagePayload }) => void;
-  'message:deleted': (payload: { channelId: string; messageId: MessageId }) => void;
+  'message:deleted': (payload: {
+    channelId: string | null;
+    conversationId: string | null;
+    messageId: MessageId;
+  }) => void;
 
-  /** Danh sách người đang gõ trong channel, gửi lại toàn bộ chứ không gửi delta. */
-  'typing:update': (payload: { channelId: string; userIds: string[] }) => void;
+  'message:read': (payload: {
+    conversationId: string;
+    userId: string;
+    lastReadMessageId: MessageId;
+  }) => void;
+
+  /** Danh sách người đang gõ trong room, gửi lại toàn bộ chứ không gửi delta. */
+  'typing:updated': (payload: {
+    conversationId: string;
+    userIds: string[];
+  }) => void;
 
   'unread:update': (payload: {
-    channelId: string;
+    channelId?: string;
+    conversationId?: string;
     unreadCount: number;
     mentionCount: number;
   }) => void;
@@ -86,6 +122,7 @@ export interface ServerToClientEvents {
 /** Tên room trên server. Đặt tập trung để hai bên không tự ghép chuỗi lệch nhau. */
 export const Room = {
   channel: (channelId: string) => `channel:${channelId}`,
+  conversation: (conversationId: string) => `conversation:${conversationId}`,
   /** Kênh riêng của một user — dùng cho thông báo và chuông cuộc gọi. */
   user: (userId: string) => `user:${userId}`,
 } as const;

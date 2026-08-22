@@ -5,6 +5,17 @@ export interface MessageAuthorDto {
   avatarUrl: string | null;
 }
 
+export interface AttachmentResponseDto {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number | null;
+  height: number | null;
+  signedUrl: string | null;
+  isAvailable?: boolean;
+}
+
 export interface MessageResponseDto {
   id: string;
   channelId: string | null;
@@ -17,6 +28,7 @@ export interface MessageResponseDto {
   clientNonce: string | null;
   editedAt: string | null;
   deletedAt: string | null;
+  attachments?: AttachmentResponseDto[];
   createdAt: string;
 }
 

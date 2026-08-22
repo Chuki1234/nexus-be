@@ -48,6 +48,7 @@ export class ConversationsService {
   /**
    * Tạo hoặc lấy cuộc trò chuyện trực tiếp 1-1 duy nhất giữa hai người.
    * Yêu cầu: Hai người phải đã kết bạn (friendship status = 'accepted').
+   * Đảm bảo idempotent, chống race condition và tự động chữa lành conversation thiếu participants.
    */
   async getOrCreateDm(
     userId: string,
@@ -111,27 +112,56 @@ export class ConversationsService {
         .select('id, type, name, icon_url, owner_id, dm_key, created_at')
         .single();
 
-      if (createErr || !newConv) {
-        this.logger.error('Lỗi tạo conversation:', createErr);
+      if (createErr) {
+        // Xử lý race condition khi cả 2 user tạo đồng thời cùng một lúc (dm_key duplicate constraint)
+        const isDuplicate =
+          createErr.code === '23505' ||
+          createErr.message?.includes('duplicate key') ||
+          createErr.message?.includes('idx_conversations_dm_key');
+
+        if (isDuplicate) {
+          const { data: racedConv, error: raceErr } = await this.supabase.client
+            .from('conversations')
+            .select('id, type, name, icon_url, owner_id, dm_key, created_at')
+            .eq('dm_key', dmKey)
+            .single();
+
+          if (raceErr || !racedConv) {
+            this.logger.error('Lỗi lấy conversation sau race condition:', raceErr);
+            throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
+          }
+          conversation = racedConv as RawConversationRow;
+        } else {
+          this.logger.error('Lỗi tạo conversation:', createErr);
+          throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
+        }
+      } else if (!newConv) {
         throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
-      }
-
-      conversation = newConv as RawConversationRow;
-
-      // Thêm cả 2 vào conversation_participants
-      const { error: partErr } = await this.supabase.client
-        .from('conversation_participants')
-        .insert([
-          { conversation_id: conversation.id, user_id: userA },
-          { conversation_id: conversation.id, user_id: userB },
-        ]);
-
-      if (partErr) {
-        this.logger.error('Lỗi thêm participants:', partErr);
+      } else {
+        conversation = newConv as RawConversationRow;
       }
     }
 
-    // 3. Lấy thông tin profile người nhận
+    // 3. Đảm bảo cả 2 participant luôn tồn tại trong conversation_participants
+    // (kể cả conversation đã tồn tại trước đó nhưng bị thiếu participant mồ côi)
+    const { error: partErr } = await this.supabase.client
+      .from('conversation_participants')
+      .upsert(
+        [
+          { conversation_id: conversation.id, user_id: userA },
+          { conversation_id: conversation.id, user_id: userB },
+        ],
+        { onConflict: 'conversation_id,user_id', ignoreDuplicates: true },
+      );
+
+    if (partErr) {
+      this.logger.error('Lỗi đảm bảo participants vào conversation:', partErr);
+      throw new InternalServerErrorException(
+        'Lỗi liên kết người tham gia cuộc trò chuyện.',
+      );
+    }
+
+    // 4. Lấy thông tin profile người nhận
     const recipient = await this.getParticipantProfile(recipientId);
 
     return {
@@ -174,10 +204,14 @@ export class ConversationsService {
     }
 
     // 3. Lấy tất cả participants của các conversations này để tìm người đối thoại (nếu là DM)
-    const { data: allParts } = await this.supabase.client
+    const { data: allParts, error: allPartsErr } = await this.supabase.client
       .from('conversation_participants')
       .select('conversation_id, user_id')
-      .in('id', convIds);
+      .in('conversation_id', convIds);
+
+    if (allPartsErr) {
+      this.logger.error('Lỗi lấy all conversation_participants:', allPartsErr);
+    }
 
     const otherUserIds = new Set<string>();
     const convToOtherUser = new Map<string, string>();

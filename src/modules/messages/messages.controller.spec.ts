@@ -73,6 +73,7 @@ describe('MessagesController', () => {
       'user-123',
       'a0000000-0000-0000-0000-000000000001',
       { content: 'hello' },
+      undefined,
     );
     expect(res.id).toBe('msg-1');
   });
@@ -97,7 +98,7 @@ describe('MessagesController', () => {
     const res = await controller.markAsRead(
       mockUser,
       'a0000000-0000-0000-0000-000000000001',
-      '101',
+      { messageId: '101' },
     );
     expect(service.markAsRead).toHaveBeenCalledWith(
       'user-123',
@@ -105,5 +106,25 @@ describe('MessagesController', () => {
       '101',
     );
     expect(res.success).toBe(true);
+  });
+
+  it('gọi service.getAttachmentSignedUrl khi GET /api/conversations/:id/attachments/:attId/signed-url', async () => {
+    (service as unknown as { getAttachmentSignedUrl: jest.Mock }).getAttachmentSignedUrl = jest
+      .fn()
+      .mockResolvedValue({ signedUrl: 'https://storage.supabase.co/signed/file.png' });
+
+    const res = await controller.getAttachmentSignedUrl(
+      mockUser,
+      'a0000000-0000-0000-0000-000000000001',
+      'b0000000-0000-0000-0000-000000000002',
+    );
+    expect(
+      (service as unknown as { getAttachmentSignedUrl: jest.Mock }).getAttachmentSignedUrl,
+    ).toHaveBeenCalledWith(
+      'user-123',
+      'a0000000-0000-0000-0000-000000000001',
+      'b0000000-0000-0000-0000-000000000002',
+    );
+    expect(res.signedUrl).toBe('https://storage.supabase.co/signed/file.png');
   });
 });
