@@ -7,6 +7,8 @@ import { AppService } from './app.service';
 import { SupabaseModule } from './infra/supabase/supabase.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ServersModule } from './modules/servers/servers.module';
+import { VoiceModule } from './modules/voice/voice.module';
+import { FriendsModule } from './modules/friends/friends.module';
 
 @Module({
   imports: [
@@ -17,6 +19,8 @@ import { ServersModule } from './modules/servers/servers.module';
     SupabaseModule,
     AuthModule,
     ServersModule,
+    VoiceModule,
+    FriendsModule,
   ],
   controllers: [AppController],
   providers: [
