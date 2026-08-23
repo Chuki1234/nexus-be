@@ -358,6 +358,36 @@ export class ConversationsService {
     return data.map((p) => p.user_id as string);
   }
 
+  async getDmPeerUserIds(userId: string): Promise<string[]> {
+    try {
+      const { data: myParts, error: myErr } = await this.supabase.client
+        .from('conversation_participants')
+        .select('conversation_id')
+        .eq('user_id', userId);
+
+      if (myErr || !myParts || myParts.length === 0) return [];
+
+      const convIds = myParts.map((p) => p.conversation_id as string);
+      const { data: allParts, error: allErr } = await this.supabase.client
+        .from('conversation_participants')
+        .select('user_id')
+        .in('conversation_id', convIds)
+        .neq('user_id', userId);
+
+      if (allErr || !allParts) return [];
+
+      const peerIds = new Set<string>();
+      for (const p of allParts) {
+        if (p.user_id) {
+          peerIds.add(p.user_id as string);
+        }
+      }
+      return Array.from(peerIds);
+    } catch {
+      return [];
+    }
+  }
+
   private async getParticipantProfile(
     profileId: string,
   ): Promise<ConversationParticipantProfile> {

@@ -53,6 +53,7 @@ export interface MessagePayload {
   clientNonce: string | null;
   editedAt: string | null;
   deletedAt: string | null;
+  isForwarded: boolean;
   attachments?: AttachmentPayload[];
   reactions?: ReactionSummaryPayload[];
   createdAt: string;
@@ -78,6 +79,19 @@ export interface NotificationPayload {
   createdAt: string;
 }
 
+import type { PresenceStatus } from './dto/common';
+export type { PresenceStatus };
+
+export interface PresenceUpdatedPayload {
+  userId: string;
+  status: PresenceStatus;
+  lastSeenAt: string | null;
+}
+
+export interface PresenceSyncPayload {
+  presences: Record<string, { status: PresenceStatus; lastSeenAt: string | null }>;
+}
+
 export interface JoinConversationResponse {
   success: boolean;
   error?: string;
@@ -98,6 +112,11 @@ export interface ClientToServerEvents {
 
   'typing:start': (payload: { conversationId: string }) => void;
   'typing:stop': (payload: { conversationId: string }) => void;
+
+  /** Yêu cầu lấy snapshot trạng thái của bạn bè và DM peers */
+  'presence:get-snapshot': (
+    callback?: (response: PresenceSyncPayload) => void,
+  ) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +124,11 @@ export interface ClientToServerEvents {
 // ---------------------------------------------------------------------------
 
 export interface ServerToClientEvents {
+  /** Cập nhật trạng thái hiện diện realtime */
+  'presence:updated': (payload: PresenceUpdatedPayload) => void;
+  /** Đồng bộ toàn bộ snapshot hiện diện ban đầu */
+  'presence:sync': (payload: PresenceSyncPayload) => void;
+
   /** Chuẩn hóa tên event tin nhắn duy nhất */
   'message:created': (payload: { message: MessagePayload }) => void;
   'message:updated': (payload: { message: MessagePayload }) => void;

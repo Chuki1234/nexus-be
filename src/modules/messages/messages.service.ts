@@ -14,6 +14,7 @@ import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import type { EditMessageDto } from './dto/edit-message.dto';
+import type { ForwardMessageDto } from './dto/forward-message.dto';
 import type { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import type {
   AttachmentResponseDto,
@@ -32,6 +33,7 @@ interface RawMessageRow {
   author_id: string | null;
   type: 'default' | 'system_join' | 'system_leave';
   content: string | null;
+  is_forwarded?: boolean | null;
   reply_to_id: number | string | null;
   client_nonce: string | null;
   edited_at: string | null;
@@ -58,6 +60,8 @@ interface RawAttachmentRow {
   created_at: string;
 }
 
+import { validateDocxBuffer } from './utils/docx-validator.util';
+
 const ALLOWED_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -67,6 +71,7 @@ const ALLOWED_MIME_TYPES = new Set([
   'text/plain',
   'application/zip',
   'application/x-zip-compressed',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
 
 const MIME_EXTENSION_MAP: Record<string, string> = {
@@ -78,6 +83,7 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   'text/plain': '.txt',
   'application/zip': '.zip',
   'application/x-zip-compressed': '.zip',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
 };
 
 function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
@@ -125,6 +131,9 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
         buffer[2] === 0x05 &&
         buffer[3] === 0x06)
     );
+  }
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return validateDocxBuffer(buffer).valid;
   }
   if (mimeType === 'text/plain') {
     return !buffer.includes(0x00);
@@ -321,6 +330,7 @@ export class MessagesService {
         author: m.author_id ? authorMap.get(m.author_id) : undefined,
         type: m.type,
         content: m.deleted_at ? null : m.content,
+        isForwarded: Boolean(m.is_forwarded),
         replyToId: m.reply_to_id ? m.reply_to_id.toString() : null,
         clientNonce: m.client_nonce,
         editedAt: m.edited_at,
@@ -530,6 +540,15 @@ export class MessagesService {
 
     // Validate từng file & an toàn ảnh qua sharp
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    const MAX_TOTAL_FILE_SIZE = 30 * 1024 * 1024; // 30MB
+
+    const totalBatchSize = uploadFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+    if (totalBatchSize > MAX_TOTAL_FILE_SIZE) {
+      throw new BadRequestException(
+        'Tổng dung lượng các tệp đính kèm vượt quá giới hạn 30MB.',
+      );
+    }
+
     const processedMetadata: {
       file: Express.Multer.File;
       normalizedFilename: string;
@@ -553,7 +572,14 @@ export class MessagesService {
         );
       }
 
-      if (!checkMagicBytes(f.buffer, f.mimetype)) {
+      if (f.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const docxCheck = validateDocxBuffer(f.buffer);
+        if (!docxCheck.valid) {
+          throw new BadRequestException(
+            `Tệp "${normalizedFilename}" không phải là tài liệu Word (.docx) hợp lệ: ${docxCheck.reason}`,
+          );
+        }
+      } else if (!checkMagicBytes(f.buffer, f.mimetype)) {
         throw new BadRequestException(
           `Tệp "${normalizedFilename}" có nội dung không khớp với định dạng ${f.mimetype}.`,
         );
@@ -652,7 +678,7 @@ export class MessagesService {
       const { data: existing } = await this.supabase.client
         .from('messages')
         .select(
-          'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+          'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
         )
         .eq('author_id', userId)
         .eq('client_nonce', dto.clientNonce)
@@ -677,6 +703,7 @@ export class MessagesService {
           author,
           type: raw.type,
           content: raw.deleted_at ? null : raw.content,
+          isForwarded: Boolean(raw.is_forwarded),
           replyToId: raw.reply_to_id ? raw.reply_to_id.toString() : null,
           clientNonce: raw.client_nonce,
           editedAt: raw.edited_at,
@@ -758,7 +785,7 @@ export class MessagesService {
         reply_to_id: dto.replyToId ?? null,
       })
       .select(
-        'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
       )
       .single();
 
@@ -778,7 +805,7 @@ export class MessagesService {
         const { data: duplicate } = await this.supabase.client
           .from('messages')
           .select(
-            'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+            'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
           )
           .eq('author_id', userId)
           .eq('client_nonce', dto.clientNonce)
@@ -803,6 +830,7 @@ export class MessagesService {
             author,
             type: rawDup.type,
             content: rawDup.deleted_at ? null : rawDup.content,
+            isForwarded: Boolean(rawDup.is_forwarded),
             replyToId: rawDup.reply_to_id
               ? rawDup.reply_to_id.toString()
               : null,
@@ -815,8 +843,8 @@ export class MessagesService {
         }
       }
 
-      this.logger.error('Lỗi chèn tin nhắn:', insertErr);
-      throw new InternalServerErrorException('Không thể gửi tin nhắn.');
+      this.logger.error('Lỗi lưu tin nhắn:', insertErr);
+      throw new InternalServerErrorException('Lỗi lưu tin nhắn vào cơ sở dữ liệu.');
     }
 
     const raw = newMsg as RawMessageRow;
@@ -868,6 +896,7 @@ export class MessagesService {
       author,
       type: raw.type,
       content: raw.deleted_at ? null : raw.content,
+      isForwarded: Boolean(raw.is_forwarded),
       replyToId: raw.reply_to_id ? raw.reply_to_id.toString() : null,
       clientNonce: raw.client_nonce,
       editedAt: raw.edited_at,
@@ -901,7 +930,7 @@ export class MessagesService {
     const { data: existing, error: findErr } = await this.supabase.client
       .from('messages')
       .select(
-        'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
       )
       .eq('id', messageId)
       .maybeSingle();
@@ -930,7 +959,7 @@ export class MessagesService {
       })
       .eq('id', messageId)
       .select(
-        'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
       )
       .single();
 
@@ -950,6 +979,7 @@ export class MessagesService {
       author,
       type: rawUpdated.type,
       content: rawUpdated.content,
+      isForwarded: Boolean(rawUpdated.is_forwarded),
       replyToId: rawUpdated.reply_to_id
         ? rawUpdated.reply_to_id.toString()
         : null,
@@ -1035,12 +1065,12 @@ export class MessagesService {
           attDelErr,
         );
         throw new InternalServerErrorException(
-          'Lỗi xoá thông tin tệp đính kèm.',
+          'Lỗi xoá dữ liệu tệp đính kèm trong cơ sở dữ liệu.',
         );
       }
     }
 
-    // 2. Soft-delete tin nhắn
+    // 2. Cập nhật soft delete trên bảng messages
     const now = new Date().toISOString();
     const { error: delErr } = await this.supabase.client
       .from('messages')
@@ -1051,23 +1081,31 @@ export class MessagesService {
       .eq('id', messageId);
 
     if (delErr) {
-      this.logger.error('Lỗi xoá tin nhắn:', delErr);
+      this.logger.error('Lỗi soft-delete tin nhắn:', delErr);
       throw new InternalServerErrorException('Lỗi xoá tin nhắn.');
     }
 
-    // 3. Dọn dẹp reactions của tin nhắn sau khi soft-delete thành công
+    // 3. Dọn dẹp toàn bộ reactions của tin nhắn sau khi soft-delete thành công
     try {
-      await this.supabase.client
+      const { error: reactCleanupErr } = await this.supabase.client
         .from('message_reactions')
         .delete()
         .eq('message_id', messageId);
-    } catch (reactErr) {
+
+      if (reactCleanupErr) {
+        this.logger.error(
+          `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
+          reactCleanupErr,
+        );
+      }
+    } catch (cleanupEx) {
       this.logger.error(
         `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
-        reactErr,
+        cleanupEx,
       );
     }
 
+    // 4. Phát sự kiện realtime thông báo tin nhắn đã bị xoá
     this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_DELETED, {
       conversationId: raw.conversation_id,
       channelId: null,
@@ -1101,7 +1139,7 @@ export class MessagesService {
 
     const { data, error } = await this.supabase.client
       .from('attachments')
-      .select('id, storage_path, message_id, messages!inner(conversation_id, deleted_at)')
+      .select('id, storage_path, filename, message_id, messages!inner(conversation_id, deleted_at)')
       .eq('id', attachmentId)
       .maybeSingle();
 
@@ -1112,6 +1150,7 @@ export class MessagesService {
     const rawAtt = data as unknown as {
       id: string;
       storage_path: string;
+      filename: string;
       message_id: string | number;
       messages:
         | { conversation_id: string; deleted_at: string | null }
@@ -1134,7 +1173,7 @@ export class MessagesService {
 
     const { data: signed, error: signErr } = await this.supabase.client.storage
       .from('message-attachments')
-      .createSignedUrl(rawAtt.storage_path, 3600);
+      .createSignedUrl(rawAtt.storage_path, 3600, { download: rawAtt.filename });
 
     if (signErr || !signed?.signedUrl) {
       this.logger.error(
@@ -1346,6 +1385,411 @@ export class MessagesService {
       clientMutationId: dto.clientMutationId,
       reactions,
     };
+  }
+
+  /**
+   * Chuyển tiếp tin nhắn sang cuộc trò chuyện đích (Compensating Workflow & Idempotent).
+   * Tạo bản sao độc lập (independent snapshot), copy storage objects, bảo toàn metadata file,
+   * ghi nguyên tử qua PostgreSQL RPC/transaction, xử lý 23505 race condition, và phát dual realtime events.
+   */
+  async forwardConversationMessage(
+    userId: string,
+    sourceConversationId: string,
+    messageId: string,
+    dto: ForwardMessageDto,
+  ): Promise<MessageResponseDto> {
+    if (!/^[1-9]\d*$/.test(messageId)) {
+      throw new BadRequestException(
+        'messageId phải là chuỗi số nguyên dương (bigint).',
+      );
+    }
+
+    if (!dto.clientNonce || typeof dto.clientNonce !== 'string') {
+      throw new BadRequestException('clientNonce không được để trống.');
+    }
+
+    // 1. Kiểm tra quyền truy cập ở cả source và target conversation
+    const [isSourceMember, isTargetMember] = await Promise.all([
+      this.conversationsService.verifyMembership(userId, sourceConversationId),
+      this.conversationsService.verifyMembership(userId, dto.targetConversationId),
+    ]);
+
+    if (!isSourceMember) {
+      throw new ForbiddenException(
+        'Bạn không phải là thành viên của cuộc trò chuyện nguồn.',
+      );
+    }
+    if (!isTargetMember) {
+      throw new ForbiddenException(
+        'Bạn không phải là thành viên của cuộc trò chuyện đích.',
+      );
+    }
+
+    // 2. Load source message & kiểm tra soft delete
+    const { data: sourceMsg, error: srcErr } = await this.supabase.client
+      .from('messages')
+      .select('id, conversation_id, content, deleted_at')
+      .eq('id', messageId)
+      .eq('conversation_id', sourceConversationId)
+      .maybeSingle();
+
+    if (srcErr || !sourceMsg || sourceMsg.deleted_at) {
+      throw new NotFoundException(
+        'Tin nhắn nguồn không tồn tại hoặc đã bị xóa.',
+      );
+    }
+
+    // 3. Load source attachments
+    const { data: rawSrcAtts, error: srcAttErr } = await this.supabase.client
+      .from('attachments')
+      .select(
+        'id, storage_path, filename, mime_type, size_bytes, width, height',
+      )
+      .eq('message_id', sourceMsg.id);
+
+    if (srcAttErr) {
+      this.logger.error('Lỗi tải metadata attachments nguồn:', srcAttErr);
+      throw new InternalServerErrorException(
+        'Không thể đọc thông tin tệp đính kèm của tin nhắn nguồn.',
+      );
+    }
+
+    const sourceAttachments = (rawSrcAtts ?? []) as RawAttachmentRow[];
+    const textContent = sourceMsg.content?.trim() || null;
+
+    if (!textContent && sourceAttachments.length === 0) {
+      throw new BadRequestException(
+        'Tin nhắn nguồn không có nội dung hoặc tệp đính kèm để chuyển tiếp.',
+      );
+    }
+
+    // 4. Kiểm tra Idempotency trước khi can thiệp Storage (Tránh copy thừa khi retry tuần tự)
+    const { data: existing } = await this.supabase.client
+      .from('messages')
+      .select(
+        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+      )
+      .eq('author_id', userId)
+      .eq('client_nonce', dto.clientNonce)
+      .maybeSingle();
+
+    if (existing) {
+      const raw = existing as RawMessageRow;
+      if (raw.conversation_id !== dto.targetConversationId) {
+        throw new ConflictException(
+          'Client nonce đã được sử dụng cho cuộc trò chuyện khác.',
+        );
+      }
+      const author = await this.getAuthorProfile(userId);
+      const attMap = await this.loadAttachmentsForMessages([raw.id]);
+      const existingAtts = attMap.get(raw.id.toString());
+
+      return {
+        id: raw.id.toString(),
+        channelId: raw.channel_id,
+        conversationId: raw.conversation_id,
+        authorId: raw.author_id,
+        author,
+        type: raw.type,
+        content: raw.deleted_at ? null : raw.content,
+        isForwarded: true,
+        replyToId: null,
+        clientNonce: raw.client_nonce,
+        editedAt: raw.edited_at,
+        deletedAt: raw.deleted_at,
+        ...(existingAtts && existingAtts.length > 0
+          ? { attachments: existingAtts }
+          : {}),
+        reactions: [],
+        createdAt: raw.created_at,
+      };
+    }
+
+    // 5. Compensating Storage Copy Loop
+    // Mỗi request sinh target Storage path UUID riêng biệt để tránh ghi đè và theo dõi chính xác copiedPaths
+    const correlationId = crypto.randomUUID();
+    const copiedPaths: string[] = [];
+    const newAttachmentsData: {
+      storage_path: string;
+      filename: string;
+      mime_type: string;
+      size_bytes: number | string;
+      width: number | null;
+      height: number | null;
+    }[] = [];
+
+    try {
+      for (const att of sourceAttachments) {
+        const newAttUuid = crypto.randomUUID();
+        const ext =
+          MIME_EXTENSION_MAP[att.mime_type] ||
+          (att.filename ? `.${att.filename.split('.').pop()}` : '');
+        const targetStoragePath = `conversations/${dto.targetConversationId}/${newAttUuid}${ext}`;
+
+        // Thử copy server-side trước
+        const { error: copyErr } = await this.supabase.client.storage
+          .from('message-attachments')
+          .copy(att.storage_path, targetStoragePath);
+
+        if (copyErr) {
+          // Fallback download + upload nếu storage backend không hỗ trợ copy trực tiếp
+          const { data: fileBlob, error: dlErr } =
+            await this.supabase.client.storage
+              .from('message-attachments')
+              .download(att.storage_path);
+
+          if (dlErr || !fileBlob) {
+            throw new Error(
+              `Copy/download storage object failed: ${copyErr.message || dlErr?.message}`,
+            );
+          }
+
+          const arrayBuffer = await fileBlob.arrayBuffer();
+          const { error: upErr } = await this.supabase.client.storage
+            .from('message-attachments')
+            .upload(targetStoragePath, Buffer.from(arrayBuffer), {
+              contentType: att.mime_type,
+              upsert: false,
+            });
+
+          if (upErr) {
+            throw new Error(`Upload fallback failed: ${upErr.message}`);
+          }
+        }
+
+        copiedPaths.push(targetStoragePath);
+        newAttachmentsData.push({
+          storage_path: targetStoragePath,
+          filename: att.filename,
+          mime_type: att.mime_type,
+          size_bytes: att.size_bytes,
+          width: att.width,
+          height: att.height,
+        });
+      }
+    } catch (copyErr: any) {
+      this.logger.error(
+        `[Compensating Forward] Lỗi copy storage correlationId=${correlationId}: ${copyErr?.message}`,
+      );
+      await this.cleanupStorageObjects(copiedPaths, correlationId);
+      throw new InternalServerErrorException(
+        'Không thể sao chép tệp đính kèm khi chuyển tiếp.',
+      );
+    }
+
+    // 6. Atomic Write: Ghi message + attachment metadata qua PostgreSQL RPC nguyên tử
+    const { data: rpcResult, error: rpcErr } = await this.supabase.client.rpc(
+      'create_forwarded_message',
+      {
+        p_author_id: userId,
+        p_conversation_id: dto.targetConversationId,
+        p_content: textContent,
+        p_client_nonce: dto.clientNonce,
+        p_attachments: newAttachmentsData,
+      },
+    );
+
+    if (rpcErr) {
+      // 1. Kiểm tra race condition PostgreSQL 23505 (unique violation trên author_id, client_nonce)
+      if (
+        rpcErr.code === '23505' ||
+        rpcErr.message?.includes('23505') ||
+        rpcErr.message?.includes('duplicate key') ||
+        rpcErr.message?.includes('idx_messages_nonce')
+      ) {
+        // Cleanup CHỈ các target objects do chính request thua cuộc này vừa copy
+        await this.cleanupStorageObjects(copiedPaths, correlationId);
+
+        // Query canonical message theo (author_id, client_nonce)
+        const { data: canonical, error: canonErr } = await this.supabase.client
+          .from('messages')
+          .select(
+            'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+          )
+          .eq('author_id', userId)
+          .eq('client_nonce', dto.clientNonce)
+          .maybeSingle();
+
+        if (canonErr || !canonical) {
+          throw new InternalServerErrorException(
+            'Không thể truy vấn tin nhắn đã chuyển tiếp trùng nonce.',
+          );
+        }
+
+        const raw = canonical as RawMessageRow;
+
+        // Xác minh record trùng nonce thuộc đúng author và target conversation
+        if (raw.conversation_id !== dto.targetConversationId) {
+          throw new ConflictException(
+            'Client nonce đã được sử dụng cho cuộc trò chuyện khác.',
+          );
+        }
+        if (raw.author_id !== userId) {
+          throw new ForbiddenException(
+            'Client nonce không thuộc quyền sở hữu của bạn.',
+          );
+        }
+
+        const author = await this.getAuthorProfile(userId);
+        const attMap = await this.loadAttachmentsForMessages([raw.id]);
+        const existingAtts = attMap.get(raw.id.toString());
+
+        // Trả về canonical message và attachments với fresh signed URLs, KHÔNG emit socket
+        return {
+          id: raw.id.toString(),
+          channelId: raw.channel_id,
+          conversationId: raw.conversation_id,
+          authorId: raw.author_id,
+          author,
+          type: raw.type,
+          content: raw.deleted_at ? null : raw.content,
+          isForwarded: true,
+          replyToId: null,
+          clientNonce: raw.client_nonce,
+          editedAt: raw.edited_at,
+          deletedAt: raw.deleted_at,
+          ...(existingAtts && existingAtts.length > 0
+            ? { attachments: existingAtts }
+            : {}),
+          reactions: [],
+          createdAt: raw.created_at,
+        };
+      }
+
+      // 2. FAIL-FAST: Đối với mọi lỗi RPC khác (42883 / PGRST202 missing function / DB error)
+      // Dọn dẹp storage objects và ném lỗi 500, tuyệt đối không chạy fallback tuần tự không an toàn
+      this.logger.error(
+        `[Forward Message RPC Error] correlationId=${correlationId} code=${rpcErr.code}: ${rpcErr.message}`,
+      );
+      await this.cleanupStorageObjects(copiedPaths, correlationId);
+
+      if (
+        rpcErr.code === '42883' ||
+        rpcErr.message?.includes('PGRST202') ||
+        rpcErr.message?.includes('does not exist')
+      ) {
+        throw new InternalServerErrorException(
+          'Chức năng chuyển tiếp tin nhắn chưa sẵn sàng (migration database chưa được triển khai).',
+        );
+      }
+
+      throw new InternalServerErrorException(
+        'Không thể thực hiện chuyển tiếp tin nhắn qua cơ sở dữ liệu.',
+      );
+    }
+
+    if (!rpcResult) {
+      await this.cleanupStorageObjects(copiedPaths, correlationId);
+      throw new InternalServerErrorException(
+        'RPC create_forwarded_message không trả về dữ liệu.',
+      );
+    }
+
+    const row = Array.isArray(rpcResult) ? rpcResult[0] : rpcResult;
+    if (!row) {
+      await this.cleanupStorageObjects(copiedPaths, correlationId);
+      throw new InternalServerErrorException(
+        'Không thể đọc dữ liệu phản hồi từ create_forwarded_message.',
+      );
+    }
+
+    const msgId = String(row.message_id || row.id);
+    const createdMsgRow: RawMessageRow = {
+      id: msgId,
+      channel_id: row.channel_id ?? row.channelId ?? null,
+      conversation_id: row.conversation_id ?? row.conversationId ?? dto.targetConversationId,
+      author_id: row.author_id ?? row.authorId ?? userId,
+      type: (row.type as any) || 'default',
+      content: row.content,
+      is_forwarded: row.is_forwarded ?? true,
+      reply_to_id: null,
+      client_nonce: row.client_nonce ?? row.clientNonce ?? dto.clientNonce,
+      edited_at: row.edited_at ?? null,
+      deleted_at: row.deleted_at ?? null,
+      created_at: row.created_at || new Date().toISOString(),
+    };
+    const createdAttachmentRows: RawAttachmentRow[] =
+      (row.attachments as RawAttachmentRow[]) ?? [];
+
+    // 7. Tạo Signed URLs cho các attachments tại target conversation
+    let finalAttachments: AttachmentResponseDto[] = [];
+    if (createdAttachmentRows.length > 0) {
+      const signedUrlPromises = createdAttachmentRows.map(async (att) => {
+        const { data: urlData } = await this.supabase.client.storage
+          .from('message-attachments')
+          .createSignedUrl(att.storage_path, 3600);
+
+        return {
+          id: att.id,
+          filename: att.filename,
+          mimeType: att.mime_type,
+          sizeBytes: Number(att.size_bytes),
+          width: att.width,
+          height: att.height,
+          signedUrl: urlData?.signedUrl ?? null,
+          isAvailable: Boolean(urlData?.signedUrl),
+        };
+      });
+
+      finalAttachments = await Promise.all(signedUrlPromises);
+    }
+
+    // 8. DTO response & Dual Realtime Broadcast
+    const author = await this.getAuthorProfile(userId);
+    const responseDto: MessageResponseDto = {
+      id: msgId,
+      channelId: createdMsgRow.channel_id,
+      conversationId: createdMsgRow.conversation_id ?? dto.targetConversationId,
+      authorId: createdMsgRow.author_id ?? userId,
+      author,
+      type: createdMsgRow.type,
+      content: createdMsgRow.deleted_at ? null : createdMsgRow.content,
+      isForwarded: true,
+      replyToId: null,
+      clientNonce: createdMsgRow.client_nonce,
+      editedAt: null,
+      deletedAt: null,
+      ...(finalAttachments.length > 0
+        ? { attachments: finalAttachments }
+        : {}),
+      reactions: [],
+      createdAt: createdMsgRow.created_at,
+    };
+
+    // Broadcast realtime: message:created tới phòng conversation đích
+    this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
+      conversationId: dto.targetConversationId,
+      channelId: null,
+      message: responseDto,
+    });
+
+    return responseDto;
+  }
+
+  /**
+   * Helper dọn dẹp Storage objects khi gặp sự cố bù trừ (Compensating Rollback).
+   * Chỉ log safe correlationId và internal paths, không log thông tin nhạy cảm.
+   */
+  private async cleanupStorageObjects(
+    paths: string[],
+    correlationId: string,
+  ): Promise<void> {
+    if (!paths || paths.length === 0) return;
+    try {
+      const { error } = await this.supabase.client.storage
+        .from('message-attachments')
+        .remove(paths);
+
+      if (error) {
+        this.logger.error(
+          `[Compensating Cleanup Storage Error] correlationId=${correlationId} paths=${paths.join(', ')}: ${error.message}`,
+        );
+      }
+    } catch (err: any) {
+      this.logger.error(
+        `[Compensating Cleanup Storage Exception] correlationId=${correlationId} paths=${paths.join(', ')}: ${err?.message}`,
+      );
+    }
   }
 
   private async getAuthorProfile(

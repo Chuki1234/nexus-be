@@ -23,6 +23,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
           remove: jest.fn().mockResolvedValue({ error: null }),
           createSignedUrl: jest.fn().mockResolvedValue({ data: { signedUrl: 'signed-url' }, error: null }),
           upload: jest.fn().mockResolvedValue({ data: { path: 'path' }, error: null }),
+          copy: jest.fn().mockResolvedValue({ data: { path: 'copied-path' }, error: null }),
         }),
       },
       auth: {
@@ -118,10 +119,11 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
             return {
               data: {
                 id: '101',
-                conversation_id: convId,
+                conversation_id: queryBuilder._insertedVal?.conversation_id ?? convId,
                 author_id: userA.id,
                 content: queryBuilder._updates?.content ?? queryBuilder._insertedVal?.content ?? 'Hello Realtime',
                 type: 'default',
+                is_forwarded: queryBuilder._insertedVal?.is_forwarded ?? false,
                 reply_to_id: null,
                 client_nonce: 'nonce-1',
                 deleted_at: null,
@@ -138,10 +140,11 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
             return {
               data: {
                 id: '101',
-                conversation_id: convId,
+                conversation_id: queryBuilder._insertedVal?.conversation_id ?? convId,
                 author_id: userA.id,
                 content: queryBuilder._updates?.content ?? queryBuilder._insertedVal?.content ?? 'Hello Realtime',
                 type: 'default',
+                is_forwarded: queryBuilder._insertedVal?.is_forwarded ?? false,
                 reply_to_id: null,
                 client_nonce: 'nonce-1',
                 deleted_at: null,
@@ -155,6 +158,44 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
 
         return queryBuilder;
       }),
+      rpc: jest.fn().mockImplementation((name: string, params: any) => {
+        if (name === 'mark_conversation_read') {
+          return Promise.resolve({
+            data: [{ success: true, updated: true, last_read_message_id: params.p_message_id }],
+            error: null,
+          });
+        }
+        if (name === 'create_forwarded_message') {
+          return Promise.resolve({
+            data: [
+              {
+                message_id: 202,
+                conversation_id: params.p_conversation_id,
+                author_id: params.p_author_id,
+                content: params.p_content,
+                type: 'default',
+                is_forwarded: true,
+                reply_to_id: null,
+                client_nonce: params.p_client_nonce,
+                edited_at: null,
+                deleted_at: null,
+                created_at: new Date().toISOString(),
+                attachments: [],
+              },
+            ],
+            error: null,
+          });
+        }
+        return Promise.resolve({ data: null, error: null });
+      }),
+      storage: {
+        from: jest.fn().mockReturnValue({
+          copy: jest.fn().mockResolvedValue({ data: { path: 'ok' }, error: null }),
+          remove: jest.fn().mockResolvedValue({ data: [], error: null }),
+          createSignedUrl: jest.fn().mockResolvedValue({ data: { signedUrl: 'https://storage/signed' }, error: null }),
+          createSignedUrls: jest.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      },
     },
   };
 
@@ -692,6 +733,45 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
     } finally {
       reconnectingSocket.disconnect();
     }
+  });
+
+  it('21. Forward tin nhắn: emit message:created tới target conversation room và conversation:updated tới user room người nhận (trừ sender)', async () => {
+    // Socket B join otherConvId
+    await new Promise<any>((resolve) => {
+      socketB.emit('conversation:join', { conversationId: otherConvId }, resolve);
+    });
+
+    const bMessagePromise = new Promise<any>((resolve) => {
+      socketB.once('message:created', resolve);
+    });
+
+    const bUpdatedPromise = new Promise<any>((resolve) => {
+      socketB.once('conversation:updated', resolve);
+    });
+
+    const messagesService = app.get(MessagesService);
+    const forwardedMsg = await messagesService.forwardConversationMessage(
+      userA.id,
+      convId,
+      '101',
+      {
+        targetConversationId: otherConvId,
+        clientNonce: '44444444-dddd-4444-a444-444444444444',
+      },
+    );
+
+    expect(forwardedMsg.isForwarded).toBe(true);
+    expect(forwardedMsg.conversationId).toBe(otherConvId);
+    expect(forwardedMsg.authorId).toBe(userA.id);
+
+    const bReceived = await bMessagePromise;
+    expect(bReceived.message.id).toBe(forwardedMsg.id);
+    expect(bReceived.message.conversationId).toBe(otherConvId);
+    expect(bReceived.message.isForwarded).toBe(true);
+
+    const bUpdated = await bUpdatedPromise;
+    expect(bUpdated.conversationId).toBe(otherConvId);
+    expect(bUpdated.senderId).toBe(userA.id);
   });
 });
 

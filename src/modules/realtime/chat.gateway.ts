@@ -18,6 +18,7 @@ import {
   type ServerToClientEvents,
 } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
+import { PresenceService } from './presence.service';
 import {
   CHAT_EVENTS,
   type MessageCreatedEvent,
@@ -70,6 +71,7 @@ export class ChatGateway
   constructor(
     private readonly supabase: SupabaseService,
     private readonly conversationsService: ConversationsService,
+    private readonly presenceService: PresenceService,
   ) {}
 
   /**
@@ -120,7 +122,7 @@ export class ChatGateway
    * Chạy sau khi socket đã vượt qua middleware xác thực thành công.
    * socket.data.userId được đảm bảo tồn tại 100%.
    */
-  handleConnection(client: TypedSocket): void {
+  async handleConnection(client: TypedSocket): Promise<void> {
     const userId = client.data.userId;
     if (!userId) {
       this.logger.warn(`Socket ${client.id} thiếu userId sau middleware`);
@@ -128,11 +130,32 @@ export class ChatGateway
       return;
     }
 
-    // Auto-join user room của chính họ (dùng cho direct notification)
-    void client.join(Room.user(userId));
+    // 1. Auto-join user room của chính họ (dùng cho direct notification và presence)
+    await client.join(Room.user(userId));
+
+    // 2. Ghi nhận socket vào PresenceService
+    const connectResult = await this.presenceService.handleUserConnect(
+      userId,
+      client.id,
+    );
+
+    // 3. Nếu là socket đầu tiên kết nối -> broadcast presence:updated tới toàn bộ peers
+    if (connectResult.isFirstConnection) {
+      for (const peerId of connectResult.peers) {
+        this.server.to(Room.user(peerId)).emit('presence:updated', {
+          userId,
+          status: connectResult.status,
+          lastSeenAt: null,
+        });
+      }
+    }
+
+    // 4. Gửi initial snapshot về trạng thái của toàn bộ peers cho client mới kết nối
+    const snapshot = await this.presenceService.getPeersSnapshot(userId);
+    client.emit('presence:sync', { presences: snapshot });
 
     this.logger.log(
-      `Socket ${client.id} xác thực thành công cho user ${userId}`,
+      `Socket ${client.id} xác thực thành công cho user ${userId} (status: ${connectResult.status})`,
     );
   }
 
@@ -140,8 +163,32 @@ export class ChatGateway
     const userId = client.data.userId;
     if (userId) {
       this.clearUserTyping(userId);
+
+      // Xử lý ngắt kết nối với grace period 15s
+      this.presenceService.handleUserDisconnect(client.id, (offlinePayload) => {
+        for (const peerId of offlinePayload.peers) {
+          this.server.to(Room.user(peerId)).emit('presence:updated', {
+            userId: offlinePayload.userId,
+            status: 'offline',
+            lastSeenAt: offlinePayload.lastSeenAt,
+          });
+        }
+      });
+
       this.logger.log(`Socket ${client.id} (user ${userId}) đã ngắt kết nối`);
     }
+  }
+
+  @SubscribeMessage('presence:get-snapshot')
+  async handleGetPresenceSnapshot(
+    client: TypedSocket,
+  ): Promise<{ presences: Record<string, { status: any; lastSeenAt: string | null }> }> {
+    const userId = client.data.userId;
+    if (!userId) {
+      return { presences: {} };
+    }
+    const presences = await this.presenceService.getPeersSnapshot(userId);
+    return { presences };
   }
 
   @SubscribeMessage('conversation:join')

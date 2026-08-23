@@ -16,7 +16,9 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
+import { ParsePositiveBigIntPipe } from '../../common/pipes/parse-positive-bigint.pipe';
 import { EditMessageDto } from './dto/edit-message.dto';
+import { ForwardMessageDto } from './dto/forward-message.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
 import type {
@@ -116,11 +118,29 @@ export class MessagesController {
   @Post('conversations/:conversationId/messages/:messageId/reactions')
   async setReaction(
     @CurrentUser() user: User,
-    @Param('conversationId', ParseUUIDPipe) conversationId: string,
-    @Param('messageId') messageId: string,
+    @Param('conversationId', new ParseUUIDPipe({ version: '4' })) conversationId: string,
+    @Param('messageId', ParsePositiveBigIntPipe) messageId: string,
     @Body() dto: SetReactionDto,
   ): Promise<SetReactionResponseDto> {
     return this.messagesService.setReaction(
+      user.id,
+      conversationId,
+      messageId,
+      dto,
+    );
+  }
+
+  /**
+   * Chuyển tiếp tin nhắn (text + attachments) sang cuộc trò chuyện đích (Compensating Workflow & Idempotent).
+   */
+  @Post('conversations/:conversationId/messages/:messageId/forward')
+  async forwardConversationMessage(
+    @CurrentUser() user: User,
+    @Param('conversationId', new ParseUUIDPipe({ version: '4' })) conversationId: string,
+    @Param('messageId', ParsePositiveBigIntPipe) messageId: string,
+    @Body() dto: ForwardMessageDto,
+  ): Promise<MessageResponseDto> {
+    return this.messagesService.forwardConversationMessage(
       user.id,
       conversationId,
       messageId,

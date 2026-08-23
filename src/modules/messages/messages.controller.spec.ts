@@ -127,4 +127,65 @@ describe('MessagesController', () => {
     );
     expect(res.signedUrl).toBe('https://storage.supabase.co/signed/file.png');
   });
+
+  it('gọi service.forwardConversationMessage khi POST /api/conversations/:id/messages/:msgId/forward', async () => {
+    (service as unknown as { forwardConversationMessage: jest.Mock }).forwardConversationMessage = jest
+      .fn()
+      .mockResolvedValue({
+        id: '202',
+        conversationId: 'c0000000-0000-0000-0000-000000000003',
+        content: 'Forwarded msg',
+        isForwarded: true,
+      });
+
+    const res = await controller.forwardConversationMessage(
+      mockUser,
+      'a0000000-0000-0000-0000-000000000001',
+      '101',
+      {
+        targetConversationId: 'c0000000-0000-0000-0000-000000000003',
+        clientNonce: 'd0000000-0000-0000-0000-000000000004',
+      },
+    );
+
+    expect(
+      (service as unknown as { forwardConversationMessage: jest.Mock }).forwardConversationMessage,
+    ).toHaveBeenCalledWith(
+      'user-123',
+      'a0000000-0000-0000-0000-000000000001',
+      '101',
+      {
+        targetConversationId: 'c0000000-0000-0000-0000-000000000003',
+        clientNonce: 'd0000000-0000-0000-0000-000000000004',
+      },
+    );
+    expect(res.isForwarded).toBe(true);
+  });
+
+  it('gọi service.setReaction khi POST /api/conversations/:id/messages/:msgId/reactions', async () => {
+    (service as unknown as { setReaction: jest.Mock }).setReaction = jest
+      .fn()
+      .mockResolvedValue({
+        messageId: '101',
+        conversationId: 'a0000000-0000-0000-0000-000000000001',
+        reactions: [{ emoji: '🔥', count: 1, reactedByMe: true }],
+      });
+
+    const res = await controller.setReaction(
+      mockUser,
+      'a0000000-0000-0000-0000-000000000001',
+      '101',
+      { emoji: '🔥', reacted: true },
+    );
+
+    expect(
+      (service as unknown as { setReaction: jest.Mock }).setReaction,
+    ).toHaveBeenCalledWith(
+      'user-123',
+      'a0000000-0000-0000-0000-000000000001',
+      '101',
+      { emoji: '🔥', reacted: true },
+    );
+    expect(res.reactions).toHaveLength(1);
+  });
 });

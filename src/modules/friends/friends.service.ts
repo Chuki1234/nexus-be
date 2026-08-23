@@ -274,6 +274,15 @@ export class FriendsService {
     return (data as RawFriendshipRow | null) ?? null;
   }
 
+  async getAcceptedFriendUserIds(userId: string): Promise<string[]> {
+    try {
+      const rows = await this.listRelationships(userId, 'accepted');
+      return rows.map((row) => this.otherUserId(row, userId));
+    } catch {
+      return [];
+    }
+  }
+
   private async listRelationships(
     userId: string,
     status: 'pending' | 'accepted',

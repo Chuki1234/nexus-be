@@ -2,12 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { Room } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
+import { PresenceService } from './presence.service';
 import { ChatGateway, TypedSocket } from './chat.gateway';
 
 describe('ChatGateway', () => {
   let gateway: ChatGateway;
   let supabaseMock: any;
   let conversationsServiceMock: any;
+  let presenceServiceMock: any;
   let serverMock: any;
 
   const validUuid = '11111111-1111-4111-a111-111111111111';
@@ -26,6 +28,20 @@ describe('ChatGateway', () => {
       getParticipantIds: jest.fn().mockResolvedValue(['user-123', 'user-456']),
     };
 
+    presenceServiceMock = {
+      handleUserConnect: jest.fn().mockResolvedValue({
+        userId: 'user-123',
+        isFirstConnection: true,
+        status: 'online',
+        peers: ['peer-bob', 'peer-charlie'],
+      }),
+      handleUserDisconnect: jest.fn(),
+      getPeersSnapshot: jest.fn().mockResolvedValue({
+        'peer-bob': { status: 'online', lastSeenAt: null },
+        'peer-charlie': { status: 'offline', lastSeenAt: null },
+      }),
+    };
+
     serverMock = {
       to: jest.fn().mockReturnThis(),
       emit: jest.fn(),
@@ -36,6 +52,7 @@ describe('ChatGateway', () => {
         ChatGateway,
         { provide: SupabaseService, useValue: supabaseMock },
         { provide: ConversationsService, useValue: conversationsServiceMock },
+        { provide: PresenceService, useValue: presenceServiceMock },
       ],
     }).compile();
 
@@ -120,29 +137,31 @@ describe('ChatGateway', () => {
   });
 
   describe('handleConnection', () => {
-    it('ngắt kết nối nếu socket không có userId sau middleware', () => {
+    it('ngắt kết nối nếu socket không có userId sau middleware', async () => {
       const client = {
         id: 'sock-no-data',
         data: {},
         disconnect: jest.fn(),
         join: jest.fn(),
+        emit: jest.fn(),
       } as unknown as TypedSocket;
 
-      gateway.handleConnection(client);
+      await gateway.handleConnection(client);
 
       expect(client.disconnect).toHaveBeenCalledWith(true);
       expect(client.join).not.toHaveBeenCalled();
     });
 
-    it('kết nối thành công, join user room khi có userId', () => {
+    it('kết nối thành công, join user room khi có userId', async () => {
       const client = {
         id: 'sock-authenticated',
         data: { userId: 'user-123' },
         disconnect: jest.fn(),
         join: jest.fn(),
+        emit: jest.fn(),
       } as unknown as TypedSocket;
 
-      gateway.handleConnection(client);
+      await gateway.handleConnection(client);
 
       expect(client.disconnect).not.toHaveBeenCalled();
       expect(client.join).toHaveBeenCalledWith(Room.user('user-123'));
@@ -374,6 +393,93 @@ describe('ChatGateway', () => {
         conversationId: validUuid,
         userId: 'user-123',
         lastReadMessageId: '1001',
+      });
+    });
+  });
+
+  describe('Presence Realtime in ChatGateway', () => {
+    it('handleConnection: join user room, đăng ký PresenceService, broadcast online tới peers và gửi snapshot về client', async () => {
+      const mockClient = {
+        id: 'sock-alice-1',
+        data: { userId: 'user-123' },
+        join: jest.fn().mockResolvedValue(undefined),
+        emit: jest.fn(),
+      } as unknown as TypedSocket;
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.join).toHaveBeenCalledWith(Room.user('user-123'));
+      expect(presenceServiceMock.handleUserConnect).toHaveBeenCalledWith(
+        'user-123',
+        'sock-alice-1',
+      );
+
+      // Broadcast tới peer-bob và peer-charlie (không broadcast người lạ)
+      expect(serverMock.to).toHaveBeenCalledWith(Room.user('peer-bob'));
+      expect(serverMock.to).toHaveBeenCalledWith(Room.user('peer-charlie'));
+      expect(serverMock.emit).toHaveBeenCalledWith('presence:updated', {
+        userId: 'user-123',
+        status: 'online',
+        lastSeenAt: null,
+      });
+
+      // Snapshot gửi về riêng client mới connect
+      expect(mockClient.emit).toHaveBeenCalledWith('presence:sync', {
+        presences: {
+          'peer-bob': { status: 'online', lastSeenAt: null },
+          'peer-charlie': { status: 'offline', lastSeenAt: null },
+        },
+      });
+    });
+
+    it('handleDisconnect: gọi handleUserDisconnect và broadcast offline khi grace period kết thúc', () => {
+      let offlineCb: any;
+      presenceServiceMock.handleUserDisconnect.mockImplementation(
+        (_socketId: string, cb: any) => {
+          offlineCb = cb;
+        },
+      );
+
+      const mockClient = {
+        id: 'sock-alice-1',
+        data: { userId: 'user-123' },
+      } as unknown as TypedSocket;
+
+      gateway.handleDisconnect(mockClient);
+
+      expect(presenceServiceMock.handleUserDisconnect).toHaveBeenCalledWith(
+        'sock-alice-1',
+        expect.any(Function),
+      );
+
+      // Giả lập callback timeout grace period kích hoạt
+      offlineCb({
+        userId: 'user-123',
+        status: 'offline',
+        lastSeenAt: '2026-08-23T14:30:00.000Z',
+        peers: ['peer-bob', 'peer-charlie'],
+      });
+
+      expect(serverMock.to).toHaveBeenCalledWith(Room.user('peer-bob'));
+      expect(serverMock.to).toHaveBeenCalledWith(Room.user('peer-charlie'));
+      expect(serverMock.emit).toHaveBeenCalledWith('presence:updated', {
+        userId: 'user-123',
+        status: 'offline',
+        lastSeenAt: '2026-08-23T14:30:00.000Z',
+      });
+    });
+
+    it('handleGetPresenceSnapshot: trả về snapshot chính xác của peers', async () => {
+      const mockClient = {
+        id: 'sock-alice-1',
+        data: { userId: 'user-123' },
+      } as unknown as TypedSocket;
+
+      const res = await gateway.handleGetPresenceSnapshot(mockClient);
+      expect(presenceServiceMock.getPeersSnapshot).toHaveBeenCalledWith('user-123');
+      expect(res.presences).toEqual({
+        'peer-bob': { status: 'online', lastSeenAt: null },
+        'peer-charlie': { status: 'offline', lastSeenAt: null },
       });
     });
   });

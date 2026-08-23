@@ -34,6 +34,7 @@ export interface MessageResponseDto {
   clientNonce: string | null;
   editedAt: string | null;
   deletedAt: string | null;
+  isForwarded: boolean;
   attachments?: AttachmentResponseDto[];
   reactions?: ReactionSummaryDto[];
   createdAt: string;

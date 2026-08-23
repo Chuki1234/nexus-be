@@ -19,7 +19,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:e2e:real": "jest --config ./test/jest-real-e2e.json",
+    "test:e2e:real": "jest --config ./test/jest-e2e.json",
+    "test:migration": "ts-node test/run-migration-postgres-test.ts",
     "check:shared": "node scripts/check-shared.mjs"
   },
   "dependencies": {
@@ -44,6 +45,7 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.6",
     "@eslint/eslintrc": "^3.2.0",
     "@eslint/js": "^9.18.0",
     "@nestjs/cli": "^11.0.0",
