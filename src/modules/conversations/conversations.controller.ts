@@ -14,7 +14,7 @@ import { ConversationsService } from './conversations.service';
 import { CreateDmDto } from './dto/create-dm.dto';
 import type { ConversationResponseDto } from './dto/conversation-response.dto';
 
-@Controller('api/conversations')
+@Controller('conversations')
 @UseGuards(SupabaseAuthGuard)
 export class ConversationsController {
   constructor(private readonly conversationsService: ConversationsService) {}

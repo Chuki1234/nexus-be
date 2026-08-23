@@ -55,10 +55,14 @@ export class SupabaseAuthGuard implements CanActivate {
 
   private extractToken(request: Request): string | null {
     const header = request.headers.authorization;
-    if (!header) {
+    if (!header || typeof header !== 'string') {
       return null;
     }
-    const [scheme, value] = header.split(' ');
-    return scheme === 'Bearer' && value ? value : null;
+    const trimmed = header.trim();
+    if (trimmed.startsWith('Bearer ')) {
+      return trimmed.slice(7).trim();
+    }
+    const [scheme, value] = trimmed.split(/\s+/);
+    return scheme?.toLowerCase() === 'bearer' && value ? value.trim() : null;
   }
 }

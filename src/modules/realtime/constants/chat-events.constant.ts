@@ -5,6 +5,7 @@ export const CHAT_EVENTS = {
   MESSAGE_UPDATED: 'chat.message.updated',
   MESSAGE_DELETED: 'chat.message.deleted',
   MESSAGE_READ: 'chat.message.read',
+  REACTION_UPDATED: 'chat.reaction.updated',
 } as const;
 
 export interface MessageCreatedEvent {
@@ -30,3 +31,14 @@ export interface MessageReadEvent {
   userId: string;
   lastReadMessageId: string;
 }
+
+export interface ReactionUpdatedEvent {
+  conversationId: string;
+  messageId: string;
+  actorUserId: string;
+  emoji: string;
+  action: 'added' | 'removed';
+  clientMutationId?: string;
+  reactions: Array<{ emoji: string; count: number }>;
+}
+

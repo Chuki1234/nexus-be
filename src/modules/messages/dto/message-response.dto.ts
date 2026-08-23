@@ -16,6 +16,12 @@ export interface AttachmentResponseDto {
   isAvailable?: boolean;
 }
 
+export interface ReactionSummaryDto {
+  emoji: string;
+  count: number;
+  reactedByMe: boolean;
+}
+
 export interface MessageResponseDto {
   id: string;
   channelId: string | null;
@@ -29,6 +35,7 @@ export interface MessageResponseDto {
   editedAt: string | null;
   deletedAt: string | null;
   attachments?: AttachmentResponseDto[];
+  reactions?: ReactionSummaryDto[];
   createdAt: string;
 }
 

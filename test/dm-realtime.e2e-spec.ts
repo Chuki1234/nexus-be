@@ -18,13 +18,30 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
 
   const mockSupabase = {
     client: {
+      storage: {
+        from: jest.fn().mockReturnValue({
+          remove: jest.fn().mockResolvedValue({ error: null }),
+          createSignedUrl: jest.fn().mockResolvedValue({ data: { signedUrl: 'signed-url' }, error: null }),
+          upload: jest.fn().mockResolvedValue({ data: { path: 'path' }, error: null }),
+        }),
+      },
       auth: {
         getUser: jest.fn().mockImplementation((token: string) => {
-          if (token === 'token-user-a') {
+          if (token === 'token-user-a' || token === 'refreshed-token-user-a') {
             return Promise.resolve({ data: { user: userA }, error: null });
           }
-          if (token === 'token-user-b') {
+          if (token === 'token-user-b' || token === 'refreshed-token-user-b') {
             return Promise.resolve({ data: { user: userB }, error: null });
+          }
+          if (token === 'delayed-token-user-a') {
+            return new Promise((res) =>
+              setTimeout(() => res({ data: { user: userA }, error: null }), 120),
+            );
+          }
+          if (token === 'delayed-token-user-b') {
+            return new Promise((res) =>
+              setTimeout(() => res({ data: { user: userB }, error: null }), 200),
+            );
           }
           return Promise.resolve({ data: { user: null }, error: { message: 'Invalid token' } });
         }),
@@ -33,6 +50,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
         const queryBuilder: any = {
           _field: null,
           _updates: null,
+          _table: table,
         };
 
         queryBuilder.select = jest.fn().mockReturnValue(queryBuilder);
@@ -44,6 +62,9 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
         queryBuilder.limit = jest.fn().mockReturnValue(queryBuilder);
         queryBuilder.lt = jest.fn().mockReturnValue(queryBuilder);
         queryBuilder.gt = jest.fn().mockReturnValue(queryBuilder);
+        queryBuilder.in = jest.fn().mockImplementation((field: string, values: any[]) => {
+          return Promise.resolve({ data: [], error: null });
+        });
         queryBuilder.insert = jest.fn().mockImplementation((val: any) => {
           queryBuilder._insertedVal = val;
           return queryBuilder;
@@ -53,6 +74,31 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
           return queryBuilder;
         });
         queryBuilder.delete = jest.fn().mockReturnValue(queryBuilder);
+
+        // Make queryBuilder thenable so `await supabase.from(...).select().eq()` works
+        // This is needed for getParticipantIds which doesn't call .maybeSingle()/.single()
+        queryBuilder.then = function (resolve: any, reject?: any) {
+          if (table === 'conversation_participants' && queryBuilder._field === 'conversation_id') {
+            // getParticipantIds: return both participants
+            return Promise.resolve({
+              data: [
+                { user_id: userA.id },
+                { user_id: userB.id },
+              ],
+              error: null,
+            }).then(resolve, reject);
+          }
+          if (table === 'message_reactions') {
+            return Promise.resolve({
+              data: [
+                { message_id: '101', user_id: userA.id, emoji: '❤️' },
+              ],
+              error: null,
+            }).then(resolve, reject);
+          }
+          // Default: resolve with empty
+          return Promise.resolve({ data: [{ message_id: '101' }], error: null }).then(resolve, reject);
+        };
 
         queryBuilder.maybeSingle = jest.fn().mockImplementation(async () => {
           if (table === 'conversation_participants') {
@@ -312,4 +358,340 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
 
     reconnectSocketB.disconnect();
   });
+
+  it('10. conversation:join ack bao gồm status: joined', async () => {
+    // Tạo socket mới để test join ack
+    const socketTest = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'token-user-a' },
+      transports: ['websocket'],
+    });
+    await new Promise((res) => socketTest.on('connect', res));
+
+    const joinRes = await new Promise<{ success: boolean; status?: string }>((res) => {
+      socketTest.emit('conversation:join', { conversationId: convId }, res);
+    });
+
+    expect(joinRes.success).toBe(true);
+    expect(joinRes.status).toBe('joined');
+
+    socketTest.disconnect();
+  });
+
+  it('11. User B nhận conversation:updated trên user room khi A gửi tin', async () => {
+    // socketB đã disconnect ở test trước, tạo lại
+    socketB = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'token-user-b' },
+      transports: ['websocket'],
+    });
+    await new Promise((res) => socketB.on('connect', res));
+
+    // B KHÔNG join conversation room, chỉ có user room (auto-join trong handleConnection)
+    const updatedPromise = new Promise<any>((resolve) => {
+      socketB.once('conversation:updated', (payload) => {
+        resolve(payload);
+      });
+    });
+
+    const messagesService = app.get(MessagesService);
+    await messagesService.createConversationMessage(userA.id, convId, {
+      content: 'Hello from user room!',
+    });
+
+    const updated = await updatedPromise;
+    expect(updated.conversationId).toBe(convId);
+    expect(updated.senderId).toBe(userA.id);
+    expect(updated.lastMessagePreview).toBe('Hello from user room!');
+    expect(updated.unreadDelta).toBe(1);
+    expect(updated.lastMessageId).toBeDefined();
+    expect(updated.lastMessageAt).toBeDefined();
+  });
+
+  it('12. Sender A KHÔNG nhận conversation:updated trên user room của chính mình', async () => {
+    // Tạo lại socketA
+    socketA = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'token-user-a' },
+      transports: ['websocket'],
+    });
+    await new Promise((res) => socketA.on('connect', res));
+
+    let senderReceivedUpdate = false;
+    socketA.once('conversation:updated', () => {
+      senderReceivedUpdate = true;
+    });
+
+    const messagesService = app.get(MessagesService);
+    await messagesService.createConversationMessage(userA.id, convId, {
+      content: 'Should not notify sender',
+    });
+
+    // Chờ 300ms để đảm bảo không nhận event
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(senderReceivedUpdate).toBe(false);
+  });
+
+  it('13. User B ở khác room vẫn nhận conversation:updated mà không cần join conversation room', async () => {
+    // B join conversation room khác (otherConvId), không join convId
+    await new Promise<{ success: boolean }>((res) => {
+      socketB.emit('conversation:join', { conversationId: otherConvId }, res);
+    });
+
+    let leakedMessage = false;
+    socketB.once('message:created', () => {
+      leakedMessage = true;
+    });
+
+    const updatedPromise = new Promise<any>((resolve) => {
+      socketB.once('conversation:updated', (payload) => {
+        resolve(payload);
+      });
+    });
+
+    const messagesService = app.get(MessagesService);
+    await messagesService.createConversationMessage(userA.id, convId, {
+      content: 'User room notification test',
+    });
+
+    const updated = await updatedPromise;
+    expect(updated.conversationId).toBe(convId);
+    expect(updated.lastMessagePreview).toBe('User room notification test');
+
+    // message:created KHÔNG lọt sang vì B không ở conversation room của convId
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(leakedMessage).toBe(false);
+  });
+
+  it('14. User A thả cảm xúc -> User B trong cùng conversation nhận message:reaction-updated realtime', async () => {
+    // User A và B đều join convId
+    await Promise.all([
+      new Promise<{ success: boolean }>((res) => {
+        socketA.emit('conversation:join', { conversationId: convId }, res);
+      }),
+      new Promise<{ success: boolean }>((res) => {
+        socketB.emit('conversation:join', { conversationId: convId }, res);
+      }),
+    ]);
+
+    const reactionPromise = new Promise<any>((resolve) => {
+      socketB.once('message:reaction-updated', (payload) => {
+        resolve(payload);
+      });
+    });
+
+    const messagesService = app.get(MessagesService);
+    const clientMutationId = '77777777-7777-4777-a777-777777777777';
+
+    await messagesService.setReaction(userA.id, convId, '101', {
+      emoji: '❤️',
+      reacted: true,
+      clientMutationId,
+    });
+
+    const received = await reactionPromise;
+    expect(received.messageId).toBe('101');
+    expect(received.conversationId).toBe(convId);
+    expect(received.actorUserId).toBe(userA.id);
+    expect(received.emoji).toBe('❤️');
+    expect(received.action).toBe('added');
+    expect(received.clientMutationId).toBe(clientMutationId);
+    expect(received.reactions).toBeDefined();
+  });
+
+  it('15. User ở khác conversation room KHÔNG nhận message:reaction-updated', async () => {
+    // User B rời convId và join otherConvId
+    socketB.emit('conversation:leave', { conversationId: convId });
+    await new Promise<{ success: boolean }>((res) => {
+      socketB.emit('conversation:join', { conversationId: otherConvId }, res);
+    });
+
+    let leakedReaction = false;
+    socketB.once('message:reaction-updated', () => {
+      leakedReaction = true;
+    });
+
+    const messagesService = app.get(MessagesService);
+    await messagesService.setReaction(userA.id, convId, '101', {
+      emoji: '👍',
+      reacted: true,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(leakedReaction).toBe(false);
+  });
+
+  it('16. Supabase getUser() bị delay: conversation:join chỉ được xử lý sau khi auth hoàn tất -> ack status: joined', async () => {
+    const delayedSocket = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'delayed-token-user-a' },
+      transports: ['websocket'],
+    });
+
+    try {
+      // Ngay khi connect được emit (chắc chắn middleware auth đã xong), emit conversation:join
+      const joinResult = await new Promise<any>((resolve) => {
+        delayedSocket.on('connect', () => {
+          delayedSocket.emit(
+            'conversation:join',
+            { conversationId: convId },
+            (res: any) => resolve(res),
+          );
+        });
+      });
+
+      expect(joinResult.success).toBe(true);
+      expect(joinResult.status).toBe('joined');
+    } finally {
+      delayedSocket.disconnect();
+    }
+  });
+
+  it('17. Token sai / hết hạn: nhận connect_error và không thể gọi handler', async () => {
+    const badSocket = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'bad-or-expired-token' },
+      transports: ['websocket'],
+    });
+
+    try {
+      const errorMsg = await new Promise<string>((resolve) => {
+        badSocket.on('connect_error', (err) => {
+          resolve(err.message);
+        });
+      });
+
+      expect(errorMsg).toBe('Chưa xác thực');
+      expect(badSocket.connected).toBe(false);
+    } finally {
+      badSocket.disconnect();
+    }
+  });
+
+  it('18. Hai client có thời gian auth khác nhau (A nhanh, B chậm) vẫn join cùng room thành công', async () => {
+    const clientFast = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'token-user-a' },
+      transports: ['websocket'],
+    });
+    const clientSlow = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'delayed-token-user-b' },
+      transports: ['websocket'],
+    });
+
+    try {
+      const [resA, resB] = await Promise.all([
+        new Promise<any>((resolve) => {
+          clientFast.on('connect', () => {
+            clientFast.emit('conversation:join', { conversationId: convId }, resolve);
+          });
+        }),
+        new Promise<any>((resolve) => {
+          clientSlow.on('connect', () => {
+            clientSlow.emit('conversation:join', { conversationId: convId }, resolve);
+          });
+        }),
+      ]);
+
+      expect(resA.success).toBe(true);
+      expect(resA.status).toBe('joined');
+      expect(resB.success).toBe(true);
+      expect(resB.status).toBe('joined');
+    } finally {
+      clientFast.disconnect();
+      clientSlow.disconnect();
+    }
+  });
+
+  it('19. Hai chiều realtime reaction: A reaction -> B nhận, và B reaction -> A nhận', async () => {
+    // Join convId cho cả socketA và socketB
+    await Promise.all([
+      new Promise<{ success: boolean }>((res) => {
+        socketA.emit('conversation:join', { conversationId: convId }, res);
+      }),
+      new Promise<{ success: boolean }>((res) => {
+        socketB.emit('conversation:join', { conversationId: convId }, res);
+      }),
+    ]);
+
+    const messagesService = app.get(MessagesService);
+
+    // Chiều 1: A thả ❤️ -> B nhận
+    const bReceivedPromise = new Promise<any>((resolve) => {
+      socketB.once('message:reaction-updated', resolve);
+    });
+
+    await messagesService.setReaction(userA.id, convId, '101', {
+      emoji: '❤️',
+      reacted: true,
+      clientMutationId: '11111111-aaaa-4111-a111-111111111111',
+    });
+
+    const bReceived = await bReceivedPromise;
+    expect(bReceived.messageId).toBe('101');
+    expect(bReceived.actorUserId).toBe(userA.id);
+    expect(bReceived.emoji).toBe('❤️');
+    expect(bReceived.action).toBe('added');
+
+    // Chờ 50ms để sự kiện Chiều 1 hoàn tất trên socketA
+    await new Promise((res) => setTimeout(res, 50));
+
+    // Chiều 2: B thả 🌿 -> A nhận
+    const aReceivedPromise = new Promise<any>((resolve) => {
+      socketA.once('message:reaction-updated', resolve);
+    });
+
+    await messagesService.setReaction(userB.id, convId, '101', {
+      emoji: '🌿',
+      reacted: true,
+      clientMutationId: '22222222-bbbb-4222-a222-222222222222',
+    });
+
+    const aReceived = await aReceivedPromise;
+    expect(aReceived.messageId).toBe('101');
+    expect(aReceived.actorUserId).toBe(userB.id);
+    expect(aReceived.emoji).toBe('🌿');
+    expect(aReceived.action).toBe('added');
+  });
+
+  it('20. Reconnect sau token refresh: cập nhật token, tự join lại conversation room và tiếp tục nhận reaction', async () => {
+    const reconnectingSocket = io(`http://localhost:${port}/chat`, {
+      auth: { token: 'token-user-b' },
+      transports: ['websocket'],
+    });
+
+    try {
+      await new Promise((res) => reconnectingSocket.on('connect', res));
+
+      // Join room ban đầu
+      await new Promise<any>((resolve) => {
+        reconnectingSocket.emit('conversation:join', { conversationId: convId }, resolve);
+      });
+
+      // Giả lập token refresh và reconnect
+      reconnectingSocket.auth = { token: 'refreshed-token-user-b' };
+      reconnectingSocket.disconnect();
+      reconnectingSocket.connect();
+
+      await new Promise((res) => reconnectingSocket.on('connect', res));
+
+      // Auto-rejoin room sau connect
+      await new Promise<any>((resolve) => {
+        reconnectingSocket.emit('conversation:join', { conversationId: convId }, resolve);
+      });
+
+      const reactionPromise = new Promise<any>((resolve) => {
+        reconnectingSocket.once('message:reaction-updated', resolve);
+      });
+
+      const messagesService = app.get(MessagesService);
+      await messagesService.setReaction(userA.id, convId, '101', {
+        emoji: '🔥',
+        reacted: true,
+        clientMutationId: '33333333-cccc-4333-a333-333333333333',
+      });
+
+      const received = await reactionPromise;
+      expect(received.messageId).toBe('101');
+      expect(received.actorUserId).toBe(userA.id);
+      expect(received.emoji).toBe('🔥');
+    } finally {
+      reconnectingSocket.disconnect();
+    }
+  });
 });
+

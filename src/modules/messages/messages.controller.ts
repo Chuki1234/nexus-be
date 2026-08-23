@@ -24,9 +24,10 @@ import type {
   MessagesPaginationResponseDto,
 } from './dto/message-response.dto';
 import { SendMessageDto } from './dto/send-message.dto';
-import { MessagesService } from './messages.service';
+import { SetReactionDto } from './dto/set-reaction.dto';
+import { MessagesService, type SetReactionResponseDto } from './messages.service';
 
-@Controller('api')
+@Controller()
 @UseGuards(SupabaseAuthGuard)
 export class MessagesController {
   constructor(private readonly messagesService: MessagesService) {}
@@ -106,6 +107,24 @@ export class MessagesController {
       user.id,
       conversationId,
       attachmentId,
+    );
+  }
+
+  /**
+   * Thêm hoặc xóa reaction cho tin nhắn theo desired state (Idempotent).
+   */
+  @Post('conversations/:conversationId/messages/:messageId/reactions')
+  async setReaction(
+    @CurrentUser() user: User,
+    @Param('conversationId', ParseUUIDPipe) conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: SetReactionDto,
+  ): Promise<SetReactionResponseDto> {
+    return this.messagesService.setReaction(
+      user.id,
+      conversationId,
+      messageId,
+      dto,
     );
   }
 

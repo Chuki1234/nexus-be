@@ -11,7 +11,12 @@ import sharp from 'sharp';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
-import { MessagesService } from './messages.service';
+import {
+  formatContentDisposition,
+  isValidEmoji,
+  MessagesService,
+  normalizeFilename,
+} from './messages.service';
 
 function defaultTableHandler(table: string) {
   if (table === 'attachments') {
@@ -23,6 +28,20 @@ function defaultTableHandler(table: string) {
       }),
       delete: jest.fn().mockReturnValue({
         eq: jest.fn().mockResolvedValue({ error: null }),
+      }),
+    };
+  }
+  if (table === 'message_reactions') {
+    return {
+      select: jest.fn().mockReturnThis(),
+      in: jest.fn().mockResolvedValue({ data: [], error: null }),
+      eq: jest.fn().mockReturnThis(),
+      insert: jest.fn().mockReturnValue({
+        select: jest.fn().mockResolvedValue({ data: [], error: null }),
+      }),
+      delete: jest.fn().mockReturnValue({
+        eq: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue({ data: [], error: null }),
       }),
     };
   }
@@ -170,7 +189,7 @@ describe('MessagesService', () => {
             }),
           };
         }
-        return {};
+        return defaultTableHandler(table);
       });
 
       const res = await service.getConversationMessages('user-1', 'conv-1', {
@@ -1044,7 +1063,194 @@ describe('MessagesService', () => {
 
       await expect(
         service.createConversationMessage('user-1', 'conv-1', {}, [corruptedFile]),
-      ).rejects.toThrow('bị lỗi, hỏng hoặc vượt giới hạn xử lý.');
+      ).rejects.toThrow('bị lỗi, hỏng hoặc không thể xử lý.');
+    });
+
+    it('chấp nhận file GIF hợp lệ và lưu đúng kích thước frameHeight (thay vì tổng chiều cao các frame)', async () => {
+      // Tạo file GIF hợp lệ qua sharp (400x300px)
+      const validGifBuffer = await sharp({
+        create: {
+          width: 400,
+          height: 300,
+          channels: 4,
+          background: { r: 0, g: 255, b: 128, alpha: 1 },
+        },
+      })
+        .gif()
+        .toBuffer();
+
+      let insertedAttachmentRows: any[] = [];
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'conversation_participants') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { conversation_id: 'conv-1', user_id: 'user-1' },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+            insert: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnValue({
+                single: jest.fn().mockResolvedValue({
+                  data: {
+                    id: 2001,
+                    conversation_id: 'conv-1',
+                    author_id: 'user-1',
+                    content: 'Animated GIF msg',
+                    type: 'default',
+                    reply_to_id: null,
+                    client_nonce: 'nonce-gif',
+                    edited_at: null,
+                    deleted_at: null,
+                    created_at: new Date().toISOString(),
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'attachments') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            in: jest.fn().mockResolvedValue({
+              data: [
+                {
+                  id: 'att-gif-1',
+                  message_id: 2001,
+                  storage_path: 'conversations/conv-1/sample.gif',
+                  filename: 'animated_sticker.gif',
+                  mime_type: 'image/gif',
+                  size_bytes: validGifBuffer.length,
+                  width: 400,
+                  height: 300,
+                  created_at: new Date().toISOString(),
+                },
+              ],
+              error: null,
+            }),
+            insert: jest.fn().mockImplementation((rows: any[]) => {
+              insertedAttachmentRows = rows;
+              return {
+                select: jest.fn().mockResolvedValue({
+                  data: rows.map((r, i) => ({ ...r, id: `att-${i}` })),
+                  error: null,
+                }),
+              };
+            }),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: 'user-1', username: 'u1', display_name: 'U1' },
+              error: null,
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const gifFile = {
+        buffer: validGifBuffer,
+        originalname: 'animated_sticker.gif',
+        mimetype: 'image/gif',
+        size: validGifBuffer.length,
+      } as Express.Multer.File;
+
+      const res = await service.createConversationMessage(
+        'user-1',
+        'conv-1',
+        { content: 'Animated GIF msg' },
+        [gifFile],
+      );
+
+      expect(res.id).toBe('2001');
+      expect(insertedAttachmentRows.length).toBe(1);
+      expect(insertedAttachmentRows[0].width).toBe(400);
+      expect(insertedAttachmentRows[0].height).toBe(300);
+      expect(insertedAttachmentRows[0].filename).toBe('animated_sticker.gif');
+    });
+
+    it('từ chối ảnh có frame dimension vượt quá 4096px với thông báo chính xác', async () => {
+      // Giả lập metadata frame > 4096
+      const hugeFrameBuffer = await sharp({
+        create: {
+          width: 5000,
+          height: 100,
+          channels: 3,
+          background: { r: 255, g: 255, b: 255 },
+        },
+      })
+        .jpeg()
+        .toBuffer();
+
+      const hugeFile = {
+        buffer: hugeFrameBuffer,
+        originalname: 'huge_panorama.jpg',
+        mimetype: 'image/jpeg',
+        size: hugeFrameBuffer.length,
+      } as Express.Multer.File;
+
+      await expect(
+        service.createConversationMessage('user-1', 'conv-1', {}, [hugeFile]),
+      ).rejects.toThrow('vượt quá giới hạn tối đa 4096x4096px');
+    });
+  });
+
+  describe('normalizeFilename & formatContentDisposition', () => {
+    it('giữ nguyên tên file ASCII chuẩn', () => {
+      expect(normalizeFilename('document.pdf')).toBe('document.pdf');
+      expect(normalizeFilename('archive_2026.zip')).toBe('archive_2026.zip');
+    });
+
+    it('bảo toàn nguyên vẹn tên file tiếng Việt có dấu đã đúng chuẩn UTF-8', () => {
+      const name = 'Báo cáo thực tập kỳ 2 (Bản chuẩn).pdf';
+      expect(normalizeFilename(name)).toBe(name);
+    });
+
+    it('giải mã chính xác tên file tiếng Việt bị mojibake Latin-1 thành UTF-8', () => {
+      // 'Báo cáo.pdf' bị Busboy parse nhầm thành Latin-1: 'BÃ¡o cÃ¡o.pdf'
+      const mojibake = Buffer.from('Báo cáo.pdf', 'utf8').toString('latin1');
+      expect(normalizeFilename(mojibake)).toBe('Báo cáo.pdf');
+    });
+
+    it('bảo toàn Emoji trong tên file', () => {
+      const emojiName = '📊 data_report.xlsx';
+      expect(normalizeFilename(emojiName)).toBe('📊 data_report.xlsx');
+    });
+
+    it('idempotent: gọi nhiều lần không tiếp tục biến đổi chuỗi', () => {
+      const original = 'Báo cáo tài chính 2026.pdf';
+      const step1 = normalizeFilename(original);
+      const step2 = normalizeFilename(step1);
+      const step3 = normalizeFilename(step2);
+
+      expect(step1).toBe(original);
+      expect(step2).toBe(original);
+      expect(step3).toBe(original);
+    });
+
+    it('loại bỏ path traversal và control characters nguy hiểm', () => {
+      expect(normalizeFilename('../../secret/passwords.txt')).toBe('passwords.txt');
+      expect(normalizeFilename('file\x00\x1f\x7fname.png')).toBe('filename.png');
+    });
+
+    it('formatContentDisposition tuân thủ RFC 5987 / RFC 6266 và chống CRLF injection', () => {
+      const result = formatContentDisposition('Báo cáo kỳ 2.pdf\r\nInjected-Header: evil');
+      expect(result).not.toContain('\r');
+      expect(result).not.toContain('\n');
+      expect(result).toContain('filename="B_o c_o k_ 2.pdf__Injected-Header: evil"');
+      expect(result).toContain("filename*=UTF-8''B%C3%A1o%20c%C3%A1o%20k%E1%BB%B3%202.pdf__Injected-Header%3A%20evil");
     });
   });
 
@@ -1449,7 +1655,7 @@ describe('MessagesService', () => {
             }),
           };
         }
-        return {};
+        return defaultTableHandler(table);
       });
 
       await expect(
@@ -1484,11 +1690,334 @@ describe('MessagesService', () => {
             }),
           };
         }
-        return {};
+        return defaultTableHandler(table);
       });
 
       const res = await service.getAttachmentSignedUrl('user-1', 'conv-1', 'att-1');
       expect(res.signedUrl).toBe('https://storage.supabase.co/signed/refreshed.png');
+    });
+  });
+
+  describe('isValidEmoji', () => {
+    it('chấp nhận các emoji hợp lệ đơn lẻ, skin tone, variation selector và ZWJ', () => {
+      expect(isValidEmoji('❤️')).toBe(true);
+      expect(isValidEmoji('👍')).toBe(true);
+      expect(isValidEmoji('😂')).toBe(true);
+      expect(isValidEmoji('🔥')).toBe(true);
+      expect(isValidEmoji('🎉')).toBe(true);
+      expect(isValidEmoji('🌿')).toBe(true);
+      expect(isValidEmoji('👍🏽')).toBe(true); // Skin tone
+      expect(isValidEmoji('👨‍👩‍👧‍👦')).toBe(true); // ZWJ sequence
+      expect(isValidEmoji('✨')).toBe(true);
+    });
+
+    it('từ chối các chuỗi không phải emoji đơn lẻ hoặc không hợp lệ', () => {
+      expect(isValidEmoji('')).toBe(false);
+      expect(isValidEmoji('hello')).toBe(false);
+      expect(isValidEmoji('👍👍')).toBe(false);
+      expect(isValidEmoji('<script>alert(1)</script>')).toBe(false);
+      expect(isValidEmoji('https://evil.com')).toBe(false);
+      expect(isValidEmoji('a'.repeat(50))).toBe(false);
+      expect(isValidEmoji('\x00\x01')).toBe(false);
+      expect(isValidEmoji('❤️ text')).toBe(false);
+    });
+  });
+
+  describe('setReaction', () => {
+    const convId = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
+    const messageId = '101';
+    const userId = 'u-1';
+
+    beforeEach(() => {
+      mockConversationsService.verifyMembership.mockResolvedValue(true);
+    });
+
+    it('ném BadRequestException nếu emoji không hợp lệ', async () => {
+      await expect(
+        service.setReaction(userId, convId, messageId, {
+          emoji: 'not_an_emoji',
+          reacted: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('ném ForbiddenException nếu người dùng không phải thành viên cuộc trò chuyện', async () => {
+      mockConversationsService.verifyMembership.mockResolvedValue(false);
+
+      await expect(
+        service.setReaction(userId, convId, messageId, {
+          emoji: '❤️',
+          reacted: true,
+        }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('ném NotFoundException nếu tin nhắn không tồn tại', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      await expect(
+        service.setReaction(userId, convId, messageId, {
+          emoji: '❤️',
+          reacted: true,
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('ném BadRequestException nếu tin nhắn thuộc cuộc trò chuyện khác', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: messageId, conversation_id: 'other-conv', deleted_at: null },
+              error: null,
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      await expect(
+        service.setReaction(userId, convId, messageId, {
+          emoji: '❤️',
+          reacted: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('ném BadRequestException nếu tin nhắn đã bị xoá', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: {
+                id: messageId,
+                conversation_id: convId,
+                deleted_at: '2026-08-23T10:00:00Z',
+              },
+              error: null,
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      await expect(
+        service.setReaction(userId, convId, messageId, {
+          emoji: '❤️',
+          reacted: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('thêm reaction thành công (reacted: true), emit event và trả về canonical summary', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: messageId, conversation_id: convId, deleted_at: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'message_reactions') {
+          return {
+            insert: jest.fn().mockReturnValue({
+              select: jest.fn().mockResolvedValue({
+                data: [{ message_id: messageId }],
+                error: null,
+              }),
+            }),
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockResolvedValue({
+                data: [{ emoji: '❤️', user_id: userId }],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const clientMutationId = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+      const res = await service.setReaction(userId, convId, messageId, {
+        emoji: '❤️',
+        reacted: true,
+        clientMutationId,
+      });
+
+      expect(res.messageId).toBe(messageId);
+      expect(res.conversationId).toBe(convId);
+      expect(res.clientMutationId).toBe(clientMutationId);
+      expect(res.reactions).toEqual([{ emoji: '❤️', count: 1, reactedByMe: true }]);
+
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.REACTION_UPDATED,
+        expect.objectContaining({
+          conversationId: convId,
+          messageId,
+          actorUserId: userId,
+          emoji: '❤️',
+          action: 'added',
+          clientMutationId,
+          reactions: [{ emoji: '❤️', count: 1 }],
+        }),
+      );
+    });
+
+    it('idempotent retry thêm reaction khi row đã tồn tại: trả canonical summary, KHÔNG emit fake broadcast', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: messageId, conversation_id: convId, deleted_at: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'message_reactions') {
+          return {
+            insert: jest.fn().mockReturnValue({
+              select: jest.fn().mockResolvedValue({
+                data: null,
+                error: { code: '23505', message: 'duplicate key' },
+              }),
+            }),
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockResolvedValue({
+                data: [{ emoji: '❤️', user_id: userId }],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const res = await service.setReaction(userId, convId, messageId, {
+        emoji: '❤️',
+        reacted: true,
+      });
+
+      expect(res.reactions).toEqual([{ emoji: '❤️', count: 1, reactedByMe: true }]);
+      expect(mockEventEmitter.emit).not.toHaveBeenCalledWith(
+        CHAT_EVENTS.REACTION_UPDATED,
+        expect.anything(),
+      );
+    });
+
+    it('xoá reaction thành công (reacted: false), emit event và trả về canonical summary', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: messageId, conversation_id: convId, deleted_at: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'message_reactions') {
+          return {
+            delete: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnThis(),
+              select: jest.fn().mockResolvedValue({
+                data: [{ message_id: messageId }],
+                error: null,
+              }),
+            }),
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const clientMutationId = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6e';
+      const res = await service.setReaction(userId, convId, messageId, {
+        emoji: '❤️',
+        reacted: false,
+        clientMutationId,
+      });
+
+      expect(res.reactions).toEqual([]);
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.REACTION_UPDATED,
+        expect.objectContaining({
+          conversationId: convId,
+          messageId,
+          actorUserId: userId,
+          emoji: '❤️',
+          action: 'removed',
+          clientMutationId,
+          reactions: [],
+        }),
+      );
+    });
+
+    it('idempotent retry xoá reaction khi row không tồn tại: trả canonical summary, KHÔNG emit fake broadcast', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: messageId, conversation_id: convId, deleted_at: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'message_reactions') {
+          return {
+            delete: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnThis(),
+              select: jest.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
+            }),
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const res = await service.setReaction(userId, convId, messageId, {
+        emoji: '❤️',
+        reacted: false,
+      });
+
+      expect(res.reactions).toEqual([]);
+      expect(mockEventEmitter.emit).not.toHaveBeenCalledWith(
+        CHAT_EVENTS.REACTION_UPDATED,
+        expect.anything(),
+      );
     });
   });
 });

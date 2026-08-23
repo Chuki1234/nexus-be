@@ -17,6 +17,13 @@
 /** `messages.id` là bigint — truyền dạng chuỗi để không mất chính xác trong JS. */
 export type MessageId = string;
 
+export interface MessageAuthorPayload {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
 export interface AttachmentPayload {
   id: string;
   filename: string;
@@ -28,11 +35,18 @@ export interface AttachmentPayload {
   isAvailable?: boolean;
 }
 
+export interface ReactionSummaryPayload {
+  emoji: string;
+  count: number;
+  reactedByMe?: boolean;
+}
+
 export interface MessagePayload {
   id: MessageId;
   channelId: string | null;
   conversationId: string | null;
   authorId: string | null;
+  author?: MessageAuthorPayload;
   type: 'default' | 'system_join' | 'system_leave';
   content: string | null;
   replyToId: MessageId | null;
@@ -40,7 +54,21 @@ export interface MessagePayload {
   editedAt: string | null;
   deletedAt: string | null;
   attachments?: AttachmentPayload[];
+  reactions?: ReactionSummaryPayload[];
   createdAt: string;
+}
+
+export interface ReactionUpdatedPayload {
+  messageId: MessageId;
+  conversationId: string;
+  actorUserId: string;
+  emoji: string;
+  action: 'added' | 'removed';
+  clientMutationId?: string;
+  reactions: Array<{
+    emoji: string;
+    count: number;
+  }>;
 }
 
 export interface NotificationPayload {
@@ -85,6 +113,7 @@ export interface ServerToClientEvents {
     conversationId: string | null;
     messageId: MessageId;
   }) => void;
+  'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
 
   'message:read': (payload: {
     conversationId: string;
@@ -103,6 +132,16 @@ export interface ServerToClientEvents {
     conversationId?: string;
     unreadCount: number;
     mentionCount: number;
+  }) => void;
+
+  /** Thông báo cấp user-room khi có tin nhắn mới trong conversation mà user chưa join room. */
+  'conversation:updated': (payload: {
+    conversationId: string;
+    senderId: string;
+    lastMessageId: MessageId;
+    lastMessagePreview: string | null;
+    lastMessageAt: string;
+    unreadDelta: number;
   }) => void;
 
   'notification:new': (payload: { notification: NotificationPayload }) => void;

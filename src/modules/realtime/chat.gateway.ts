@@ -3,16 +3,18 @@ import { OnEvent } from '@nestjs/event-emitter';
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
+import { Namespace, Server, Socket } from 'socket.io';
 import { normalizeCorsOrigins } from '../../common/utils/cors.util';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import {
   Room,
   type ClientToServerEvents,
+  type JoinConversationResponse,
   type ServerToClientEvents,
 } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
@@ -22,6 +24,7 @@ import {
   type MessageDeletedEvent,
   type MessageReadEvent,
   type MessageUpdatedEvent,
+  type ReactionUpdatedEvent,
 } from './constants/chat-events.constant';
 
 interface SocketData {
@@ -49,7 +52,9 @@ function isValidUuid(id: unknown): id is string {
     credentials: true,
   },
 })
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ChatGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(ChatGateway.name);
 
   @WebSocketServer()
@@ -68,51 +73,67 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   /**
-   * Xác thực JWT token từ handshake (Supabase Auth).
-   * Chỉ chấp nhận qua handshake.auth.token hoặc Authorization Bearer header.
-   * Disconnect ngay lập tức nếu token không hợp lệ hoặc thiếu.
+   * Namespace middleware chạy TRƯỚC KHI connection được chấp nhận.
+   * Đảm bảo socket.data.userId đã được gán xong trước khi emit 'connect' cho client hoặc gọi handlers.
+   * Token sai/hết hạn lập tức gây connect_error, ngăn ngừa race condition hoàn toàn.
    */
-  async handleConnection(client: TypedSocket): Promise<void> {
-    try {
-      const authHeader = client.handshake.headers?.authorization;
-      const rawToken =
-        client.handshake.auth?.token ||
-        (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-          ? authHeader.slice(7)
-          : undefined);
+  afterInit(server: Server | Namespace): void {
+    server.use(async (socket: Socket, next: (err?: Error) => void) => {
+      try {
+        const authHeader = socket.handshake.headers?.authorization;
+        let rawToken: string | undefined = socket.handshake.auth?.token;
+        if (!rawToken && typeof authHeader === 'string') {
+          rawToken = authHeader;
+        }
 
-      const token = typeof rawToken === 'string' ? rawToken.trim() : null;
+        let token: string | null = null;
+        if (typeof rawToken === 'string') {
+          const trimmed = rawToken.trim();
+          token = trimmed.startsWith('Bearer ') ? trimmed.slice(7).trim() : trimmed;
+        }
 
-      if (!token) {
-        this.logger.warn(`Từ chối kết nối socket ${client.id}: thiếu token`);
-        client.disconnect(true);
-        return;
+        if (!token) {
+          this.logger.warn(`Từ chối kết nối socket ${socket.id}: thiếu token`);
+          return next(new Error('Chưa xác thực'));
+        }
+
+        const { data: authData, error } =
+          await this.supabase.client.auth.getUser(token);
+
+        if (error || !authData?.user?.id) {
+          this.logger.warn(
+            `Từ chối kết nối socket ${socket.id}: token không hợp lệ (${error?.message})`,
+          );
+          return next(new Error('Chưa xác thực'));
+        }
+
+        socket.data.userId = authData.user.id;
+        next();
+      } catch (err) {
+        this.logger.error(`Lỗi xác thực socket connection ${socket.id}:`, err);
+        next(new Error('Chưa xác thực'));
       }
+    });
+  }
 
-      const { data: authData, error } =
-        await this.supabase.client.auth.getUser(token);
-
-      if (error || !authData?.user) {
-        this.logger.warn(
-          `Từ chối kết nối socket ${client.id}: token không hợp lệ (${error?.message})`,
-        );
-        client.disconnect(true);
-        return;
-      }
-
-      const userId = authData.user.id;
-      client.data.userId = userId;
-
-      // Auto-join user room của chính họ (dùng cho direct notification)
-      void client.join(Room.user(userId));
-
-      this.logger.log(
-        `Socket ${client.id} xác thực thành công cho user ${userId}`,
-      );
-    } catch (err) {
-      this.logger.error(`Lỗi xác thực socket connection ${client.id}:`, err);
+  /**
+   * Chạy sau khi socket đã vượt qua middleware xác thực thành công.
+   * socket.data.userId được đảm bảo tồn tại 100%.
+   */
+  handleConnection(client: TypedSocket): void {
+    const userId = client.data.userId;
+    if (!userId) {
+      this.logger.warn(`Socket ${client.id} thiếu userId sau middleware`);
       client.disconnect(true);
+      return;
     }
+
+    // Auto-join user room của chính họ (dùng cho direct notification)
+    void client.join(Room.user(userId));
+
+    this.logger.log(
+      `Socket ${client.id} xác thực thành công cho user ${userId}`,
+    );
   }
 
   handleDisconnect(client: TypedSocket): void {
@@ -127,16 +148,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   async handleConversationJoin(
     client: TypedSocket,
     payload: { conversationId: string },
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<JoinConversationResponse> {
     const userId = client.data.userId;
     if (!userId) {
-      return { success: false, error: 'Chưa xác thực' };
+      return { success: false, error: 'Chưa xác thực', status: 'rejected' };
     }
 
     if (!isValidUuid(payload?.conversationId)) {
       return {
         success: false,
         error: 'conversationId không hợp lệ (phải là UUID hợp lệ)',
+        status: 'rejected',
       };
     }
 
@@ -152,11 +174,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return {
         success: false,
         error: 'Không có quyền truy cập cuộc trò chuyện',
+        status: 'rejected',
       };
     }
 
     await client.join(Room.conversation(payload.conversationId));
-    return { success: true };
+    return { success: true, status: 'joined' };
   }
 
   @SubscribeMessage('conversation:leave')
@@ -223,11 +246,32 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ---------------------------------------------------------------------------
 
   @OnEvent(CHAT_EVENTS.MESSAGE_CREATED)
-  handleMessageCreated(event: MessageCreatedEvent): void {
+  async handleMessageCreated(event: MessageCreatedEvent): Promise<void> {
     const { conversationId, message } = event;
-    if (conversationId) {
-      const room = Room.conversation(conversationId);
-      this.server?.to(room).emit('message:created', { message });
+    if (!conversationId) return;
+
+    // 1. Emit full message tới conversation room (existing behavior)
+    this.server?.to(Room.conversation(conversationId)).emit('message:created', { message });
+
+    // 2. Emit lightweight notification tới user room của participants khác (không sender)
+    const participantIds = await this.conversationsService.getParticipantIds(conversationId);
+
+    const preview = message.content
+      ? message.content.length > 100
+        ? message.content.slice(0, 100) + '…'
+        : message.content
+      : null;
+
+    for (const participantId of participantIds) {
+      if (participantId === message.authorId) continue;
+      this.server?.to(Room.user(participantId)).emit('conversation:updated', {
+        conversationId,
+        senderId: message.authorId ?? '',
+        lastMessageId: message.id,
+        lastMessagePreview: preview,
+        lastMessageAt: message.createdAt,
+        unreadDelta: 1,
+      });
     }
   }
 
@@ -261,6 +305,32 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userId,
       lastReadMessageId,
     });
+  }
+
+  @OnEvent(CHAT_EVENTS.REACTION_UPDATED)
+  handleReactionUpdated(event: ReactionUpdatedEvent): void {
+    const {
+      conversationId,
+      messageId,
+      actorUserId,
+      emoji,
+      action,
+      clientMutationId,
+      reactions,
+    } = event;
+    if (conversationId) {
+      this.server
+        ?.to(Room.conversation(conversationId))
+        .emit('message:reaction-updated', {
+          messageId,
+          conversationId,
+          actorUserId,
+          emoji,
+          action,
+          clientMutationId,
+          reactions,
+        });
+    }
   }
 
   // ---------------------------------------------------------------------------

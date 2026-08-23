@@ -20,8 +20,10 @@ import type {
   MessageAuthorDto,
   MessageResponseDto,
   MessagesPaginationResponseDto,
+  ReactionSummaryDto,
 } from './dto/message-response.dto';
 import type { SendMessageDto } from './dto/send-message.dto';
+import type { SetReactionDto } from './dto/set-reaction.dto';
 
 interface RawMessageRow {
   id: number | string;
@@ -130,10 +132,89 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
   return false;
 }
 
-function sanitizeFilename(filename: string): string {
-  const base = filename.split(/[/\\]/).pop() || 'attachment';
-  const clean = base.replace(/[\x00-\x1f\x80-\x9f]/g, '').trim();
-  return clean.slice(0, 255) || 'attachment';
+/**
+ * Chuẩn hoá tên tập tin:
+ * 1. Nhận diện và giải mã an toàn các byte-sequence Latin-1 bị sinh ra do parser multipart không nhận UTF-8.
+ * 2. Idempotent: chạy nhiều lần trên cùng 1 chuỗi không làm biến đổi chuỗi đã chuẩn.
+ * 3. Bảo toàn nguyên vẹn Unicode tiếng Việt, Emoji và ASCII.
+ * 4. Loại bỏ path traversal và control characters nguy hiểm.
+ */
+export function normalizeFilename(rawName: string): string {
+  if (!rawName) return 'attachment';
+  let cleaned = rawName;
+
+  // Heuristic: Kiểm tra nếu chuỗi có dấu hiệu mojibake UTF-8 được giải mã nhầm qua Latin-1
+  if (/[\xC0-\xFF]/.test(rawName)) {
+    try {
+      const candidate = Buffer.from(rawName, 'latin1').toString('utf8');
+      // Chỉ chọn candidate nếu decode thành công (không có ký tự thay thế \uFFFD)
+      // và candidate khác với rawName
+      if (!candidate.includes('\uFFFD') && candidate !== rawName) {
+        // Kiểm tra tính đối xứng (round-trip check) để không vô tình sửa chuỗi hợp lệ
+        const reEncoded = Buffer.from(candidate, 'utf8').toString('latin1');
+        if (reEncoded === rawName) {
+          cleaned = candidate;
+        }
+      }
+    } catch {
+      // Giữ nguyên chuỗi gốc nếu có lỗi
+    }
+  }
+
+  // Tách lấy base filename (chống path traversal ../)
+  const base = cleaned.split(/[/\\]/).pop() || 'attachment';
+  // Lọc bỏ ký tự điều khiển ASCII và DEL (\x00-\x1F, \x7F) nhưng BẢO TOÀN toàn bộ Unicode tiếng Việt & Emoji
+  const sanitized = base.replace(/[\x00-\x1f\x7f]/g, '').trim();
+  return sanitized.slice(0, 255) || 'attachment';
+}
+
+/**
+ * Định dạng header Content-Disposition tuân thủ RFC 5987 / RFC 6266.
+ * Hỗ trợ tải file có tên tiếng Việt / Emoji an toàn và chống CRLF injection.
+ */
+export function formatContentDisposition(filename: string): string {
+  const safeFilename = filename.replace(/[\r\n"]/g, '_').trim();
+  const asciiFallback = safeFilename.replace(/[^\x20-\x7E]/g, '_') || 'attachment';
+  const utf8Encoded = encodeURIComponent(safeFilename)
+    .replace(/['()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/\*/g, '%2A');
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Encoded}`;
+}
+
+/**
+ * Kiểm tra xem một chuỗi có phải là đúng 1 extended grapheme cluster biểu tượng cảm xúc (emoji) hợp lệ hay không.
+ * Cho phép emoji có skin tone modifier, variation selector (\uFE0F) và Zero-Width Joiner (ZWJ).
+ * Chặn text thông thường, thẻ HTML, URLs và ký tự điều khiển.
+ */
+export function isValidEmoji(str: string): boolean {
+  if (!str || typeof str !== 'string') return false;
+  const normalized = str.normalize('NFC').trim();
+  if (normalized.length === 0 || normalized.length > 32) return false;
+
+  // Chặn thẻ HTML, URLs, ký tự điều khiển
+  if (/[<>\r\n\t\x00-\x1f\x7f]/.test(normalized)) return false;
+  if (/^https?:\/\//i.test(normalized)) return false;
+
+  // Kiểm tra đúng 1 extended grapheme cluster qua Intl.Segmenter
+  try {
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    const segments = Array.from(segmenter.segment(normalized));
+    if (segments.length !== 1) return false;
+  } catch {
+    if (Array.from(normalized).length > 8) return false;
+  }
+
+  // Regex kiểm tra ký tự emoji / pictograph / symbol
+  const emojiRegex =
+    /[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\u200D\u{1F3FB}-\u{1F3FF}]/u;
+  return emojiRegex.test(normalized);
+}
+
+export interface SetReactionResponseDto {
+  messageId: string;
+  conversationId: string;
+  clientMutationId?: string;
+  reactions: ReactionSummaryDto[];
 }
 
 @Injectable()
@@ -220,14 +301,18 @@ export class MessagesService {
       }
     }
 
-    // 2. Lấy attachments cho các tin nhắn chưa bị xoá (deleted_at === null)
+    // 2. Lấy attachments & reactions cho các tin nhắn chưa bị xoá (deleted_at === null)
     const activeRows = finalRows.filter((m) => !m.deleted_at);
     const activeMessageIds = activeRows.map((m) => m.id);
-    const attachmentMap = await this.loadAttachmentsForMessages(activeMessageIds);
+    const [attachmentMap, reactionMap] = await Promise.all([
+      this.loadAttachmentsForMessages(activeMessageIds),
+      this.loadReactionsForMessages(activeMessageIds, userId),
+    ]);
 
     const formattedMessages: MessageResponseDto[] = finalRows.map((m) => {
       const msgId = m.id.toString();
       const atts = m.deleted_at ? undefined : attachmentMap.get(msgId);
+      const reacts = m.deleted_at ? undefined : (reactionMap.get(msgId) ?? []);
       return {
         id: msgId,
         channelId: m.channel_id,
@@ -241,6 +326,7 @@ export class MessagesService {
         editedAt: m.edited_at,
         deletedAt: m.deleted_at,
         ...(atts && atts.length > 0 ? { attachments: atts } : {}),
+        reactions: reacts,
         createdAt: m.created_at,
       };
     });
@@ -255,6 +341,78 @@ export class MessagesService {
     }
 
     return result;
+  }
+
+  /**
+   * Helper tải gộp (batch load) toàn bộ reactions cho danh sách message IDs.
+   * Chỉ tốn đúng 1 truy vấn database (O(1) query) không phụ thuộc số lượng tin nhắn.
+   */
+  private async loadReactionsForMessages(
+    messageIds: (number | string)[],
+    currentUserId: string,
+  ): Promise<Map<string, ReactionSummaryDto[]>> {
+    const reactionMap = new Map<string, ReactionSummaryDto[]>();
+    if (messageIds.length === 0) return reactionMap;
+
+    const { data: rawReactions, error: reactErr } = await this.supabase.client
+      .from('message_reactions')
+      .select('message_id, user_id, emoji')
+      .in('message_id', messageIds);
+
+    if (reactErr) {
+      this.logger.error('Lỗi tải reactions cho tin nhắn:', reactErr);
+      return reactionMap;
+    }
+
+    if (!rawReactions || rawReactions.length === 0) {
+      return reactionMap;
+    }
+
+    // message_id -> emoji -> { count, reactedByMe }
+    const grouped = new Map<
+      string,
+      Map<string, { count: number; reactedByMe: boolean }>
+    >();
+
+    for (const r of rawReactions as {
+      message_id: string | number;
+      user_id: string;
+      emoji: string;
+    }[]) {
+      const msgIdStr = r.message_id.toString();
+      let emojiMap = grouped.get(msgIdStr);
+      if (!emojiMap) {
+        emojiMap = new Map();
+        grouped.set(msgIdStr, emojiMap);
+      }
+
+      const existing = emojiMap.get(r.emoji);
+      if (!existing) {
+        emojiMap.set(r.emoji, {
+          count: 1,
+          reactedByMe: r.user_id === currentUserId,
+        });
+      } else {
+        existing.count += 1;
+        if (r.user_id === currentUserId) {
+          existing.reactedByMe = true;
+        }
+      }
+    }
+
+    for (const [msgId, emojiMap] of grouped.entries()) {
+      const summaryList: ReactionSummaryDto[] = [];
+      for (const [emoji, stat] of emojiMap.entries()) {
+        summaryList.push({
+          emoji,
+          count: stat.count,
+          reactedByMe: stat.reactedByMe,
+        });
+      }
+      reactionMap.set(msgId, summaryList);
+    }
+
+    return reactionMap;
   }
 
   /**
@@ -374,15 +532,18 @@ export class MessagesService {
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
     const processedMetadata: {
       file: Express.Multer.File;
+      normalizedFilename: string;
       width: number | null;
       height: number | null;
       ext: string;
     }[] = [];
 
     for (const f of uploadFiles) {
+      const normalizedFilename = normalizeFilename(f.originalname);
+
       if (f.size > MAX_FILE_SIZE) {
         throw new BadRequestException(
-          `File "${f.originalname}" vượt quá dung lượng tối đa 10MB.`,
+          `File "${normalizedFilename}" vượt quá dung lượng tối đa 10MB.`,
         );
       }
 
@@ -394,7 +555,7 @@ export class MessagesService {
 
       if (!checkMagicBytes(f.buffer, f.mimetype)) {
         throw new BadRequestException(
-          `Tệp "${f.originalname}" có nội dung không khớp với định dạng ${f.mimetype}.`,
+          `Tệp "${normalizedFilename}" có nội dung không khớp với định dạng ${f.mimetype}.`,
         );
       }
 
@@ -403,43 +564,87 @@ export class MessagesService {
 
       if (f.mimetype.startsWith('image/')) {
         try {
+          const isAnimated =
+            f.mimetype === 'image/gif' || f.mimetype === 'image/webp';
           const image = sharp(f.buffer, {
-            limitInputPixels: 25_000_000, // Giới hạn chống zip bomb / decompression bomb (~25 Megapixels)
-            animated: f.mimetype === 'image/gif' || f.mimetype === 'image/webp',
+            // Cho phép đọc metadata ảnh động mà không bị chặn sớm bởi limitInputPixels mặc định
+            limitInputPixels: 100_000_000,
+            animated: isAnimated,
           });
           const meta = await image.metadata();
-          width = meta.width ?? null;
-          height = meta.height ?? null;
 
-          if (!width || !height) {
+          const frameWidth = meta.width ?? null;
+          const framePages =
+            isAnimated && meta.pages && meta.pages > 0 ? meta.pages : 1;
+          const frameHeight =
+            isAnimated && meta.pageHeight
+              ? meta.pageHeight
+              : meta.height
+                ? Math.floor(meta.height / framePages)
+                : null;
+
+          if (!frameWidth || !frameHeight) {
             throw new BadRequestException(
-              `Không thể đọc kích thước của hình ảnh "${f.originalname}".`,
+              `Không thể đọc kích thước của hình ảnh "${normalizedFilename}".`,
             );
           }
 
-          if (width > 8192 || height > 8192) {
+          // 1. Giới hạn kích thước mỗi khung hình (frame dimensions)
+          const MAX_FRAME_DIMENSION = 4096;
+          if (
+            frameWidth > MAX_FRAME_DIMENSION ||
+            frameHeight > MAX_FRAME_DIMENSION
+          ) {
             throw new BadRequestException(
-              `Kích thước hình ảnh "${f.originalname}" vượt quá giới hạn cho phép (tối đa 8192x8192px).`,
+              `Kích thước khung hình "${normalizedFilename}" (${frameWidth}x${frameHeight}px) vượt quá giới hạn tối đa ${MAX_FRAME_DIMENSION}x${MAX_FRAME_DIMENSION}px.`,
             );
           }
 
-          if (meta.pages && meta.pages > 100) {
+          // 2. Giới hạn số lượng khung hình (frame count)
+          const MAX_FRAME_COUNT = 300;
+          if (framePages > MAX_FRAME_COUNT) {
             throw new BadRequestException(
-              `Ảnh động "${f.originalname}" có số lượng khung hình vượt quá giới hạn (tối đa 100 frames).`,
+              `Ảnh động "${normalizedFilename}" có ${framePages} khung hình, vượt quá giới hạn cho phép (tối đa ${MAX_FRAME_COUNT} frames).`,
             );
           }
+
+          // 3. Giới hạn pixel giải mã mỗi frame (per-frame decoded pixels)
+          const MAX_PER_FRAME_PIXELS = 25_000_000;
+          if (frameWidth * frameHeight > MAX_PER_FRAME_PIXELS) {
+            throw new BadRequestException(
+              `Kích thước giải nén của khung hình "${normalizedFilename}" vượt quá giới hạn cho phép (tối đa 25 Megapixels/frame).`,
+            );
+          }
+
+          // 4. Giới hạn tổng pixel giải mã toàn bộ ảnh (total decoded pixels)
+          const MAX_TOTAL_DECODED_PIXELS = 100_000_000;
+          const totalDecodedPixels = frameWidth * frameHeight * framePages;
+          if (totalDecodedPixels > MAX_TOTAL_DECODED_PIXELS) {
+            throw new BadRequestException(
+              `Tổng kích thước giải nén của ảnh động "${normalizedFilename}" vượt quá ngân sách tài nguyên cho phép (tối đa 100 Megapixels).`,
+            );
+          }
+
+          width = frameWidth;
+          height = frameHeight;
         } catch (err: unknown) {
           if (err instanceof BadRequestException) {
             throw err;
           }
           throw new BadRequestException(
-            `Hình ảnh "${f.originalname}" bị lỗi, hỏng hoặc vượt giới hạn xử lý.`,
+            `Hình ảnh "${normalizedFilename}" bị lỗi, hỏng hoặc không thể xử lý.`,
           );
         }
       }
 
       const ext = MIME_EXTENSION_MAP[f.mimetype] || '';
-      processedMetadata.push({ file: f, width, height, ext });
+      processedMetadata.push({
+        file: f,
+        normalizedFilename,
+        width,
+        height,
+        ext,
+      });
     }
 
     // 1. Kiểm tra idempotency qua clientNonce (nếu có)
@@ -621,7 +826,7 @@ export class MessagesService {
       const rowsToInsert = processedMetadata.map((item, idx) => ({
         message_id: raw.id,
         storage_path: uploadedPaths[idx],
-        filename: sanitizeFilename(item.file.originalname),
+        filename: item.normalizedFilename,
         mime_type: item.file.mimetype,
         size_bytes: item.file.size,
         width: item.width,
@@ -850,6 +1055,19 @@ export class MessagesService {
       throw new InternalServerErrorException('Lỗi xoá tin nhắn.');
     }
 
+    // 3. Dọn dẹp reactions của tin nhắn sau khi soft-delete thành công
+    try {
+      await this.supabase.client
+        .from('message_reactions')
+        .delete()
+        .eq('message_id', messageId);
+    } catch (reactErr) {
+      this.logger.error(
+        `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
+        reactErr,
+      );
+    }
+
     this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_DELETED, {
       conversationId: raw.conversation_id,
       channelId: null,
@@ -995,6 +1213,138 @@ export class MessagesService {
       success: true,
       updated: isUpdated,
       lastReadMessageId: finalLastRead,
+    };
+  }
+
+  /**
+   * Thêm hoặc xóa reaction cho tin nhắn theo desired state (Idempotent).
+   */
+  async setReaction(
+    userId: string,
+    conversationId: string,
+    messageId: string,
+    dto: SetReactionDto,
+  ): Promise<SetReactionResponseDto> {
+    if (!isValidEmoji(dto.emoji)) {
+      throw new BadRequestException('Biểu tượng cảm xúc (emoji) không hợp lệ.');
+    }
+
+    const emoji = dto.emoji.normalize('NFC').trim();
+
+    const isMember = await this.conversationsService.verifyMembership(
+      userId,
+      conversationId,
+    );
+    if (!isMember) {
+      throw new ForbiddenException(
+        'Bạn không có quyền truy cập cuộc trò chuyện này.',
+      );
+    }
+
+    const { data: messageData, error: msgErr } = await this.supabase.client
+      .from('messages')
+      .select('id, conversation_id, deleted_at')
+      .eq('id', messageId)
+      .maybeSingle();
+
+    if (msgErr || !messageData) {
+      throw new NotFoundException('Không tìm thấy tin nhắn.');
+    }
+
+    const msg = messageData as {
+      id: string | number;
+      conversation_id: string;
+      deleted_at: string | null;
+    };
+
+    if (msg.conversation_id !== conversationId) {
+      throw new BadRequestException('Tin nhắn không thuộc cuộc trò chuyện này.');
+    }
+
+    if (msg.deleted_at !== null) {
+      throw new BadRequestException(
+        'Không thể bày tỏ cảm xúc cho tin nhắn đã bị xoá.',
+      );
+    }
+
+    let action: 'added' | 'removed' | null = null;
+
+    if (dto.reacted) {
+      const { data: inserted, error: insErr } = await this.supabase.client
+        .from('message_reactions')
+        .insert({
+          message_id: messageId,
+          user_id: userId,
+          emoji,
+        })
+        .select('message_id');
+
+      if (!insErr && inserted && inserted.length > 0) {
+        action = 'added';
+      }
+    } else {
+      const { data: deleted, error: delErr } = await this.supabase.client
+        .from('message_reactions')
+        .delete()
+        .eq('message_id', messageId)
+        .eq('user_id', userId)
+        .eq('emoji', emoji)
+        .select('message_id');
+
+      if (!delErr && deleted && deleted.length > 0) {
+        action = 'removed';
+      }
+    }
+
+    // Tải canonical summary hiện tại của message này từ DB
+    const { data: rawReactions } = await this.supabase.client
+      .from('message_reactions')
+      .select('emoji, user_id')
+      .eq('message_id', messageId);
+
+    const emojiMap = new Map<string, { count: number; reactedByMe: boolean }>();
+    for (const r of (rawReactions ?? []) as { emoji: string; user_id: string }[]) {
+      const stat = emojiMap.get(r.emoji);
+      if (!stat) {
+        emojiMap.set(r.emoji, {
+          count: 1,
+          reactedByMe: r.user_id === userId,
+        });
+      } else {
+        stat.count += 1;
+        if (r.user_id === userId) {
+          stat.reactedByMe = true;
+        }
+      }
+    }
+
+    const reactions: ReactionSummaryDto[] = [];
+    for (const [em, stat] of emojiMap.entries()) {
+      reactions.push({
+        emoji: em,
+        count: stat.count,
+        reactedByMe: stat.reactedByMe,
+      });
+    }
+
+    // Chỉ emit event khi trạng thái thực sự thay đổi trong DB (không emit cho no-op/duplicate retry)
+    if (action !== null) {
+      this.eventEmitter.emit(CHAT_EVENTS.REACTION_UPDATED, {
+        conversationId,
+        messageId,
+        actorUserId: userId,
+        emoji,
+        action,
+        clientMutationId: dto.clientMutationId,
+        reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
+      });
+    }
+
+    return {
+      messageId,
+      conversationId,
+      clientMutationId: dto.clientMutationId,
+      reactions,
     };
   }
 

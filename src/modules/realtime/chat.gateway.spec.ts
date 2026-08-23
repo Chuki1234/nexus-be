@@ -23,6 +23,7 @@ describe('ChatGateway', () => {
 
     conversationsServiceMock = {
       verifyMembership: jest.fn(),
+      getParticipantIds: jest.fn().mockResolvedValue(['user-123', 'user-456']),
     };
 
     serverMock = {
@@ -42,82 +43,108 @@ describe('ChatGateway', () => {
     gateway.server = serverMock;
   });
 
-  describe('handleConnection', () => {
-    it('ngắt kết nối nếu không có token trong auth hoặc authorization header', async () => {
-      const client = {
-        id: 'sock-1',
+  describe('afterInit & Namespace Middleware', () => {
+    let middlewareFn: any;
+    let mockNamespace: any;
+
+    beforeEach(() => {
+      mockNamespace = {
+        use: jest.fn().mockImplementation((fn) => {
+          middlewareFn = fn;
+        }),
+      };
+      gateway.afterInit(mockNamespace);
+    });
+
+    it('đăng ký namespace middleware thành công', () => {
+      expect(mockNamespace.use).toHaveBeenCalledWith(expect.any(Function));
+      expect(middlewareFn).toBeDefined();
+    });
+
+    it('middleware từ chối với Error("Chưa xác thực") nếu thiếu token', async () => {
+      const socket = {
+        id: 'sock-no-token',
         handshake: { auth: {}, headers: {} },
         data: {},
-        disconnect: jest.fn(),
-        join: jest.fn(),
-      } as unknown as TypedSocket;
+      };
+      const next = jest.fn();
 
-      await gateway.handleConnection(client);
+      await middlewareFn(socket, next);
 
-      expect(client.disconnect).toHaveBeenCalledWith(true);
-      expect(client.join).not.toHaveBeenCalled();
+      expect(next).toHaveBeenCalledWith(expect.any(Error));
+      expect(next.mock.calls[0][0].message).toBe('Chưa xác thực');
+      expect((socket.data as any).userId).toBeUndefined();
     });
 
-    it('từ chối và ngắt kết nối nếu token chỉ gửi qua query string', async () => {
-      const client = {
-        id: 'sock-query',
-        handshake: {
-          auth: {},
-          headers: {},
-          query: { token: 'token-in-query' },
-        },
+    it('middleware từ chối với Error("Chưa xác thực") nếu token không hợp lệ / hết hạn', async () => {
+      const socket = {
+        id: 'sock-invalid-token',
+        handshake: { auth: { token: 'bad-token' }, headers: {} },
         data: {},
-        disconnect: jest.fn(),
-        join: jest.fn(),
-      } as unknown as TypedSocket;
-
-      await gateway.handleConnection(client);
-
-      expect(client.disconnect).toHaveBeenCalledWith(true);
-      expect(client.join).not.toHaveBeenCalled();
-    });
-
-    it('ngắt kết nối nếu token không hợp lệ theo Supabase Auth', async () => {
-      const client = {
-        id: 'sock-2',
-        handshake: { auth: { token: 'invalid-token' }, headers: {} },
-        data: {},
-        disconnect: jest.fn(),
-        join: jest.fn(),
-      } as unknown as TypedSocket;
+      };
+      const next = jest.fn();
 
       supabaseMock.client.auth.getUser.mockResolvedValue({
         data: { user: null },
         error: { message: 'JWT expired' },
       });
 
-      await gateway.handleConnection(client);
+      await middlewareFn(socket, next);
 
-      expect(client.disconnect).toHaveBeenCalledWith(true);
-      expect(client.join).not.toHaveBeenCalled();
+      expect(next).toHaveBeenCalledWith(expect.any(Error));
+      expect(next.mock.calls[0][0].message).toBe('Chưa xác thực');
+      expect((socket.data as any).userId).toBeUndefined();
     });
 
-    it('xác thực thành công qua Bearer header, lưu userId và join user room', async () => {
-      const client = {
-        id: 'sock-3',
+    it('middleware xác thực thành công, gán socket.data.userId và gọi next() không có lỗi', async () => {
+      const socket = {
+        id: 'sock-valid',
         handshake: {
           auth: {},
           headers: { authorization: 'Bearer valid-jwt-token' },
         },
         data: {} as { userId?: string },
-        disconnect: jest.fn(),
-        join: jest.fn(),
-      } as unknown as TypedSocket;
+      };
+      const next = jest.fn();
 
       supabaseMock.client.auth.getUser.mockResolvedValue({
         data: { user: { id: 'user-123' } },
         error: null,
       });
 
-      await gateway.handleConnection(client);
+      await middlewareFn(socket, next);
+
+      expect(socket.data.userId).toBe('user-123');
+      expect(next).toHaveBeenCalledWith();
+    });
+  });
+
+  describe('handleConnection', () => {
+    it('ngắt kết nối nếu socket không có userId sau middleware', () => {
+      const client = {
+        id: 'sock-no-data',
+        data: {},
+        disconnect: jest.fn(),
+        join: jest.fn(),
+      } as unknown as TypedSocket;
+
+      gateway.handleConnection(client);
+
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.join).not.toHaveBeenCalled();
+    });
+
+    it('kết nối thành công, join user room khi có userId', () => {
+      const client = {
+        id: 'sock-authenticated',
+        data: { userId: 'user-123' },
+        disconnect: jest.fn(),
+        join: jest.fn(),
+      } as unknown as TypedSocket;
+
+      gateway.handleConnection(client);
 
       expect(client.disconnect).not.toHaveBeenCalled();
-      expect(client.data.userId).toBe('user-123');
       expect(client.join).toHaveBeenCalledWith(Room.user('user-123'));
     });
   });
@@ -251,7 +278,7 @@ describe('ChatGateway', () => {
   });
 
   describe('Domain Events Broadcast', () => {
-    it('broadcast duy nhất message:created (không phát alias cũ message:new)', () => {
+    it('broadcast message:created tới conversation room và conversation:updated tới user rooms', async () => {
       const message = {
         id: '1001',
         conversationId: validUuid,
@@ -266,16 +293,30 @@ describe('ChatGateway', () => {
         createdAt: '2026-08-22T10:00:00Z',
       };
 
-      gateway.handleMessageCreated({
+      await gateway.handleMessageCreated({
         conversationId: validUuid,
         channelId: null,
         message,
       });
 
+      // message:created tới conversation room
       expect(serverMock.to).toHaveBeenCalledWith(Room.conversation(validUuid));
       expect(serverMock.emit).toHaveBeenCalledWith('message:created', {
         message,
       });
+
+      // conversation:updated tới user room của user-456 (không phải sender user-123)
+      expect(serverMock.to).toHaveBeenCalledWith(Room.user('user-456'));
+      expect(serverMock.emit).toHaveBeenCalledWith('conversation:updated', expect.objectContaining({
+        conversationId: validUuid,
+        senderId: 'user-123',
+        lastMessagePreview: 'Hello World',
+        unreadDelta: 1,
+      }));
+
+      // sender KHÔNG nhận conversation:updated
+      expect(serverMock.to).not.toHaveBeenCalledWith(Room.user('user-123'));
+
       expect(serverMock.emit).not.toHaveBeenCalledWith('message:new', expect.anything());
     });
 

@@ -344,6 +344,20 @@ export class ConversationsService {
     return true;
   }
 
+  /**
+   * Lấy danh sách user_id của tất cả thành viên trong conversation.
+   * Dùng cho ChatGateway để emit user-room notification.
+   */
+  async getParticipantIds(conversationId: string): Promise<string[]> {
+    const { data, error } = await this.supabase.client
+      .from('conversation_participants')
+      .select('user_id')
+      .eq('conversation_id', conversationId);
+
+    if (error || !data) return [];
+    return data.map((p) => p.user_id as string);
+  }
+
   private async getParticipantProfile(
     profileId: string,
   ): Promise<ConversationParticipantProfile> {
