@@ -94,7 +94,7 @@ export class AuthService {
         id: userId,
         username: dto.username,
         display_name: displayName,
-        date_of_birth: dto.dateOfBirth,
+        birthdate: dto.dateOfBirth,
       });
 
     if (profileError) {
@@ -159,17 +159,20 @@ export class AuthService {
    * Trả null thay vì ném 404: chưa có hồ sơ là trạng thái bình thường của tài
    * khoản Google mới, không phải lỗi.
    */
-  async getProfile(userId: string): Promise<ProfileView | null> {
+  /**
+   * `email` không nằm trong bảng `profiles` (chỉ Auth mới có) nên lấy từ
+   * token của người gọi thay vì select thêm một cột không tồn tại.
+   */
+  async getProfile(userId: string, email: string | null): Promise<ProfileView | null> {
     const { data, error } = await this.supabase.client
       .from('profiles')
-      .select('id, username, display_name, date_of_birth, email')
+      .select('id, username, display_name, birthdate')
       .eq('id', userId)
       .maybeSingle<{
         id: string;
         username: string;
         display_name: string | null;
-        date_of_birth: string;
-        email: string;
+        birthdate: string;
       }>();
 
     if (error) {
@@ -186,8 +189,8 @@ export class AuthService {
       id: data.id,
       username: data.username,
       displayName: data.display_name,
-      email: data.email,
-      dateOfBirth: data.date_of_birth,
+      email: email ?? '',
+      dateOfBirth: data.birthdate,
     };
   }
 
@@ -255,7 +258,7 @@ export class AuthService {
       id: user.id,
       username: dto.username,
       display_name: displayName,
-      date_of_birth: dto.dateOfBirth,
+      birthdate: dto.dateOfBirth,
     });
 
     if (error) {
