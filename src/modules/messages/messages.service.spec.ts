@@ -67,6 +67,13 @@ describe('MessagesService', () => {
   };
   let mockConversationsService: { verifyMembership: jest.Mock };
   let mockEventEmitter: { emit: jest.Mock };
+  let mockServerPermissionsService: {
+    assertChannelView: jest.Mock;
+    assertChannelSend: jest.Mock;
+    assertChannelAttach: jest.Mock;
+    assertChannelManage: jest.Mock;
+    getChannelPermissions: jest.Mock;
+  };
 
   beforeEach(async () => {
     mockSupabase = {
@@ -135,10 +142,11 @@ describe('MessagesService', () => {
       emit: jest.fn(),
     };
 
-    const mockServerPermissionsService = {
+    mockServerPermissionsService = {
       assertChannelView: jest.fn().mockResolvedValue(undefined),
       assertChannelSend: jest.fn().mockResolvedValue(undefined),
       assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+      assertChannelManage: jest.fn().mockResolvedValue(undefined),
       getChannelPermissions: jest.fn().mockResolvedValue(~0n),
     };
 
@@ -3400,6 +3408,443 @@ describe('MessagesService', () => {
         3600,
         { download: 'Tài liệu tiếng Việt.docx' },
       );
+    });
+  });
+
+  describe('createChannelMessage — Concurrency, DOCX & Deduplication Tests (Checkpoint 12 Blockers 1, 2, 4)', () => {
+    const channelId = 'chan-test-1111-2222';
+    const serverId = 'srv-test-1111-2222';
+    const userId = 'usr-test-1111-2222';
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockServerPermissionsService.assertChannelSend = jest.fn().mockResolvedValue(undefined);
+      mockServerPermissionsService.assertChannelAttach = jest.fn().mockResolvedValue(undefined);
+    });
+
+    it('Blocker 1 & 4: Deferred Barrier Concurrency: Hai request overlapping cùng clientNonce -> cả hai hoàn thành pre-check và upload Storage trước khi barrier mở -> request thắng tạo message, request thua bắt 23505 dọn storage và không emit duplicate', async () => {
+      const clientNonce = 'nonce-overlap-concurrent-123';
+      const file1: Express.Multer.File = {
+        fieldname: 'files',
+        originalname: 'doc1.pdf',
+        encoding: '7bit',
+        mimetype: 'application/pdf',
+        size: 1024,
+        buffer: Buffer.from('%PDF-1.4 test document 1'),
+      } as Express.Multer.File;
+
+      const file2: Express.Multer.File = {
+        fieldname: 'files',
+        originalname: 'doc2.pdf',
+        encoding: '7bit',
+        mimetype: 'application/pdf',
+        size: 2048,
+        buffer: Buffer.from('%PDF-1.4 test document 2'),
+      } as Express.Multer.File;
+
+      // Deferred Barrier đồng bộ hóa: Cả 2 request phải đến điểm RPC trước khi barrier mở
+      class DeferredBarrier {
+        private count = 0;
+        private target: number;
+        private reachedResolve!: () => void;
+        readonly reached: Promise<void>;
+        private proceedResolve!: () => void;
+        readonly proceed: Promise<void>;
+
+        constructor(target: number) {
+          this.target = target;
+          this.reached = new Promise((r) => {
+            this.reachedResolve = r;
+          });
+          this.proceed = new Promise((r) => {
+            this.proceedResolve = r;
+          });
+        }
+
+        async waitToProceed(): Promise<void> {
+          this.count++;
+          if (this.count >= this.target) {
+            this.reachedResolve();
+          }
+          await this.proceed;
+        }
+
+        release(): void {
+          this.proceedResolve();
+        }
+      }
+
+      const barrier = new DeferredBarrier(2);
+      const uploadedPaths: string[] = [];
+      const removedPaths: string[][] = [];
+
+      const uploadMock = jest.fn().mockImplementation((storagePath: string) => {
+        uploadedPaths.push(storagePath);
+        return Promise.resolve({ data: { path: storagePath }, error: null });
+      });
+
+      const removeMock = jest.fn().mockImplementation((paths: string[]) => {
+        removedPaths.push(paths);
+        return Promise.resolve({ data: paths, error: null });
+      });
+
+      mockSupabase.client.storage = {
+        from: jest.fn().mockReturnValue({
+          upload: uploadMock,
+          remove: removeMock,
+          createSignedUrls: jest.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      } as any;
+
+      const rpcArrivalOrder: string[] = [];
+      mockSupabase.client.rpc = jest.fn().mockImplementation(async (rpcName: string, params: any) => {
+        if (rpcName === 'create_channel_message') {
+          const reqAttachmentPath = params?.p_attachments?.[0]?.storage_path || '';
+          rpcArrivalOrder.push(reqAttachmentPath);
+
+          // CẢ HAI REQUEST DỪNG LẠI TẠI BARRIER (chờ cả hai cùng upload storage xong và đến điểm RPC)
+          await barrier.waitToProceed();
+
+          // Khi barrier được mở: Request đầu tiên đến barrier là winner, request thứ hai là loser (23505)
+          if (rpcArrivalOrder[0] === reqAttachmentPath) {
+            return {
+              data: {
+                id: '2001',
+                channelId,
+                authorId: userId,
+                content: 'Concurrent test message',
+                isForwarded: false,
+                replyToId: null,
+                clientNonce,
+                createdAt: new Date().toISOString(),
+              },
+              error: null,
+            };
+          } else {
+            return {
+              data: null,
+              error: { code: '23505', message: 'Client nonce đã tồn tại' },
+            };
+          }
+        }
+        return { data: null, error: null };
+      });
+
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn().mockImplementation(() => {
+                    // Pre-check trả về null trước khi RPC xử lý
+                    if (uploadedPaths.length < 2) {
+                      return Promise.resolve({ data: null, error: null });
+                    }
+                    // Canonical lookup sau khi bắt 23505:
+                    return Promise.resolve({
+                      data: {
+                        id: '2001',
+                        channel_id: channelId,
+                        conversation_id: null,
+                        author_id: userId,
+                        type: 'default',
+                        content: 'Concurrent test message',
+                        is_forwarded: false,
+                        reply_to_id: null,
+                        client_nonce: clientNonce,
+                        edited_at: null,
+                        deleted_at: null,
+                        created_at: new Date().toISOString(),
+                      },
+                      error: null,
+                    });
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                maybeSingle: jest.fn().mockResolvedValue({
+                  data: { id: userId, username: 'testuser', display_name: 'Test User' },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'attachments') {
+          return {
+            select: jest.fn().mockReturnValue({
+              in: jest.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      // Bắt đầu cả 2 request đồng thời
+      const p1 = service.createChannelMessage(userId, channelId, { content: 'Concurrent test message', clientNonce }, [file1]);
+      const p2 = service.createChannelMessage(userId, channelId, { content: 'Concurrent test message', clientNonce }, [file2]);
+
+      // Chờ cho đến khi CẢ HAI request đã hoàn thành pre-check và upload Storage, chạm tới barrier
+      await barrier.reached;
+
+      // 1. Xác minh: Cả 2 request đều ĐÃ upload Storage thành công trước khi RPC xử lý
+      expect(uploadedPaths).toHaveLength(2);
+      expect(uploadedPaths[0]).not.toEqual(uploadedPaths[1]); // 2 storage paths khác nhau
+
+      // Mở barrier để cho cả hai RPC tiếp tục
+      barrier.release();
+
+      const [res1, res2] = await Promise.all([p1, p2]);
+
+      // Cả 2 request đều trả về cùng canonical message ID
+      expect(res1.id).toBe('2001');
+      expect(res2.id).toBe('2001');
+
+      // 2. Chỉ storage path của request thua cuộc bị dọn dẹp
+      expect(removeMock).toHaveBeenCalledTimes(1);
+      expect(removedPaths).toHaveLength(1);
+      expect(removedPaths[0]).toEqual([uploadedPaths[1]]);
+
+      // Storage path của request thắng không bị xóa
+      expect(removedPaths[0]).not.toContain(uploadedPaths[0]);
+
+      // 3. Socket event CHAT_EVENTS.MESSAGE_CREATED chỉ emit ĐÚNG 1 LẦN (không duplicate)
+      expect(mockEventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.MESSAGE_CREATED,
+        expect.objectContaining({
+          channelId,
+          message: expect.objectContaining({ id: '2001' }),
+        }),
+      );
+    });
+
+    it('Blocker 1: Duplicate clientNonce cho channel khác ném ConflictException (409) và vẫn dọn dẹp storage của request', async () => {
+      const clientNonce = 'nonce-diff-channel-999';
+      const file: Express.Multer.File = {
+        fieldname: 'files',
+        originalname: 'doc.pdf',
+        encoding: '7bit',
+        mimetype: 'application/pdf',
+        size: 512,
+        buffer: Buffer.from('%PDF-1.4 test document'),
+      } as Express.Multer.File;
+
+      const uploadedPaths: string[] = [];
+      const removedPaths: string[][] = [];
+
+      const uploadMock = jest.fn().mockImplementation((storagePath: string) => {
+        uploadedPaths.push(storagePath);
+        return Promise.resolve({ data: { path: storagePath }, error: null });
+      });
+
+      const removeMock = jest.fn().mockImplementation((paths: string[]) => {
+        removedPaths.push(paths);
+        return Promise.resolve({ data: paths, error: null });
+      });
+
+      mockSupabase.client.storage = {
+        from: jest.fn().mockReturnValue({
+          upload: uploadMock,
+          remove: removeMock,
+        }),
+      } as any;
+
+      mockSupabase.client.rpc = jest.fn().mockResolvedValue({
+        data: null,
+        error: { code: '23505', message: 'Client nonce đã tồn tại' },
+      });
+
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn()
+                    .mockResolvedValueOnce({ data: null, error: null }) // Pre-check
+                    .mockResolvedValueOnce({
+                      // Canonical lookup: thuộc channel khác 'other-channel-999'
+                      data: {
+                        id: '8888',
+                        channel_id: 'other-channel-999',
+                        conversation_id: null,
+                        author_id: userId,
+                        client_nonce: clientNonce,
+                      },
+                      error: null,
+                    }),
+                }),
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      await expect(
+        service.createChannelMessage(userId, channelId, { content: 'Conflict channel', clientNonce }, [file]),
+      ).rejects.toThrow(ConflictException);
+
+      // Storage files của request thất bại phải được dọn dẹp
+      expect(uploadedPaths).toHaveLength(1);
+      expect(removeMock).toHaveBeenCalledTimes(1);
+      expect(removedPaths[0]).toEqual(uploadedPaths);
+      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('Blocker 2: Gửi tin nhắn kênh đính kèm tệp DOCX hợp lệ thành công', async () => {
+      const { createMockZipBuffer } = require('./utils/docx-validator.util');
+      const validDocxBuf = createMockZipBuffer([
+        { name: '[Content_Types].xml', content: '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>' },
+        { name: 'word/document.xml', content: '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello DOCX</w:t></w:r></w:p></w:body></w:document>' },
+      ]);
+
+      const docxFile: Express.Multer.File = {
+        fieldname: 'files',
+        originalname: 'Kế Hoạch Dự Án.docx',
+        encoding: '7bit',
+        mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size: validDocxBuf.length,
+        buffer: validDocxBuf,
+      } as Express.Multer.File;
+
+      mockSupabase.client.storage = {
+        from: jest.fn().mockReturnValue({
+          upload: jest.fn().mockResolvedValue({ data: { path: 'channels/chan-test-1111-2222/file-uuid.docx' }, error: null }),
+          createSignedUrls: jest.fn().mockResolvedValue({
+            data: [{ path: 'channels/chan-test-1111-2222/file-uuid.docx', signedUrl: 'https://storage/signed-docx' }],
+            error: null,
+          }),
+        }),
+      } as any;
+
+      mockSupabase.client.rpc = jest.fn().mockResolvedValue({
+        data: {
+          id: '3001',
+          channelId,
+          authorId: userId,
+          content: 'Tài liệu Word',
+          isForwarded: false,
+          replyToId: null,
+          clientNonce: 'nonce-docx-channel',
+          createdAt: new Date().toISOString(),
+        },
+        error: null,
+      });
+
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                maybeSingle: jest.fn().mockResolvedValue({
+                  data: { id: userId, username: 'docx_user' },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'attachments') {
+          return {
+            select: jest.fn().mockReturnValue({
+              in: jest.fn().mockResolvedValue({
+                data: [
+                  {
+                    id: 'att-docx-1',
+                    message_id: '3001',
+                    storage_path: 'channels/chan-test-1111-2222/file-uuid.docx',
+                    filename: 'Kế Hoạch Dự Án.docx',
+                    mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    size_bytes: validDocxBuf.length,
+                    width: null,
+                    height: null,
+                    created_at: new Date().toISOString(),
+                  },
+                ],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const res = await service.createChannelMessage(
+        userId,
+        channelId,
+        { content: 'Tài liệu Word', clientNonce: 'nonce-docx-channel' },
+        [docxFile],
+      );
+
+      expect(res.id).toBe('3001');
+      expect(res.attachments).toHaveLength(1);
+      expect(res.attachments?.[0].filename).toBe('Kế Hoạch Dự Án.docx');
+      expect(res.attachments?.[0].mimeType).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    });
+
+    it('Blocker 2: Khi RPC create_channel_message từ chối attachment (ví dụ 22023), Storage objects của request được cleanup ngay lập tức', async () => {
+      const file: Express.Multer.File = {
+        fieldname: 'files',
+        originalname: 'test.pdf',
+        encoding: '7bit',
+        mimetype: 'application/pdf',
+        size: 1024,
+        buffer: Buffer.from('%PDF-1.4 test document'),
+      } as Express.Multer.File;
+
+      const removeMock = jest.fn().mockResolvedValue({ data: [], error: null });
+      mockSupabase.client.storage = {
+        from: jest.fn().mockReturnValue({
+          upload: jest.fn().mockResolvedValue({ data: { path: 'uploaded' }, error: null }),
+          remove: removeMock,
+        }),
+      } as any;
+
+      mockSupabase.client.rpc = jest.fn().mockResolvedValue({
+        data: null,
+        error: { code: '22023', message: 'Loại tệp không nằm trong danh sách cho phép' },
+      });
+
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockReturnValue({
+                  maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+                }),
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      await expect(
+        service.createChannelMessage(userId, channelId, { content: 'Bad attachment' }, [file]),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(removeMock).toHaveBeenCalledTimes(1);
     });
   });
 });

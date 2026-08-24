@@ -4,6 +4,7 @@ import { Room } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { PresenceService } from './presence.service';
+import { RedisStateService } from './redis-state.service';
 import { ChatGateway, TypedSocket } from './chat.gateway';
 
 describe('ChatGateway', () => {
@@ -12,6 +13,7 @@ describe('ChatGateway', () => {
   let conversationsServiceMock: any;
   let presenceServiceMock: any;
   let serverMock: any;
+  let redisStateMock: any;
 
   const validUuid = '11111111-1111-4111-a111-111111111111';
 
@@ -41,11 +43,20 @@ describe('ChatGateway', () => {
         'peer-bob': { status: 'online', lastSeenAt: null },
         'peer-charlie': { status: 'offline', lastSeenAt: null },
       }),
+      setClusterOfflineHandler: jest.fn(),
     };
 
     serverMock = {
       to: jest.fn().mockReturnThis(),
       emit: jest.fn(),
+    };
+
+    redisStateMock = {
+      isDistributedActive: jest.fn().mockReturnValue(false),
+      setOfflineCallback: jest.fn(),
+      setTypingUpdateCallback: jest.fn(),
+      startTyping: jest.fn().mockResolvedValue([]),
+      stopTyping: jest.fn().mockResolvedValue([]),
     };
 
     const serverPermissionsServiceMock = {
@@ -62,6 +73,7 @@ describe('ChatGateway', () => {
         { provide: ConversationsService, useValue: conversationsServiceMock },
         { provide: ServerPermissionsService, useValue: serverPermissionsServiceMock },
         { provide: PresenceService, useValue: presenceServiceMock },
+        { provide: RedisStateService, useValue: redisStateMock },
       ],
     }).compile();
 
@@ -318,6 +330,7 @@ describe('ChatGateway', () => {
         clientNonce: 'nonce-1',
         editedAt: null,
         deletedAt: null,
+        isForwarded: false,
         createdAt: '2026-08-22T10:00:00Z',
       };
 
@@ -360,6 +373,7 @@ describe('ChatGateway', () => {
         clientNonce: 'nonce-1',
         editedAt: '2026-08-22T10:05:00Z',
         deletedAt: null,
+        isForwarded: false,
         createdAt: '2026-08-22T10:00:00Z',
       };
 
@@ -393,6 +407,7 @@ describe('ChatGateway', () => {
     it('broadcast message:read tới conversation room', () => {
       gateway.handleMessageRead({
         conversationId: validUuid,
+        channelId: null,
         userId: 'user-123',
         lastReadMessageId: '1001',
       });

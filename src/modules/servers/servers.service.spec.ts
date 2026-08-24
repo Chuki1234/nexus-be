@@ -13,11 +13,12 @@ import { ChatGateway } from '../realtime/chat.gateway';
 import { SERVER_TEMPLATES } from './constants/server-templates.constant';
 import { CreateServerDto } from './dto/create-server.dto';
 import { ServersService } from './servers.service';
+import { ServerPermissionsService } from './server-permissions.service';
 
 describe('ServersService', () => {
   let service: ServersService;
   let supabaseService: { client: any };
-  let chatGatewayMock: { server: { to: jest.Mock } };
+  let chatGatewayMock: { server: { to: jest.Mock }; emitChannelsInvalidated: jest.Mock };
   let emitMock: jest.Mock;
 
   beforeEach(async () => {
@@ -28,6 +29,7 @@ describe('ServersService', () => {
           emit: emitMock,
         }),
       },
+      emitChannelsInvalidated: jest.fn(),
     };
 
     supabaseService = {
@@ -47,6 +49,15 @@ describe('ServersService', () => {
         {
           provide: ChatGateway,
           useValue: chatGatewayMock,
+        },
+        {
+          provide: ServerPermissionsService,
+          useValue: {
+            getChannelPermissions: jest.fn().mockResolvedValue(~0n),
+            assertChannelView: jest.fn().mockResolvedValue(undefined),
+            assertChannelSend: jest.fn().mockResolvedValue(undefined),
+            assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+          },
         },
       ],
     }).compile();
@@ -509,6 +520,143 @@ describe('ServersService', () => {
       });
 
       await expect(service.leaveServer('usr-owner', 'srv-100')).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('updateChannel & deleteChannel (Checkpoint 12 Blockers 3, 4)', () => {
+    const serverId = 'srv-100';
+    const channelId = 'chan-101';
+    const userId = 'usr-admin';
+
+    it('updateChannel updates channel name/topic and broadcasts server:channel-updated event', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          id: channelId,
+          serverId,
+          name: 'general-chat',
+          type: 'text',
+          topic: 'New topic',
+          position: 0,
+        },
+        error: null,
+      });
+
+      const res = await service.updateChannel(userId, serverId, channelId, {
+        name: 'general-chat',
+        topic: 'New topic',
+      });
+
+      expect(res.name).toBe('general-chat');
+      expect(res.topic).toBe('New topic');
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('update_server_channel', {
+        p_server_id: serverId,
+        p_channel_id: channelId,
+        p_user_id: userId,
+        p_name: 'general-chat',
+        p_topic: 'New topic',
+      });
+      expect(emitMock).toHaveBeenCalledWith('server:channel-updated', {
+        serverId,
+        channel: res,
+      });
+    });
+
+    it('updateChannel throws ForbiddenException when user lacks MANAGE_CHANNELS (code 42501)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '42501', message: 'Bạn không có quyền quản lý kênh trong máy chủ này' },
+      });
+
+      await expect(
+        service.updateChannel(userId, serverId, channelId, { name: 'hacked' }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('deleteChannel successfully deletes non-last text channel and broadcasts event', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          channelId,
+          serverId,
+        },
+        error: null,
+      });
+
+      const res = await service.deleteChannel(userId, serverId, channelId);
+      expect(res.success).toBe(true);
+      expect(emitMock).toHaveBeenCalledWith('server:channel-deleted', {
+        serverId,
+        channelId,
+      });
+    });
+
+    it('deleteChannel throws BadRequestException when attempting to delete the only text channel (code 22023)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '22023', message: 'Không thể xóa kênh chữ duy nhất còn lại của máy chủ' },
+      });
+
+      await expect(service.deleteChannel(userId, serverId, channelId)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('updateChannel: Deferred Barrier kiểm thử hai requests đồng thời tới RPC và emit events độc lập', async () => {
+      let callOrder: string[] = [];
+      let barrierReached = false;
+
+      // Deferred Barrier đảm bảo cả 2 request đều được khởi tạo và chờ ở RPC
+      let resolveProceed: () => void;
+      const proceedPromise = new Promise<void>((resolve) => {
+        resolveProceed = resolve;
+      });
+
+      let arrivedCount = 0;
+      let resolveReached: () => void;
+      const reachedPromise = new Promise<void>((resolve) => {
+        resolveReached = resolve;
+      });
+
+      supabaseService.client.rpc.mockImplementation(async (rpcName: string, params: any) => {
+        if (rpcName === 'update_server_channel') {
+          callOrder.push(params.p_name);
+          arrivedCount++;
+          if (arrivedCount === 2) {
+            resolveReached();
+          }
+          await proceedPromise;
+          return {
+            data: {
+              id: channelId,
+              serverId,
+              name: params.p_name,
+              type: 'text',
+              topic: null,
+              position: 0,
+            },
+            error: null,
+          };
+        }
+        return { data: null, error: null };
+      });
+
+      const p1 = service.updateChannel(userId, serverId, channelId, { name: 'chan-a' });
+      const p2 = service.updateChannel(userId, serverId, channelId, { name: 'chan-b' });
+
+      // Chờ cả 2 request cùng tới RPC barrier
+      await reachedPromise;
+      expect(callOrder).toHaveLength(2);
+
+      // Giải phóng barrier
+      resolveProceed!();
+
+      const [res1, res2] = await Promise.all([p1, p2]);
+
+      expect(res1.name).toBe('chan-a');
+      expect(res2.name).toBe('chan-b');
+      expect(supabaseService.client.rpc).toHaveBeenCalledTimes(2);
+      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledWith(serverId);
+      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledTimes(2);
     });
   });
 });

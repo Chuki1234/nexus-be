@@ -3,12 +3,14 @@ import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { FriendsService } from '../friends/friends.service';
 import { PresenceService } from './presence.service';
+import { RedisStateService } from './redis-state.service';
 
 describe('PresenceService', () => {
   let service: PresenceService;
   let mockSupabase: any;
   let mockFriendsService: any;
   let mockConversationsService: any;
+  let mockRedisState: any;
 
   beforeEach(async () => {
     mockSupabase = {
@@ -36,12 +38,24 @@ describe('PresenceService', () => {
       getDmPeerUserIds: jest.fn().mockResolvedValue(['user-bob', 'user-david']),
     };
 
+    mockRedisState = {
+      isDistributedActive: jest.fn().mockReturnValue(false),
+      handleSocketConnect: jest.fn(),
+      handleSocketDisconnect: jest.fn(),
+      getUserPresence: jest.fn(),
+      setManualStatus: jest.fn(),
+      setExplicitOffline: jest.fn(),
+      setOfflineCallback: jest.fn(),
+      setTypingUpdateCallback: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PresenceService,
         { provide: SupabaseService, useValue: mockSupabase },
         { provide: FriendsService, useValue: mockFriendsService },
         { provide: ConversationsService, useValue: mockConversationsService },
+        { provide: RedisStateService, useValue: mockRedisState },
       ],
     }).compile();
 
@@ -72,7 +86,7 @@ describe('PresenceService', () => {
     expect(res2.isFirstConnection).toBe(false);
 
     // Đóng tab 1
-    const disc1 = service.handleUserDisconnect('socket-1');
+    const disc1 = await service.handleUserDisconnect('socket-1');
     expect(disc1.isLastDisconnect).toBe(false);
     expect(service.isUserConnected('user-alice')).toBe(true);
     expect(service.getEffectiveStatus('user-alice')).toBe('online');
@@ -83,7 +97,7 @@ describe('PresenceService', () => {
 
     await service.handleUserConnect('user-alice', 'socket-1');
 
-    const disc = service.handleUserDisconnect('socket-1');
+    const disc = await service.handleUserDisconnect('socket-1');
     expect(disc.isLastDisconnect).toBe(true);
 
     // Tua nhanh 5s (vẫn trong 15s grace period)
@@ -105,7 +119,7 @@ describe('PresenceService', () => {
     await service.handleUserConnect('user-alice', 'socket-1');
 
     const onOffline = jest.fn();
-    service.handleUserDisconnect('socket-1', onOffline);
+    await service.handleUserDisconnect('socket-1', onOffline);
 
     expect(onOffline).not.toHaveBeenCalled();
 
@@ -169,7 +183,7 @@ describe('PresenceService', () => {
   it('onModuleDestroy dọn dẹp an toàn toàn bộ timers và socket mappings', async () => {
     jest.useFakeTimers();
     await service.handleUserConnect('user-alice', 'socket-1');
-    service.handleUserDisconnect('socket-1');
+    await service.handleUserDisconnect('socket-1');
 
     service.onModuleDestroy();
 

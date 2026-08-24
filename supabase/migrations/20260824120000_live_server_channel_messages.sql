@@ -206,55 +206,16 @@ begin
     end if;
 
     -- 6. Idempotency & Duplicate Nonce pre-check
-    select id, channel_id, conversation_id, content, reply_to_id, client_nonce, is_forwarded, created_at
+    select id, channel_id, conversation_id
     into v_existing_msg
     from public.messages
     where author_id = p_author_id and client_nonce = p_client_nonce;
 
     if found then
-        if v_existing_msg.channel_id = p_channel_id then
-            -- Lấy danh sách attachments hiện có
-            select coalesce(jsonb_agg(jsonb_build_object(
-                'id', a.id,
-                'filename', a.filename,
-                'mimeType', a.mime_type,
-                'sizeBytes', a.size_bytes,
-                'width', a.width,
-                'height', a.height,
-                'storagePath', a.storage_path
-            )), '[]'::jsonb) into v_att_list
-            from public.attachments a
-            where a.message_id = v_existing_msg.id;
-
-            -- Lấy author profile
-            select username, display_name, avatar_url into v_author_rec
-            from public.profiles where id = p_author_id;
-
-            return jsonb_build_object(
-                'id', v_existing_msg.id::text,
-                'channelId', p_channel_id,
-                'conversationId', null,
-                'authorId', p_author_id,
-                'author', jsonb_build_object(
-                    'id', p_author_id,
-                    'username', coalesce(v_author_rec.username, ''),
-                    'displayName', coalesce(v_author_rec.display_name, v_author_rec.username, 'User'),
-                    'avatarUrl', v_author_rec.avatar_url
-                ),
-                'type', 'default',
-                'content', v_existing_msg.content,
-                'replyToId', case when v_existing_msg.reply_to_id is not null then v_existing_msg.reply_to_id::text else null end,
-                'clientNonce', v_existing_msg.client_nonce,
-                'editedAt', null,
-                'deletedAt', null,
-                'isForwarded', coalesce(v_existing_msg.is_forwarded, false),
-                'attachments', v_att_list,
-                'reactions', '[]'::jsonb,
-                'createdAt', v_existing_msg.created_at
-            );
-        else
-            -- Nonce bị dùng ở channel khác hoặc conversation -> 409 Conflict
+        if v_existing_msg.channel_id <> p_channel_id then
             raise exception 'Client nonce đã được sử dụng cho cuộc trò chuyện hoặc kênh khác' using errcode = '23505';
+        else
+            raise exception 'Client nonce đã tồn tại' using errcode = '23505';
         end if;
     end if;
 
@@ -288,11 +249,12 @@ begin
                 raise exception 'Chiều cao tệp ảnh không hợp lệ' using errcode = '22023';
             end if;
 
-            -- Canonical MIME whitelist
+            -- Canonical MIME whitelist (bao gồm DOCX)
             if v_att_mime not in (
                 'image/jpeg', 'image/png', 'image/webp', 'image/gif',
                 'application/pdf', 'text/plain',
-                'application/zip', 'application/x-zip-compressed'
+                'application/zip', 'application/x-zip-compressed',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
             ) then
                 raise exception 'Loại tệp không nằm trong danh sách cho phép' using errcode = '22023';
             end if;
@@ -314,75 +276,25 @@ begin
         end loop;
     end if;
 
-    -- 8. Ghi bản ghi vào public.messages với exception handling cho race condition concurrent duplicate nonce
-    begin
-        insert into public.messages (
-            channel_id,
-            author_id,
-            type,
-            content,
-            reply_to_id,
-            client_nonce,
-            is_forwarded
-        ) values (
-            p_channel_id,
-            p_author_id,
-            'default',
-            v_trimmed_content,
-            p_reply_to_id,
-            p_client_nonce,
-            coalesce(p_is_forwarded, false)
-        )
-        returning id, created_at into v_msg_id, v_created_at;
-    exception when unique_violation then
-        -- Xảy ra race condition concurrent nonce: Lấy message canonical đã được insert
-        select id, channel_id, conversation_id, content, reply_to_id, client_nonce, is_forwarded, created_at
-        into v_existing_msg
-        from public.messages
-        where author_id = p_author_id and client_nonce = p_client_nonce;
-
-        if found and v_existing_msg.channel_id = p_channel_id then
-            select coalesce(jsonb_agg(jsonb_build_object(
-                'id', a.id,
-                'filename', a.filename,
-                'mimeType', a.mime_type,
-                'sizeBytes', a.size_bytes,
-                'width', a.width,
-                'height', a.height,
-                'storagePath', a.storage_path
-            )), '[]'::jsonb) into v_att_list
-            from public.attachments a
-            where a.message_id = v_existing_msg.id;
-
-            select username, display_name, avatar_url into v_author_rec
-            from public.profiles where id = p_author_id;
-
-            return jsonb_build_object(
-                'id', v_existing_msg.id::text,
-                'channelId', p_channel_id,
-                'conversationId', null,
-                'authorId', p_author_id,
-                'author', jsonb_build_object(
-                    'id', p_author_id,
-                    'username', coalesce(v_author_rec.username, ''),
-                    'displayName', coalesce(v_author_rec.display_name, v_author_rec.username, 'User'),
-                    'avatarUrl', v_author_rec.avatar_url
-                ),
-                'type', 'default',
-                'content', v_existing_msg.content,
-                'replyToId', case when v_existing_msg.reply_to_id is not null then v_existing_msg.reply_to_id::text else null end,
-                'clientNonce', v_existing_msg.client_nonce,
-                'editedAt', null,
-                'deletedAt', null,
-                'isForwarded', coalesce(v_existing_msg.is_forwarded, false),
-                'attachments', v_att_list,
-                'reactions', '[]'::jsonb,
-                'createdAt', v_existing_msg.created_at
-            );
-        else
-            raise exception 'Client nonce đã được sử dụng cho cuộc trò chuyện hoặc kênh khác' using errcode = '23505';
-        end if;
-    end;
+    -- 8. Ghi bản ghi vào public.messages (khi concurrent duplicate nonce xảy ra, unique constraint tự raise 23505)
+    insert into public.messages (
+        channel_id,
+        author_id,
+        type,
+        content,
+        reply_to_id,
+        client_nonce,
+        is_forwarded
+    ) values (
+        p_channel_id,
+        p_author_id,
+        'default',
+        v_trimmed_content,
+        p_reply_to_id,
+        p_client_nonce,
+        coalesce(p_is_forwarded, false)
+    )
+    returning id, created_at into v_msg_id, v_created_at;
 
     -- 9. Ghi attachments metadata nguyên tử
     v_att_list := '[]'::jsonb;
@@ -566,7 +478,7 @@ begin
             )
           );
 
-        if (v_base_perms & (1::bigint << 62)) <> 0 or (v_base_perms & 16) <> 0 then
+        if (v_base_perms & (1::bigint << 62)) <> 0 then
             v_is_admin := true;
         end if;
     end if;
@@ -731,7 +643,7 @@ begin
             )
           );
 
-        if (v_base_perms & (1::bigint << 62)) <> 0 or (v_base_perms & 16) <> 0 then
+        if (v_base_perms & (1::bigint << 62)) <> 0 then
             v_is_admin := true;
         end if;
     end if;

@@ -374,5 +374,115 @@ describe('ServerPermissionsService', () => {
       await expect(service.assertChannelSend('user-member', 'chan-1')).resolves.toBeUndefined();
       await expect(service.assertChannelAttach('user-member', 'chan-1')).rejects.toThrow(ForbiddenException);
     });
+
+    it('Blocker 3: MANAGE_CHANNELS (16n) bị deny bởi channel overwrite thì assertChannelManage ném ForbiddenException', async () => {
+      supabaseMock.client.from.mockImplementation((table: string) => {
+        if (table === 'channels') return mockChannelQuery('srv-1');
+        if (table === 'servers') return mockServerQuery('owner-id');
+        if (table === 'server_members') return mockMemberQuery('MEMBER');
+        if (table === 'roles') {
+          return mockRolesQuery([
+            { id: 'role-everyone', permissions: 3339, is_default: true },
+            { id: 'role-mod', permissions: 3355, is_default: false }, // Có MANAGE_CHANNELS (16n)
+          ]);
+        }
+        if (table === 'member_roles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockImplementation(() => ({
+              eq: jest.fn().mockResolvedValue({ data: [{ role_id: 'role-mod' }], error: null }),
+            })),
+          };
+        }
+        if (table === 'channel_overwrites') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [
+                // Channel overwrite deny MANAGE_CHANNELS (16n)
+                { target_type: 'role', target_id: 'role-mod', allow: 0, deny: 16 },
+              ],
+              error: null,
+            }),
+          };
+        }
+        return {};
+      });
+
+      await expect(service.assertChannelManage('user-mod', 'chan-1')).rejects.toThrow(ForbiddenException);
+    });
+
+    it('Blocker 3: Member-specific allow MANAGE_CHANNELS có precedence cao hơn role deny overwrite', async () => {
+      supabaseMock.client.from.mockImplementation((table: string) => {
+        if (table === 'channels') return mockChannelQuery('srv-1');
+        if (table === 'servers') return mockServerQuery('owner-id');
+        if (table === 'server_members') return mockMemberQuery('MEMBER');
+        if (table === 'roles') {
+          return mockRolesQuery([
+            { id: 'role-everyone', permissions: 3339, is_default: true },
+            { id: 'role-mod', permissions: 3355, is_default: false },
+          ]);
+        }
+        if (table === 'member_roles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockImplementation(() => ({
+              eq: jest.fn().mockResolvedValue({ data: [{ role_id: 'role-mod' }], error: null }),
+            })),
+          };
+        }
+        if (table === 'channel_overwrites') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [
+                { target_type: 'role', target_id: 'role-mod', allow: 0, deny: 16 },
+                { target_type: 'member', target_id: 'user-vip-mod', allow: 16, deny: 0 },
+              ],
+              error: null,
+            }),
+          };
+        }
+        return {};
+      });
+
+      await expect(service.assertChannelManage('user-vip-mod', 'chan-1')).resolves.toBeUndefined();
+    });
+
+    it('Blocker 3: ADMINISTRATOR thật sự bypass toàn bộ channel overwrites cho MANAGE_CHANNELS', async () => {
+      supabaseMock.client.from.mockImplementation((table: string) => {
+        if (table === 'channels') return mockChannelQuery('srv-1');
+        if (table === 'servers') return mockServerQuery('owner-id');
+        if (table === 'server_members') return mockMemberQuery('MEMBER');
+        if (table === 'roles') {
+          return mockRolesQuery([
+            { id: 'role-everyone', permissions: 3339, is_default: true },
+            { id: 'role-admin', permissions: String(Permission.ADMINISTRATOR), is_default: false },
+          ]);
+        }
+        if (table === 'member_roles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockImplementation(() => ({
+              eq: jest.fn().mockResolvedValue({ data: [{ role_id: 'role-admin' }], error: null }),
+            })),
+          };
+        }
+        if (table === 'channel_overwrites') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [
+                { target_type: 'member', target_id: 'user-admin', allow: 0, deny: 16 }, // Deny attempt
+              ],
+              error: null,
+            }),
+          };
+        }
+        return {};
+      });
+
+      await expect(service.assertChannelManage('user-admin', 'chan-1')).resolves.toBeUndefined();
+    });
   });
 });

@@ -3,11 +3,13 @@ import {
   Logger,
   OnApplicationShutdown,
   OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import type { PresenceStatus } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
 import { FriendsService } from '../friends/friends.service';
+import { RedisStateService } from './redis-state.service';
 
 export interface PresenceConnectResult {
   userId: string;
@@ -29,19 +31,21 @@ export interface OfflineBroadcastPayload {
 }
 
 @Injectable()
-export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
+export class PresenceService
+  implements OnModuleInit, OnModuleDestroy, OnApplicationShutdown
+{
   private readonly logger = new Logger(PresenceService.name);
 
   /** Thời gian ân hạn (ms) khi mất kết nối mạng / F5 trước khi phát tán offline */
   private readonly GRACE_PERIOD_MS = 15000;
 
-  /** Quản lý danh sách socket IDs đang hoạt động của từng userId */
+  /** Quản lý danh sách socket IDs đang hoạt động của từng userId (cho in-memory mode) */
   private readonly userSockets = new Map<string, Set<string>>();
 
   /** Lookup ngược từ socketId -> userId */
   private readonly socketUser = new Map<string, string>();
 
-  /** Timers đếm lùi offline theo userId */
+  /** Timers đếm lùi offline theo userId (cho in-memory mode) */
   private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
 
   /** Lưu timestamp ngắt kết nối gần nhất của user */
@@ -50,31 +54,80 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
   /** Cache manual_presence từ DB */
   private readonly manualPresenceCache = new Map<string, PresenceStatus>();
 
+  /** Callback phát offline ra toàn cluster khi deadline hết hạn */
+  private clusterOfflineHandler?: (payload: OfflineBroadcastPayload) => void;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly friendsService: FriendsService,
     private readonly conversationsService: ConversationsService,
+    private readonly redisState: RedisStateService,
   ) {}
+
+  onModuleInit(): void {
+    this.redisState.setOfflineCallback(async ({ userId, lastSeenAt }) => {
+      this.logger.log(`Cluster offline confirmed cho user ${userId} tại ${lastSeenAt}`);
+      this.lastSeenCache.set(userId, lastSeenAt);
+      await this.persistLastSeenAt(userId, lastSeenAt);
+
+      if (this.clusterOfflineHandler) {
+        const peers = await this.getUserPeers(userId);
+        this.clusterOfflineHandler({
+          userId,
+          status: 'offline',
+          lastSeenAt,
+          peers,
+        });
+      }
+    });
+  }
+
+  setClusterOfflineHandler(
+    handler: (payload: OfflineBroadcastPayload) => void,
+  ): void {
+    this.clusterOfflineHandler = handler;
+  }
 
   /**
    * Xử lý khi một socket đã xác thực JWT thành công kết nối.
-   * Nếu là socket đầu tiên của user -> hủy timer cũ (nếu có) và trả về isFirstConnection = true.
    */
   async handleUserConnect(
     userId: string,
     socketId: string,
   ): Promise<PresenceConnectResult> {
-    // 1. Hủy grace period disconnect timer nếu user đang trong thời gian ân hạn
+    if (!this.manualPresenceCache.has(userId)) {
+      await this.loadManualPresence(userId);
+    }
+    const manual = this.manualPresenceCache.get(userId);
+
+    this.socketUser.set(socketId, userId);
+
+    if (this.redisState.isDistributedActive()) {
+      const { isFirstConnection } =
+        await this.redisState.handleSocketConnect(userId, socketId, manual);
+      const status: PresenceStatus =
+        manual === 'dnd' || manual === 'idle' ? manual : 'online';
+      const peers = await this.getUserPeers(userId);
+
+      this.logger.log(
+        `[Distributed] User ${userId} kết nối socket ${socketId} (isFirstConnection=${isFirstConnection}, status=${status})`,
+      );
+
+      return {
+        userId,
+        isFirstConnection,
+        status,
+        peers,
+      };
+    }
+
+    // In-memory fallback
     const existingTimer = this.disconnectTimers.get(userId);
     if (existingTimer) {
       clearTimeout(existingTimer);
       this.disconnectTimers.delete(userId);
-      this.logger.log(
-        `User ${userId} kết nối lại trong grace period — hủy offline timer`,
-      );
     }
 
-    // 2. Ghi nhận socket connection
     let sockets = this.userSockets.get(userId);
     if (!sockets) {
       sockets = new Set<string>();
@@ -82,19 +135,9 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
     }
     const isFirstConnection = sockets.size === 0;
     sockets.add(socketId);
-    this.socketUser.set(socketId, userId);
-
-    // 3. Tải/Cập nhật manual_presence từ DB nếu chưa có trong cache
-    if (!this.manualPresenceCache.has(userId)) {
-      await this.loadManualPresence(userId);
-    }
 
     const status = this.getEffectiveStatus(userId);
     const peers = await this.getUserPeers(userId);
-
-    this.logger.log(
-      `User ${userId} kết nối socket ${socketId} (Tổng sockets: ${sockets.size}, status: ${status})`,
-    );
 
     return {
       userId,
@@ -106,18 +149,28 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
 
   /**
    * Xử lý khi một socket ngắt kết nối.
-   * Nếu không còn socket nào -> khởi động grace period timer (15s).
    */
-  handleUserDisconnect(
+  async handleUserDisconnect(
     socketId: string,
     onOfflineCallback?: (payload: OfflineBroadcastPayload) => void,
-  ): PresenceDisconnectResult {
+  ): Promise<PresenceDisconnectResult> {
     const userId = this.socketUser.get(socketId);
     if (!userId) {
       return { userId: null, isLastDisconnect: false };
     }
 
     this.socketUser.delete(socketId);
+
+    if (this.redisState.isDistributedActive()) {
+      const { isLastDisconnect } =
+        await this.redisState.handleSocketDisconnect(userId, socketId);
+      this.logger.log(
+        `[Distributed] Socket ${socketId} của user ${userId} ngắt kết nối (isLastDisconnect=${isLastDisconnect})`,
+      );
+      return { userId, isLastDisconnect };
+    }
+
+    // In-memory fallback
     const sockets = this.userSockets.get(userId);
     if (sockets) {
       sockets.delete(socketId);
@@ -125,35 +178,18 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
 
     const remainingCount = sockets?.size ?? 0;
     if (remainingCount > 0) {
-      this.logger.log(
-        `Socket ${socketId} của user ${userId} ngắt kết nối (Còn lại ${remainingCount} sockets)`,
-      );
       return { userId, isLastDisconnect: false };
     }
 
-    // Không còn socket nào -> khởi động grace period timer
-    this.logger.log(
-      `Socket cuối cùng của user ${userId} đã ngắt kết nối — bắt đầu grace period ${this.GRACE_PERIOD_MS}ms`,
-    );
-
     const timer = setTimeout(async () => {
       this.disconnectTimers.delete(userId);
-
-      // Kiểm tra lại xem user có kết nối lại trong lúc chờ không
       const currentSockets = this.userSockets.get(userId);
       if (!currentSockets || currentSockets.size === 0) {
         this.userSockets.delete(userId);
         const lastSeenAt = new Date().toISOString();
         this.lastSeenCache.set(userId, lastSeenAt);
 
-        this.logger.log(
-          `Grace period kết thúc cho user ${userId} -> Chuyển sang OFFLINE`,
-        );
-
-        // Lưu last_seen_at vào DB asynchronous không chặn
-        this.persistLastSeenAt(userId, lastSeenAt).catch((err) => {
-          this.logger.warn(`Lỗi lưu last_seen_at cho user ${userId}:`, err);
-        });
+        this.persistLastSeenAt(userId, lastSeenAt).catch(() => {});
 
         if (onOfflineCallback) {
           const peers = await this.getUserPeers(userId);
@@ -178,6 +214,18 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
   async handleExplicitLogout(
     userId: string,
   ): Promise<OfflineBroadcastPayload | null> {
+    if (this.redisState.isDistributedActive()) {
+      const lastSeenAt = await this.redisState.setExplicitOffline(userId);
+      await this.persistLastSeenAt(userId, lastSeenAt);
+      const peers = await this.getUserPeers(userId);
+      return {
+        userId,
+        status: 'offline',
+        lastSeenAt,
+        peers,
+      };
+    }
+
     const timer = this.disconnectTimers.get(userId);
     if (timer) {
       clearTimeout(timer);
@@ -207,9 +255,6 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
 
   /**
    * Tính toán trạng thái hiệu dụng (Effective Presence):
-   * - connected = false -> offline
-   * - connected = true && manual = 'dnd' | 'idle' -> dnd | idle
-   * - connected = true && manual = 'online' (hoặc default) -> online
    */
   getEffectiveStatus(userId: string): PresenceStatus {
     const isConnected = (this.userSockets.get(userId)?.size ?? 0) > 0;
@@ -225,10 +270,13 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
   }
 
   /**
-   * Cập nhật lựa chọn manual presence của user (ví dụ user chọn dnd/idle/online trong settings)
+   * Cập nhật lựa chọn manual presence của user
    */
-  setManualPresence(userId: string, status: PresenceStatus): void {
+  async setManualPresence(userId: string, status: PresenceStatus): Promise<void> {
     this.manualPresenceCache.set(userId, status);
+    if (this.redisState.isDistributedActive()) {
+      await this.redisState.setManualStatus(userId, status);
+    }
   }
 
   /**
@@ -278,10 +326,18 @@ export class PresenceService implements OnModuleDestroy, OnApplicationShutdown {
     > = {};
 
     for (const peerId of peers) {
-      result[peerId] = {
-        status: this.getEffectiveStatus(peerId),
-        lastSeenAt: this.getLastSeenAt(peerId),
-      };
+      if (this.redisState.isDistributedActive()) {
+        const pres = await this.redisState.getUserPresence(peerId);
+        result[peerId] = {
+          status: ((pres?.status as PresenceStatus) || 'offline'),
+          lastSeenAt: pres?.lastSeenAt ?? null,
+        };
+      } else {
+        result[peerId] = {
+          status: this.getEffectiveStatus(peerId),
+          lastSeenAt: this.getLastSeenAt(peerId),
+        };
+      }
     }
 
     return result;
