@@ -17,6 +17,21 @@ export class VerifyEnrollDto {
   code: string;
 }
 
+/** Body cho POST /auth/2fa/fast-login — đăng nhập nhanh bằng mã dự phòng (public). */
+export class FastLoginDto {
+  @Transform(trim)
+  @MaxLength(254, { message: 'Email hoặc tên đăng nhập quá dài.' })
+  @IsString({ message: 'Vui lòng nhập email hoặc tên đăng nhập.' })
+  @MinLength(1, { message: 'Vui lòng nhập email hoặc tên đăng nhập.' })
+  identifier: string;
+
+  @Transform(trim)
+  @IsString({ message: 'Vui lòng nhập mã dự phòng.' })
+  @MinLength(6, { message: 'Mã dự phòng không hợp lệ.' })
+  @MaxLength(20, { message: 'Mã dự phòng không hợp lệ.' })
+  code: string;
+}
+
 /** Body cho POST /auth/2fa/verify-login — bước 2 khi đăng nhập (public). */
 export class VerifyLoginDto {
   @Transform(trim)

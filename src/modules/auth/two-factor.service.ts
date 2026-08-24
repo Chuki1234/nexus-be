@@ -247,7 +247,7 @@ export class TwoFactorService {
     }
 
     // Mã dự phòng: xác minh ở DB, giữ nguyên phiên AAL1.
-    const ok = await this.consumeBackupCode(user.id, normalized);
+    const ok = await this.verifyBackupCode(user.id, normalized);
     if (!ok) {
       throw new UnauthorizedException('Mã xác thực hoặc mã dự phòng không đúng.');
     }
@@ -255,7 +255,7 @@ export class TwoFactorService {
   }
 
   /** Kiểm tra + tiêu một mã dự phòng. True nếu mã đúng và còn hiệu lực. */
-  private async consumeBackupCode(userId: string, code: string): Promise<boolean> {
+  async verifyBackupCode(userId: string, code: string): Promise<boolean> {
     const hash = this.hashCode(code);
     const { data, error } = await this.supabase.client
       .from('mfa_backup_codes')

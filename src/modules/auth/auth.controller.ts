@@ -25,7 +25,7 @@ import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
-import { VerifyLoginDto } from './dto/two-factor.dto';
+import { FastLoginDto, VerifyLoginDto } from './dto/two-factor.dto';
 import { TwoFactorService } from './two-factor.service';
 
 /** Đủ cho người gõ nhầm vài lần, không đủ để dò mật khẩu. */
@@ -97,6 +97,17 @@ export class AuthController {
   @Throttle(STRICT_RATE_LIMIT)
   verifyLogin(@Body() dto: VerifyLoginDto): Promise<LoginResponse> {
     return this.twoFactor.verifyLogin(dto.accessToken, dto.challengeId, dto.code);
+  }
+
+  /**
+   * POST /api/auth/2fa/fast-login — đăng nhập nhanh KHÔNG mật khẩu bằng mã dự
+   * phòng 2FA. Public, throttle chặt như /login.
+   */
+  @Post('2fa/fast-login')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(STRICT_RATE_LIMIT)
+  fastLogin(@Body() dto: FastLoginDto): Promise<LoginResponse> {
+    return this.auth.fastLoginBackup(dto.identifier, dto.code);
   }
 
   /**

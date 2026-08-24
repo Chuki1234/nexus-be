@@ -217,6 +217,53 @@ export class AuthService {
     };
   }
 
+  /**
+   * Đăng nhập nhanh KHÔNG mật khẩu bằng MÃ DỰ PHÒNG 2FA.
+   *
+   * Supabase không cho verify TOTP mà không có phiên (mà phiên chỉ tạo bằng mật
+   * khẩu), nên fast-login chỉ nhận mã dự phòng — thứ backend tự quản được. Quy
+   * trình: resolve identifier → lấy user qua admin magic link → verify+tiêu mã
+   * dự phòng → nếu đúng thì đổi token magic link lấy phiên thật. Mọi lỗi trả
+   * cùng một câu chung, không tiết lộ identifier nào tồn tại.
+   */
+  async fastLoginBackup(identifier: string, code: string): Promise<LoginSession> {
+    const email = await this.resolveEmail(identifier.trim());
+    if (!email) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    // Sinh magic link (không gửi email) để lấy user id + token đổi phiên.
+    const { data: link, error: linkError } =
+      await this.supabase.client.auth.admin.generateLink({
+        type: 'magiclink',
+        email,
+      });
+    if (linkError || !link.user || !link.properties?.hashed_token) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    const ok = await this.twoFactor.verifyBackupCode(link.user.id, code.trim());
+    if (!ok) {
+      throw new UnauthorizedException('Mã dự phòng không đúng hoặc đã được dùng.');
+    }
+
+    // Mã đúng → đổi token magic link lấy phiên thật.
+    const { data: session, error: verifyError } =
+      await this.supabase.authClient.auth.verifyOtp({
+        token_hash: link.properties.hashed_token,
+        type: 'email',
+      });
+    if (verifyError || !session.session) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    return {
+      accessToken: session.session.access_token,
+      refreshToken: session.session.refresh_token,
+      expiresAt: session.session.expires_at ?? null,
+    };
+  }
+
   /** Có '@' thì coi là email; ngược lại tra tên đăng nhập. Null nếu không có ai. */
   private async resolveEmail(identifier: string): Promise<string | null> {
     const clean = identifier.trim().toLowerCase();
