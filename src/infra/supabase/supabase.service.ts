@@ -25,6 +25,10 @@ export class SupabaseService {
    */
   readonly authClient: SupabaseClient;
 
+  /** URL project + anon key — để gọi thẳng GoTrue REST thay mặt user (vd MFA). */
+  readonly url: string;
+  readonly anonKey: string;
+
   constructor(config: ConfigService) {
     const url = config.get<string>('SUPABASE_URL');
     const serviceRoleKey = config.get<string>('SUPABASE_SERVICE_ROLE_KEY');
@@ -46,5 +50,8 @@ export class SupabaseService {
     this.client = createClient(url, serviceRoleKey, sessionless);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     this.authClient = createClient(url, anonKey, sessionless);
+
+    this.url = url;
+    this.anonKey = anonKey;
   }
 }
