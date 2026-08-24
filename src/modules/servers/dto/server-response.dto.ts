@@ -14,6 +14,7 @@ export interface ChannelSummaryDto {
   name: string;
   type: 'text' | 'voice';
   topic: string | null;
+  position?: number;
   unread: boolean;
   mentionCount: number;
 }

@@ -7,15 +7,276 @@
 
 ---
 
+### Phase UI-29 — Giao diện & Kết nối Voice Room WebRTC (LiveKit) chuẩn NexusCord
+
+Status: APPROVED
+
+> Thiết kế và triển khai Voice Room toàn diện thuộc Dashboard: giao diện phòng thoại/video chuẩn sản phẩm thật, có mic, camera, chia sẻ màn hình, danh sách người tham gia và trạng thái kết nối tương tự trải nghiệm Discord nhưng mang ngôn ngữ thiết kế NexusCord Hybrid (deep-teal, brand-green, typography Euclid Circular A/Manrope, WCAG AA, full responsiveness).
+>
+> 1. **Kiến trúc WebRTC & Backend Token:**
+>    - Frontend Angular 21 kết nối media qua `livekit-client`.
+>    - Backend NestJS cấp token bảo mật qua `livekit-server-sdk` tại `POST /api/voice/channels/:channelId/token` (hoặc `POST /api/voice/token`).
+>    - Token xác thực người dùng qua JWT/Supabase, kiểm tra quyền `CONNECT_VOICE` và `SPEAK_VOICE` của channel, không hardcode API secret ở client.
+>    - Tên phòng chuẩn: `nexus:{serverId}:voice:{channelId}`.
+>    - Xử lý mượt mà khi thiếu biến môi trường LiveKit (`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`), hiển thị thông báo cấu hình rõ ràng mà không làm crash app.
+> 2. **Trạng thái & Vòng đời Voice Room (State Machine):**
+>    - Quản lý các trạng thái: `idle` | `requesting-permission` | `previewing` | `connecting` | `connected` | `reconnecting` | `disconnected` | `error`.
+>    - Xử lý đầy đủ các ca: Permission denied, no device, device busy, network weak/reconnecting, room full, kick/server disconnect.
+>    - Khi rời phòng (Leave/Disconnect), ngắt kết nối và tắt hoàn toàn local tracks (tắt đèn camera/mic phần cứng).
+> 3. **Bố cục & Giao diện (Layout & UI/UX):**
+>    - **Header:** Icon `volume_up`/`spatial_audio`, tên voice channel, subtitle/status, nút chat drawer, danh sách thành viên, grid/focus mode, fullscreen.
+>    - **Trạng thái chưa tham gia (Unjoined / Voice Empty State):** Không để màn hình trống, hiển thị illustration, tên channel, số người đang trong phòng, mô tả ngắn, nút CTA “Tham gia thoại” và nút phụ “Xem thiết bị” (mở pre-join preview).
+>    - **Pre-join preview:** Camera preview / avatar fallback, chọn microphone/camera/output speaker, audio level test meter trực quan, toggle mic/cam trước khi vào.
+>    - **Connected Stage (Participant Grid):**
+>      - 1 participant: focus tile lớn.
+>      - 2 participants: 2 cột cân bằng.
+>      - 3–4 participants: grid 2×2.
+>      - 5–9 participants: grid 3×3.
+>      - Nhiều hơn: grid responsive / pagination filmstrip.
+>      - Screen share mode: luồng chia sẻ màn hình chiếm stage chính, participants chuyển thành filmstrip ngang/dọc.
+>      - Mỗi Participant Tile: Video stream khi cam bật, Avatar fallback sắc nét khi cam tắt, Display name, Badge "Bạn", icon `mic_off`/`videocam_off`, connection quality indicator, viền speaking màu brand-green dịu khi đang nói, menu tùy chọn khi hover/focus, skeleton loading.
+>    - **Control Bar:** Thanh điều khiển cố định đáy stage gồm: Mic toggle (`mic`/`mic_off`) kèm menu chọn input device/test mic, Camera toggle (`videocam`/`videocam_off`) kèm menu chọn camera, Screen share toggle (`screen_share`/`stop_screen_share`), Nút Mời (`person_add`), Activities placeholder disabled kèm tooltip, Participant list toggle (`group`), Fullscreen toggle (`fullscreen`), Ngắt kết nối (`call_end` màu danger riêng).
+>    - **Channel Sidebar & User Panel Integration:**
+>      - Khi kết nối thoại: Voice channel trên sidebar đổi sang trạng thái connected (icon/chữ brand-green, hiển thị thời lượng cuộc gọi).
+>      - Danh sách thành viên đang ở trong phòng thoại xuất hiện thụt lề ngay dưới voice channel trên sidebar.
+>      - User panel ở đáy sidebar hiển thị "Đã Kết Nối Giọng Nói", tên channel/server, sound wave/ping indicator, nút disconnect nhanh, và thanh quick action toolbar (screen share, video, activity).
+
+#### Mục tiêu theo ba tiêu chí
+
+- **UI/UX:**
+  - Bám sát design system NexusCord Hybrid: Dark mode deep-teal `#001e2b`, `#002634`, `#003d4f`, brand-green `#00ed64` cho speaking/connected/CTA, text ink/slate/steel.
+  - Sử dụng Angular Material wrapper, `mat-icon` (Material Symbols), pill buttons/badges, card bo tròn 12px.
+  - Thiết kế responsive mượt mà trên desktop rộng, laptop nhỏ và mobile/tablet.
+  - Đảm bảo chuẩn WCAG AA, focus-visible, keyboard navigation, tooltip, ARIA labels và tôn trọng `prefers-reduced-motion`.
+- **Feature:**
+  - Kết nối LiveKit WebRTC thật (publish/subscribe audio, video, screen share).
+  - Tự động phát hiện active speaker và hiển thị viền xanh lá.
+  - Chọn và chuyển đổi thiết bị microphone/camera/loa thời gian thực.
+  - Trạng thái Sidebar Voice Channel và User Panel đồng bộ theo phiên gọi.
+- **Data:**
+  - API endpoint NestJS phát token có chữ ký ngắn hạn (TTL), kiểm tra quyền server/channel.
+  - Clean state management với Angular Signals (OnPush).
+  - Không truyền media qua Socket.IO, không ghi rác liên tục vào database.
+
+#### File dự kiến thực hiện
+
+- **Frontend (`nexus-fe`):**
+  - `package.json` — bổ sung dependency `livekit-client`.
+  - `src/app/core/api/voice-api.service.ts|spec.ts` — gọi API lấy LiveKit token.
+  - `src/app/features/voice/services/voice-room.service.ts|spec.ts` — quản lý Room LiveKit, tracks, participants và signals.
+  - `src/app/features/voice/services/media-device.service.ts|spec.ts` — quản lý media permissions, danh sách thiết bị và audio level meter.
+  - `src/app/features/voice/voice-room/voice-room.ts|html|css|spec.ts` — Voice Room controller & layout.
+  - `src/app/features/voice/voice-room/components/voice-prejoin/voice-prejoin.ts|html|css|spec.ts` — Pre-join modal/view.
+  - `src/app/features/voice/voice-room/components/voice-stage/voice-stage.ts|html|css|spec.ts` — Grid layout & Screen share stage.
+  - `src/app/features/voice/voice-room/components/participant-tile/participant-tile.ts|html|css|spec.ts` — Participant tile.
+  - `src/app/features/voice/voice-room/components/voice-controls/voice-controls.ts|html|css|spec.ts` — Fixed bottom control bar.
+  - `src/app/features/voice/voice-room/components/device-menu/device-menu.ts|html|css|spec.ts` — Menu chọn thiết bị mic/camera.
+  - `src/app/features/dashboard/channel/channel.ts|html|css|spec.ts` — nhúng Voice Room vào kênh loại `voice`.
+  - `src/app/layouts/app-layout/components/user-panel/user-panel.ts|html|css|spec.ts` — hiển thị trạng thái thoại đang kết nối.
+  - `src/app/layouts/app-layout/components/channel-sidebar/components/channel-list.ts|html|css|spec.ts` — hiển thị danh sách người trong kênh thoại.
+- **Backend (`nexus-be`):**
+  - `package.json` — bổ sung dependency `livekit-server-sdk`.
+  - `src/modules/voice/voice.module.ts`
+  - `src/modules/voice/voice.controller.ts|spec.ts`
+  - `src/modules/voice/voice.service.ts|spec.ts`
+  - `src/modules/voice/dto/voice-token.dto.ts`
+  - `src/app.module.ts` — import `VoiceModule`.
+
+#### Kiểm chứng & Tiêu chí hoàn thành
+
+- Khởi tạo kênh thoại hiển thị Unjoined Voice Empty State đầy đủ thông tin, không phải trang trống.
+- Bấm "Xem thiết bị" mở Pre-join preview, hiển thị camera preview/avatar fallback và thanh đo âm lượng mic thật.
+- Bấm "Tham gia thoại" xin token LiveKit, chuyển trạng thái `connecting` $\rightarrow$ `connected`.
+- Lưới hiển thị thích ứng đúng số lượng participant (1, 2, 4, 9) và tự chuyển sang stage focus khi có screen share.
+- Bật/tắt mic, camera, chia sẻ màn hình hoạt động chính xác với WebRTC tracks.
+- Sidebar và User Panel hiển thị đúng trạng thái kết nối, thời lượng, và nút ngắt kết nối.
+- Toàn bộ unit tests (`npm test`) và build (`npm run build`) trên cả FE và BE đều pass 100%.
+
+---
+
+### Phase UI-30 — Channel Actions Suite: Invite Dialog, Voice Chat Drawer & Channel Settings Modal
+
+Status: APPROVED
+
+> Thiết kế và triển khai trọn bộ giao diện cho 3 nút tùy chọn/tương tác kênh (Text & Voice Channel) trên Sidebar và trong Dashboard theo đúng ảnh thiết kế Discord mẫu nhưng mang ngôn ngữ NexusCord Hybrid (deep-teal, brand-green, typography Euclid/Manrope, WCAG AA):
+>
+> 1. **Nút 1 (`person_add` / Mời vào kênh) — Dialog Mời Bạn Bè (`InviteChannelDialog`):**
+>    - Mở khi bấm nút `person_add` trên thanh kênh (hover), trong context menu hoặc trong Voice Room.
+>    - Header: Tiêu đề `"Mời bạn bè vào [Tên máy chủ]"`, phụ đề `"Người nhận sẽ đến #[Tên kênh]"`, nút đóng 'X'.
+>    - Ô tìm kiếm bạn bè nhanh với icon kính lúp.
+>    - Danh sách bạn bè scrollable: Avatar, tên hiển thị, username, nút "Mời" (bấm đổi sang "Đã gửi").
+>    - Khối liên kết mời ở đáy: Input readonly link `https://nexus.gg/c/[code]`, nút "Sao chép" (đổi sang "Đã sao chép" khi click), ghi chú thời hạn 30 ngày và nút "Chỉnh sửa link mời".
+> 2. **Nút 2 (`chat_bubble_outline` / Mở Trò Chuyện) — Voice Chat Drawer (`VoiceChatDrawer`):**
+>    - Mở khi bấm icon tin nhắn trên kênh thoại hoặc nút chat trong Header kênh thoại.
+>    - Chia đôi màn hình Dashboard:
+>      - Cột chính (trái): Voice Room Stage (phòng thoại, grid, controls).
+>      - Drawer trượt vào (phải, 360px–420px): Khung chat văn bản riêng của kênh thoại.
+>      - Header drawer: `# [Tên kênh thoại]` + nút đóng 'X'.
+>      - Timeline: Tin nhắn mở đầu `"Chào mừng bạn đến với #[Tên kênh thoại]!"` + danh sách tin nhắn.
+>      - Message Composer ở đáy: Input `+ Nhắn [Tên kênh thoại]`, nút emoji, nút gửi.
+> 3. **Nút 3 (`settings` / Chỉnh sửa kênh) — Modal Cài Đặt Kênh (`ChannelSettingsModal`):**
+>    - Mở khi bấm nút bánh răng ⚙️ trên kênh hoặc chọn "Chỉnh sửa kênh" từ Context Menu.
+>    - Bố cục 2 cột toàn màn hình chuẩn NexusCord Settings:
+>      - Sidebar trái (240px): Tiêu đề `# [TÊN_KÊNH] KÊNH CHAT / KÊNH THOẠI`, danh sách tab (Tổng quan, Quyền hạn, Lời mời, Tích hợp), mục Xóa kênh màu đỏ nguy hiểm (`delete`).
+>      - Panel phải (Tab **Tổng quan**):
+>        - 1. **Tên kênh**: Input chỉnh sửa tên kênh.
+>        - 2. **Chủ đề kênh**: Textarea kèm thanh công cụ định dạng mini (B, I, U, S, Eye), bộ đếm ký tự 1024, placeholder: `Hãy hướng dẫn mọi người cách sử dụng kênh này!`.
+>        - 3. **Chế độ chậm (Slowmode)**: Dropdown chọn thời gian (Tắt, 5s, 10s, 15s, 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h, 2h, 6h) kèm hướng dẫn chi tiết.
+>        - 4. **Độ Hiển Thị Nội Dung**: Radio options (Mặc định / Kênh Nội Dung Ẩn / Kênh giới hạn độ tuổi) kèm mô tả chi tiết.
+>        - 5. **Ẩn sau khi không hoạt động**: Dropdown chọn thời gian (3 Ngày, 1 Giờ, 24 Giờ, 1 Tuần).
+>        - Nút đóng `ESC` ở góc trên bên phải (hỗ trợ phím tắt ESC).
+>        - Thanh thông báo lưu thay đổi ở đáy khi form dirty: "Bạn có thay đổi chưa lưu" + "Đặt lại" + "Lưu thay đổi".
+
+#### File dự kiến thực hiện
+
+- `src/app/layouts/app-layout/components/channel-sidebar/components/invite-channel-dialog/invite-channel-dialog.ts|html|css|spec.ts`
+- `src/app/features/voice/voice-room/components/voice-chat-drawer/voice-chat-drawer.ts|html|css|spec.ts`
+- `src/app/features/settings/modals/channel-settings-modal/channel-settings-modal.ts|html|css|spec.ts`
+- `src/app/layouts/app-layout/components/channel-sidebar/components/channel-list.ts|html|css|spec.ts`
+- `src/app/features/voice/voice-room/voice-room.ts|html|css|spec.ts`
+- `src/app/features/dashboard/channel/channel.ts|html|css|spec.ts`
+
+#### Kiểm chứng & Tiêu chí hoàn thành
+
+- Bấm nút `person_add` mở `InviteChannelDialog`, tìm kiếm bạn bè, bấm Mời, bấm Sao chép liên kết có phản hồi rõ ràng.
+- Kênh thoại: Bấm icon tin nhắn mở `VoiceChatDrawer` chia đôi màn hình cạnh Voice Stage mượt mà, có thể soạn tin và đóng mở drawer.
+- Bấm nút `settings` ⚙️ mở `ChannelSettingsModal` 2 cột, xem và chỉnh sửa Tổng quan (tên kênh, chủ đề kênh, slowmode, độ hiển thị, ẩn không hoạt động), nhấn ESC hoặc nút X để đóng.
+- 100% unit tests frontend (`npm test`) và build (`npm run build`) pass.
+
+---
+### Phase UI-32 — Friends API & dữ liệu kết bạn thật trên Supabase
+
+Status: APPROVED
+
+> **Gate bắt buộc:** Tài đọc toàn bộ phase này trong `plans/dashboard.PLAN.md` rồi tự đổi đúng dòng trên thành `Status: APPROVED`. Chưa có chữ APPROVED thì không được scaffold hoặc sửa code.
+
+#### Mục tiêu
+
+Thay luồng “Thêm bạn” UI preview bằng dữ liệu thật qua Angular → NestJS → Supabase, dùng bảng `public.friendships` đã có trong migration `20260731090400_social_and_settings.sql`. Không tạo bảng `friends` hoặc `friend_requests` mới và không tự thay đổi schema dùng chung.
+
+#### Phạm vi Backend — `src/modules/friends/**`
+
+- Scaffold bằng Nest CLI: module, controller, service và test; gateway realtime để phase sau.
+- Bảo vệ toàn bộ endpoint bằng `SupabaseAuthGuard`; user gửi request luôn lấy từ `@CurrentUser()`, không nhận requester ID từ body.
+- API REST:
+  - `POST /api/friends/requests` — gửi lời mời bằng username.
+  - `GET /api/friends` — danh sách quan hệ `accepted`.
+  - `GET /api/friends/requests` — tách `incoming` và `outgoing`.
+  - `PATCH /api/friends/requests/:userId/accept` — người nhận chấp nhận.
+  - `DELETE /api/friends/requests/:userId` — từ chối hoặc hủy lời mời.
+  - `DELETE /api/friends/:userId` — xóa bạn.
+- Chuẩn hóa cặp UUID thành `user_a_id < user_b_id`; chặn tự kết bạn, request trùng và race condition; map lỗi unique `23505` thành HTTP 409.
+- Query profile theo lô, không N+1; response chỉ trả id, username, tên hiển thị, avatar, presence/status cần cho Dashboard, không trả email/phone/token.
+- Phase này chưa làm block vì schema hiện thiếu `blocked_by`; nếu cần phải lập migration riêng và chờ mentor duyệt.
+
+#### Phạm vi Frontend — `src/app/features/dashboard/friends/**`
+
+- Generate `FriendsApiService`/store đúng cấu trúc Angular hiện có, tái sử dụng form và component Friends hiện tại.
+- `AddFriendForm` emit username; page/store gọi API thật, có pending/success/error rõ ràng và không còn copy “Không có API nào được gọi”.
+- Tab `Tất cả`/“Trực tuyến” đọc danh sách accepted thật; tab `Chờ duyệt` hiển thị incoming/outgoing thật với accept/reject/cancel.
+- Khi demo bật, chỉ dùng ShellData để preview; khi demo tắt, tải API thật. Tuyệt đối không ghi dữ liệu demo xuống Supabase.
+- Friendship và DM là hai dữ liệu khác nhau; không tự tạo conversation khi vừa accept. Chỉ tạo/mở DM khi user bấm “Nhắn tin” ở phase Messages.
+- Không sửa Profile, Settings, Auth, Theme/Atmosphere hoặc feature của member khác.
+
+#### Kiểm chứng và tiêu chí hoàn thành
+
+- **Data:** xác nhận `public.friendships` tồn tại; không migration schema mới; mỗi cặp user chỉ có một dòng ordered; dữ liệu còn sau F5 và đăng nhập lại.
+- **Feature:** dùng hai tài khoản thật A/B kiểm tra gửi → B thấy incoming → B accept → cả hai thấy nhau trong danh sách; kiểm tra từ chối, hủy, xóa bạn, tự kết bạn và request trùng.
+- **UI/UX:** loading/empty/error/success đầy đủ, button pending không gửi hai lần, copy tiếng Việt rõ ràng, WCAG AA và Material icon theo NexusCord Hybrid.
+- **Test BE:** service/controller cover 201/200/204 và 400/401/404/409, Supabase error mapping, không lộ dữ liệu nhạy cảm.
+- **Test FE:** form submit, pending, error, incoming/outgoing, accept/reject/cancel, demo-off dùng API thật.
+- Chạy `npm test` và `npm run build` ở cả nexus-fe và nexus-be; chạy `npm run check:shared` nếu sửa type dùng chung.
+---
+
+### Phase DM-1 — Direct Messages: Conversations & Messages REST API
+
+Status: APPROVED
+
+> **Gate:** Đã duyệt bởi người dùng. Chỉ triển khai backend REST API, validation, phân quyền thành viên và unit test.
+>
+> 1. **Conversations REST Module (`src/modules/conversations/**`):**
+>    - `POST /api/conversations/dm`: Nhận `recipientId`, kiểm tra quan hệ bạn bè (`friendships` status = 'accepted'). Nếu đã có conversation giữa 2 người (dựa trên unique `dm_key = min(A,B) + ':' + max(A,B)`), trả về conversation hiện có; nếu chưa có, tạo mới và thêm cả 2 vào `conversation_participants`.
+>    - `GET /api/conversations`: Lấy danh sách DM của user hiện tại (kèm thông tin profile người bên kia và `unread_count` từ `read_states`).
+>    - `GET /api/conversations/:id`: Lấy chi tiết conversation, kiểm tra requester thuộc `conversation_participants` (nếu không thuộc trả 403 Forbidden).
+> 2. **Messages REST Module (`src/modules/messages/**`):**
+>    - Dùng chung `MessagesService` cho cả REST và Gateway (Phase DM-2).
+>    - `GET /api/conversations/:id/messages`: Tải lịch sử tin nhắn dùng Cursor Pagination (`id < $before ORDER BY id DESC LIMIT $limit`), kiểm tra quyền thành viên.
+>    - `POST /api/conversations/:id/messages`: Gửi tin nhắn mới có `client_nonce` (idempotency key chống gửi trùng), kiểm tra nội dung không rỗng (max 4000 ký tự), lưu vào DB và trả về message record đầy đủ.
+>    - `PATCH /api/messages/:id`: Sửa tin nhắn (chỉ cho phép chính tác giả `author_id`, set `edited_at = now()`).
+>    - `DELETE /api/messages/:id`: Xóa tin nhắn (soft delete: set `deleted_at = now()`, content được ẩn hoặc giữ trạng thái đã xóa).
+>    - `POST /api/conversations/:id/read`: Đánh dấu đã đọc, upsert vào `read_states` (`last_read_message_id = $messageId`).
+> 3. **Validation & Authorization:**
+>    - Bảo vệ bằng `SupabaseAuthGuard` (verify JWT qua Supabase Auth).
+>    - Chống tự nhắn tin cho chính mình (`recipientId !== user.id`).
+>    - DTO validation: `@IsString()`, `@IsNotEmpty()`, `@MaxLength(4000)`, `@IsUUID()`.
+
+#### File dự kiến thực hiện
+
+- `nexus-be/src/modules/conversations/conversations.module.ts`
+- `nexus-be/src/modules/conversations/conversations.controller.ts` & `spec.ts`
+- `nexus-be/src/modules/conversations/conversations.service.ts` & `spec.ts`
+- `nexus-be/src/modules/conversations/dto/*.ts`
+- `nexus-be/src/modules/messages/messages.module.ts`
+- `nexus-be/src/modules/messages/messages.controller.ts` & `spec.ts`
+- `nexus-be/src/modules/messages/messages.service.ts` & `spec.ts`
+- `nexus-be/src/modules/messages/dto/*.ts`
+- `nexus-be/src/app.module.ts`
+
+---
+
+### Phase DM-2 — Direct Messages: Realtime WebSocket Gateway (Socket.IO)
+
+Status: PENDING
+
+> Tích hợp Socket.IO Gateway hai chiều cho tin nhắn và trạng thái realtime:
+>
+> 1. **Handshake & Auth:** Xác thực socket connection bằng Supabase JWT access token từ query/auth headers.
+> 2. **Room Management:** `conversation:join`, `conversation:leave` (room `conversation:{id}`). Xác thực thành viên trước khi cho phép join.
+> 3. **Tin nhắn Realtime:**
+>    - Nhận `message:send` với `clientMessageId`, gọi qua `MessagesService` lưu DB.
+>    - Trả ACK cho người gửi gồm `{ id, clientMessageId, conversationId, createdAt, status }`.
+>    - Broadcast `message:created` tới room `conversation:{id}`.
+>    - Broadcast `message:edited`, `message:deleted`, `message:read`.
+> 4. **Typing Indicator:** `typing:start`, `typing:stop` broadcast tới room (in-memory, không lưu DB).
+
+---
+
+### Phase DM-3 — Direct Messages: Frontend API Service & Realtime Store
+
+Status: PENDING
+
+> Dựng tầng Client giao tiếp REST & WebSocket trên Angular 21:
+>
+> 1. `ChatApiService`: Gọi REST API tải lịch sử, tạo/mở DM, sửa/xóa tin, đánh dấu đã đọc.
+> 2. `ChatSocketService`: Quản lý kết nối Socket.IO, auto-reconnect, resync tin nhắn sau reconnect, join room, optimistic message queue.
+> 3. Tích hợp `FriendRow`: Bấm nút nhắn tin từ danh sách bạn bè gọi `getOrCreateDm` có loading state, chống double click, và điều hướng vào `/channels/@me/:conversationId`.
+
+---
+
+### Phase DM-4 — Direct Messages: UI/UX Conversation Page & Realtime E2E
+
+Status: PENDING
+
+> Hoàn thiện giao diện trang DM `/channels/@me/:conversationId`:
+>
+> 1. Lịch sử tin nhắn thật từ DB qua cursor pagination khi cuộn lên trên (Infinite scroll).
+> 2. Optimistic UI: hiển thị ngay tin nhắn đang gửi $\rightarrow$ đã gửi $\rightarrow$ lỗi kèm nút thử lại.
+> 3. Realtime typing indicator ("... đang nhập").
+> 4. Sửa/xóa tin nhắn trực tiếp với `MessageActions`.
+> 5. Trạng thái kết nối: loading, empty, sending, failed, offline, reconnecting banner.
+> 6. Không phá vỡ demo mode preview; khi demo mode tắt, dùng 100% dữ liệu thật.
+
+---
+
 ## Phạm vi
 
 Dashboard chia làm hai mảng lớn:
 
-| Mảng | Số phase | Ước lượng |
-|---|---|---|
-| **A. Nhắn tin** (chat message) | P0 – P11 | ~14.5 ngày |
-| **B. Gọi thoại** (live calling, LiveKit Cloud) | C1 – C5 | ~4.5 ngày |
-| | **Tổng** | **~19 ngày** |
+| Mảng                                           | Số phase | Ước lượng    |
+| ---------------------------------------------- | -------- | ------------ |
+| **A. Nhắn tin** (chat message)                 | P0 – P11 | ~14.5 ngày   |
+| **B. Gọi thoại** (live calling, LiveKit Cloud) | C1 – C5  | ~4.5 ngày    |
+|                                                | **Tổng** | **~19 ngày** |
 
 > 🔴 **Vượt ngân sách thời gian ngay từ đầu.** Còn 16 ngày (31/07 → 16/08), cần 19 ngày.
 > Thiếu ~3 ngày, và con số này giả định không có ngày nào trượt. Ba lối thoát, theo thứ
@@ -31,11 +292,11 @@ Dashboard chia làm hai mảng lớn:
 Theo `NEXUS_CONTEXT.md` §4. Ghi lại đây vì cả ba đều rơi vào phần chat, và cả ba
 đều dễ bị bỏ qua khi chạy nước rút:
 
-| Yêu cầu | Nằm ở phase | Vì sao không cắt được |
-|---|---|---|
-| Cursor pagination (cấm `OFFSET`) | P3 | `OFFSET` chậm dần theo độ sâu, và trả sai khi có tin mới chèn vào giữa |
-| Read state đọc từ bảng `read_states` | P6 | Biến đếm trong memory sai ngay khi user F5 hoặc mở tab thứ hai |
-| Socket reconnect resync | P5 | Mất mạng 3 giây là mất tin vĩnh viễn nếu không resync |
+| Yêu cầu                              | Nằm ở phase | Vì sao không cắt được                                                  |
+| ------------------------------------ | ----------- | ---------------------------------------------------------------------- |
+| Cursor pagination (cấm `OFFSET`)     | P3          | `OFFSET` chậm dần theo độ sâu, và trả sai khi có tin mới chèn vào giữa |
+| Read state đọc từ bảng `read_states` | P6          | Biến đếm trong memory sai ngay khi user F5 hoặc mở tab thứ hai         |
+| Socket reconnect resync              | P5          | Mất mạng 3 giây là mất tin vĩnh viễn nếu không resync                  |
 
 ---
 
@@ -45,21 +306,21 @@ Mỗi phase phải **chạy được và kiểm chứng được** trước khi 
 
 ### Bảng tổng quan
 
-| Phase | Nội dung | Ước lượng | Ghi chú |
-|---|---|---|---|
-| **P0** | Nền móng: schema, `shared/`, socket contract | 1.5 ngày | Chặn tất cả |
-| **P1** | Dashboard shell | 1 ngày | Chặn Profile + Setting |
-| **P2** | Server & Channel (đọc) | 1 ngày | |
-| **P3** | Đọc tin nhắn + cursor pagination | 1.5 ngày | ★ không cắt |
-| **P4** | Gửi tin + optimistic UI | 1 ngày | |
-| **P5** | Realtime socket + reconnect resync | 2 ngày | ★ không cắt |
-| **P6** | Read state + badge unread | 1 ngày | ★ không cắt |
-| | — **Hết Messaging Core, mốc 08/08** — | **9 ngày** | ⚠️ chỉ có 8 ngày |
-| **P7** | Sửa / xoá / trả lời tin | 1 ngày | |
-| **P8** | Đính kèm file & ảnh | 1.5 ngày | |
-| **P9** | Tin nhắn riêng (DM 1-1) | 1.5 ngày | |
-| **P10** | Sticker | 0.5 ngày | Cắt được (§7 #4) |
-| **P11** | Thông báo in-app + mention | 1 ngày | |
+| Phase   | Nội dung                                     | Ước lượng  | Ghi chú                |
+| ------- | -------------------------------------------- | ---------- | ---------------------- |
+| **P0**  | Nền móng: schema, `shared/`, socket contract | 1.5 ngày   | Chặn tất cả            |
+| **P1**  | Dashboard shell                              | 1 ngày     | Chặn Profile + Setting |
+| **P2**  | Server & Channel (đọc)                       | 1 ngày     |                        |
+| **P3**  | Đọc tin nhắn + cursor pagination             | 1.5 ngày   | ★ không cắt            |
+| **P4**  | Gửi tin + optimistic UI                      | 1 ngày     |                        |
+| **P5**  | Realtime socket + reconnect resync           | 2 ngày     | ★ không cắt            |
+| **P6**  | Read state + badge unread                    | 1 ngày     | ★ không cắt            |
+|         | — **Hết Messaging Core, mốc 08/08** —        | **9 ngày** | ⚠️ chỉ có 8 ngày       |
+| **P7**  | Sửa / xoá / trả lời tin                      | 1 ngày     |                        |
+| **P8**  | Đính kèm file & ảnh                          | 1.5 ngày   |                        |
+| **P9**  | Tin nhắn riêng (DM 1-1)                      | 1.5 ngày   |                        |
+| **P10** | Sticker                                      | 0.5 ngày   | Cắt được (§7 #4)       |
+| **P11** | Thông báo in-app + mention                   | 1 ngày     |                        |
 
 > ⚠️ **P0–P6 cần 9 ngày nhưng chỉ còn 8 ngày tới mốc 08/08.** Đã trượt trước khi
 > bắt đầu. Hai cách xử lý: dời P8/P9/P10 xuống sau mốc (đã làm trong bảng trên),
@@ -80,12 +341,12 @@ Mỗi phase phải **chạy được và kiểm chứng được** trước khi 
    - **Bảng `profiles` hoà giải bằng migration `ALTER`** (đã chốt 31/07 — giữ tài khoản
      test, giữ lịch sử migration sạch):
 
-     | Việc | Chi tiết |
-     |---|---|
-     | Đổi tên cột | `birthdate` → `date_of_birth` |
-     | Đổi kiểu | `email`, `username`: `text` → `citext` |
-     | Thêm cột | `phone`, `avatar_url`, `banner_url`, `status_message`, `manual_presence`, `last_seen_at` |
-     | Giữ nguyên | Regex username **`{3,32}`** — sửa `nexus_schema.sql` từ `{2,32}` xuống cho khớp |
+     | Việc        | Chi tiết                                                                                 |
+     | ----------- | ---------------------------------------------------------------------------------------- |
+     | Đổi tên cột | `birthdate` → `date_of_birth`                                                            |
+     | Đổi kiểu    | `email`, `username`: `text` → `citext`                                                   |
+     | Thêm cột    | `phone`, `avatar_url`, `banner_url`, `status_message`, `manual_presence`, `last_seen_at` |
+     | Giữ nguyên  | Regex username **`{3,32}`** — sửa `nexus_schema.sql` từ `{2,32}` xuống cho khớp          |
 
    - **Sửa `nexus_schema.sql`** hai chỗ để nó không còn mâu thuẫn với các quyết định
      đã chốt: hạ regex username xuống `{3,32}`, và **xoá comment dòng 54–57** mô tả
@@ -103,8 +364,8 @@ Mỗi phase phải **chạy được và kiểm chứng được** trước khi 
      `socket-events.ts`.
 
 3. **Viết socket event contract TRƯỚC khi implement**
-   - `CLAUDE.md` gốc: *"Mọi socket event phải có TypeScript interface trong
-     `shared/` trước khi implement"*. P0 làm interface, P5 mới viết gateway.
+   - `CLAUDE.md` gốc: _"Mọi socket event phải có TypeScript interface trong
+     `shared/` trước khi implement"_. P0 làm interface, P5 mới viết gateway.
    - Danh sách event dự kiến ở [phụ lục cuối tài liệu](#phụ-lục--socket-event-contract).
 
 4. **Hằng số permission bitfield**
@@ -127,9 +388,9 @@ gắn vào, nên phải xong sớm.
 **Chức năng nhỏ**
 
 1. **Layout ba cột** (theo `DESIGN-voltagent.md`)
-   - Cột 1 — *server rail*: dải icon server dọc trái, hẹp.
-   - Cột 2 — *channel list*: tên server + danh sách kênh + khu người dùng dưới đáy.
-   - Cột 3 — *main*: nội dung, nơi các trang khác render vào.
+   - Cột 1 — _server rail_: dải icon server dọc trái, hẹp.
+   - Cột 2 — _channel list_: tên server + danh sách kênh + khu người dùng dưới đáy.
+   - Cột 3 — _main_: nội dung, nơi các trang khác render vào.
 2. **Routing khung**
    - `/channels/:serverId/:channelId` — kênh trong server
    - `/channels/@me` — danh sách DM
@@ -140,6 +401,7 @@ gắn vào, nên phải xong sớm.
 5. **A11y**: điều hướng bàn phím giữa ba cột, `aria-current` cho kênh đang mở.
 
 **Điểm kỹ thuật**
+
 - Dùng `ex-app-shell-row` trong design system: hàng sidebar, trạng thái active dùng
   `primary` làm indicator. Màu xanh `#00d992` **chỉ** dành cho CTA và chỉ báo trạng
   thái sống — không dùng làm màu chữ body.
@@ -166,6 +428,7 @@ test AXE không lỗi.
      transaction** với insert server + insert owner vào `server_members`.
 
 **Điểm kỹ thuật**
+
 - Kênh `is_private` và `channel_overwrites` áp dụng ngay ở tầng lọc, đừng để tới P7
   mới thêm — sửa sau sẽ phải rà lại mọi endpoint.
 - Phần **sửa/xoá server, kênh, RBAC UI, invite link** thuộc trang Setting, không làm ở đây.
@@ -199,6 +462,7 @@ thành viên gọi API trả 403.
 8. Timestamp lưu UTC, format ở tầng hiển thị (luật `CLAUDE.md`).
 
 **Điểm kỹ thuật**
+
 - `messages.id` là `bigint` — trong JS vượt `Number.MAX_SAFE_INTEGER` về lý thuyết.
   Ở quy mô đồ án thì không chạm tới, nhưng **truyền cursor dưới dạng chuỗi** để
   không phải sửa lại sau.
@@ -227,7 +491,8 @@ lặp và không tin nào mất; xem query plan xác nhận có dùng index.
 7. **Ô soạn thảo**: Enter gửi, Shift+Enter xuống dòng, tự giãn chiều cao.
 
 **Điểm kỹ thuật**
-- **Gửi bằng REST, không bằng socket.** Socket chỉ dùng để *nhận* (P5). Lý do: REST có
+
+- **Gửi bằng REST, không bằng socket.** Socket chỉ dùng để _nhận_ (P5). Lý do: REST có
   mã lỗi rõ ràng, retry và xác thực đơn giản; nếu gửi qua socket thì phải tự làm lại
   toàn bộ cơ chế ack/timeout. Server ghi DB xong mới broadcast.
 - Khi gặp lỗi unique `client_nonce`, trả về **tin đã tồn tại** kèm 200 chứ không phải
@@ -258,6 +523,7 @@ lặp và không tin nào mất; xem query plan xác nhận có dùng index.
    `client_nonce` khi `message:new` của chính mình quay về.
 
 **Điểm kỹ thuật**
+
 - Cần thêm tham số `after` cho endpoint P3 (quét xuôi, `id > $after ORDER BY id ASC`).
 - Presence và Redis: `NEXUS_CONTEXT.md` §8 đã kết luận **in-memory Map là đủ khi chỉ
   chạy 1 instance NestJS**. Chỉ cần `socket.io-redis` khi scale nhiều instance.
@@ -290,6 +556,7 @@ gửi 5 tin ở tab A, bật mạng lại → tab B nhận đủ 5 tin, không t
 5. **Cập nhật realtime** — nhận `message:new` ở kênh không mở thì tăng badge.
 
 **Điểm kỹ thuật**
+
 - `read_states` **không có primary key**, chỉ có hai partial unique index. Khi `upsert`
   phải chỉ rõ conflict target (`user_id, channel_id`), không dùng mặc định được.
 - Mở tab thứ hai phải ra cùng kết quả — đây chính là lý do cấm đếm trong memory.
@@ -331,7 +598,7 @@ gửi 5 tin ở tab A, bật mạng lại → tab B nhận đủ 5 tin, không t
 
 ---
 
-### P10 — Sticker *(cắt được — §7 #4)*
+### P10 — Sticker _(cắt được — §7 #4)_
 
 1. Proxy qua NestJS, **API key Giphy/Tenor giữ ở backend**.
 2. Lưu `sticker_provider` + `sticker_id` + `sticker_url`. **Không tải ảnh về Storage.**
@@ -358,13 +625,13 @@ bitfield trong `nexus_schema.sql` đã có sẵn `CONNECT_VOICE` (1<<10) và `SP
 
 ### Bảng tổng quan
 
-| Phase | Nội dung | Ước lượng | Phụ thuộc |
-|---|---|---|---|
-| **C1** | Nền móng LiveKit + endpoint phát token | 0.5 ngày | P0 |
-| **C2** | Voice channel: vào/ra, nghe/nói, tắt mic | 1.5 ngày | C1, P2 |
-| **C3** | Chỉ báo trạng thái: ai đang nói, mic/tai nghe | 0.5 ngày | C2 |
-| **C4** | Gọi riêng 1-1 trong DM: chuông, nhận/từ chối | 1.5 ngày | C2, **P9** |
-| **C5** | Video + chia sẻ màn hình *(cắt được)* | 1 ngày | C2 |
+| Phase  | Nội dung                                      | Ước lượng | Phụ thuộc  |
+| ------ | --------------------------------------------- | --------- | ---------- |
+| **C1** | Nền móng LiveKit + endpoint phát token        | 0.5 ngày  | P0         |
+| **C2** | Voice channel: vào/ra, nghe/nói, tắt mic      | 1.5 ngày  | C1, P2     |
+| **C3** | Chỉ báo trạng thái: ai đang nói, mic/tai nghe | 0.5 ngày  | C2         |
+| **C4** | Gọi riêng 1-1 trong DM: chuông, nhận/từ chối  | 1.5 ngày  | C2, **P9** |
+| **C5** | Video + chia sẻ màn hình _(cắt được)_         | 1 ngày    | C2         |
 
 ---
 
@@ -397,6 +664,7 @@ token giải mã ra đúng room và đúng quyền publish.
 6. Rời kênh, đóng tab, mất mạng → phải dọn sạch, không để lại "người ma" trong danh sách.
 
 **Điểm kỹ thuật**
+
 - Danh sách người lấy từ **sự kiện của LiveKit**, không tự đếm bằng Socket.IO — hai
   nguồn sẽ lệch nhau ngay khi có người rớt mạng.
 - Nhưng vẫn phải phát sự kiện qua socket để **người ngoài kênh** thấy được ai đang ở
@@ -418,7 +686,7 @@ tiếng nhau. Đóng đột ngột một tab → tên biến khỏi danh sách b
 
 ---
 
-### C4 — Gọi riêng 1-1 *(cần P9 xong trước)*
+### C4 — Gọi riêng 1-1 _(cần P9 xong trước)_
 
 1. Nút gọi trong cửa sổ DM.
 2. **Chuông**: phát `call:incoming` qua room `user:<uuid>` của người nhận.
@@ -430,7 +698,7 @@ tiếng nhau. Đóng đột ngột một tab → tên biến khỏi danh sách b
 
 ---
 
-### C5 — Video & chia sẻ màn hình *(cắt được)*
+### C5 — Video & chia sẻ màn hình _(cắt được)_
 
 1. Bật/tắt camera, lưới hiển thị video.
 2. Chia sẻ màn hình (một track riêng trong LiveKit).
@@ -447,28 +715,29 @@ Bản nháp cho P0. Interface thật đặt ở `shared/socket-events.ts`.
 
 **Client → Server**
 
-| Event | Payload | Dùng ở |
-|---|---|---|
-| `channel:join` | `{ channelId }` | P5 |
-| `channel:leave` | `{ channelId }` | P5 |
-| `typing:start` | `{ channelId }` | P5 |
-| `typing:stop` | `{ channelId }` | P5 |
+| Event           | Payload         | Dùng ở |
+| --------------- | --------------- | ------ |
+| `channel:join`  | `{ channelId }` | P5     |
+| `channel:leave` | `{ channelId }` | P5     |
+| `typing:start`  | `{ channelId }` | P5     |
+| `typing:stop`   | `{ channelId }` | P5     |
 
 **Server → Client**
 
-| Event | Payload | Dùng ở |
-|---|---|---|
-| `message:new` | `{ message }` | P5 |
-| `message:updated` | `{ message }` | P7 |
-| `message:deleted` | `{ channelId, messageId }` | P7 |
-| `typing:update` | `{ channelId, userIds }` | P5 |
-| `unread:update` | `{ channelId, unreadCount, mentionCount }` | P6 |
-| `notification:new` | `{ notification }` | P11 |
-| `voice:participants` | `{ channelId, users }` | C2 |
-| `call:incoming` | `{ conversationId, fromUserId }` | C4 |
-| `call:answered` / `call:declined` / `call:ended` | `{ conversationId }` | C4 |
+| Event                                            | Payload                                    | Dùng ở |
+| ------------------------------------------------ | ------------------------------------------ | ------ |
+| `message:new`                                    | `{ message }`                              | P5     |
+| `message:updated`                                | `{ message }`                              | P7     |
+| `message:deleted`                                | `{ channelId, messageId }`                 | P7     |
+| `typing:update`                                  | `{ channelId, userIds }`                   | P5     |
+| `unread:update`                                  | `{ channelId, unreadCount, mentionCount }` | P6     |
+| `notification:new`                               | `{ notification }`                         | P11    |
+| `voice:participants`                             | `{ channelId, users }`                     | C2     |
+| `call:incoming`                                  | `{ conversationId, fromUserId }`           | C4     |
+| `call:answered` / `call:declined` / `call:ended` | `{ conversationId }`                       | C4     |
 
 Hai thứ **không** đi qua socket:
+
 - **Gửi tin nhắn** — dùng `POST /api/channels/:id/messages` (lý do ở P4).
 - **Trạng thái trong phòng gọi** — lấy từ sự kiện của LiveKit. Các event `voice:*` ở
   trên chỉ để **người ngoài phòng** thấy ai đang trong đó; người trong phòng luôn tin

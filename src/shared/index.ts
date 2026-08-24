@@ -15,3 +15,6 @@ export * from './socket-events';
 export * from './dto/auth';
 export * from './dto/common';
 export * from './dto/profile';
+export * from './dto/server-capabilities.dto';
+export * from './dto/server-invitations.dto';
+export * from './dto/server-members.dto';
