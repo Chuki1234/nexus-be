@@ -91,7 +91,7 @@ export class AuthController {
   async me(
     @CurrentUser() user: User,
   ): Promise<{ profile: ProfileView | null }> {
-    return { profile: await this.auth.getProfile(user.id) };
+    return { profile: await this.auth.getProfile(user.id, user.email ?? null) };
   }
 
   /**
