@@ -316,4 +316,14 @@ export class ServerPermissionsService {
       throw new ForbiddenException('Bạn không có quyền đính kèm tệp trong kênh này.');
     }
   }
+
+  async assertChannelManage(userId: string, channelId: string): Promise<void> {
+    const perms = await this.getChannelPermissions(userId, channelId);
+    if (
+      (perms & Permission.MANAGE_CHANNELS) === 0n &&
+      (perms & Permission.ADMINISTRATOR) === 0n
+    ) {
+      throw new ForbiddenException('Bạn không có quyền quản lý kênh này.');
+    }
+  }
 }

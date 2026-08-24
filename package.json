@@ -21,6 +21,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:e2e:real": "jest --config ./test/jest-e2e.json",
     "test:migration": "ts-node test/run-migration-postgres-test.ts",
+    "test:concurrency:pg": "ts-node test/run-channel-concurrency-postgres-test.ts",
     "check:shared": "node scripts/check-shared.mjs"
   },
   "dependencies": {
@@ -55,12 +56,15 @@
     "@types/jest": "^30.0.0",
     "@types/multer": "^2.2.0",
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^7.0.0",
+    "embedded-postgres": "^18.4.0-beta.17",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
     "globals": "^17.0.0",
     "jest": "^30.0.0",
+    "pg": "^8.23.0",
     "prettier": "^3.4.2",
     "socket.io-client": "^4.8.3",
     "source-map-support": "^0.5.21",

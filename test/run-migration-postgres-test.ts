@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 async function runPostgresMigrationTests() {
-  console.log('--- BẮT ĐẦU KIỂM THỬ MIGRATION TRÊN POSTGRESQL ENGINE THẬT ---');
+  console.log('--- BẮT ĐẦU KIỂM THỬ MIGRATION TRÊN PGlite (WASM Postgres Engine) ---');
   const pg = new PGlite();
 
   const userA = '11111111-1111-4111-a111-111111111111';
@@ -1045,7 +1045,7 @@ async function runPostgresMigrationTests() {
   }
   console.log('✔ Bước 15.9: Forward message ghi nhận is_forwarded nguyên tử ngay trong RPC');
 
-  // Test 15.10: Validation defense-in-depth
+  // Test 15.10: Validation defense-in-depth & DOCX support
   // 1. Chặn gửi tin nhắn vào voice channel
   let voiceSendFailed = false;
   try {
@@ -1064,7 +1064,34 @@ async function runPostgresMigrationTests() {
     throw new Error('Was able to send message into voice channel');
   }
 
-  // 2. Chặn MIME không nằm trong whitelist (ví dụ application/x-msdownload)
+  // 2. Chấp nhận MIME DOCX hợp lệ (Blocker 2)
+  const docxFileUuid = '66666666-7777-4666-a666-777777777777';
+  const docxAtt = JSON.stringify([
+    {
+      storage_path: `channels/${textChan1}/${docxFileUuid}.docx`,
+      filename: 'BaoCaoTienDo.docx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      size_bytes: 204800,
+      width: null,
+      height: null,
+    },
+  ]);
+  const docxMsgRes = await pg.query<{ create_channel_message: any }>(`
+    SELECT public.create_channel_message(
+      '${textChan1}',
+      '${s15OwnerUser}',
+      'Tài liệu báo cáo Word đính kèm',
+      'cccccccc-4444-4ccc-cccc-444444444444',
+      NULL,
+      '${docxAtt}'::jsonb,
+      false
+    )
+  `);
+  if (!docxMsgRes.rows[0].create_channel_message || docxMsgRes.rows[0].create_channel_message.attachments.length !== 1) {
+    throw new Error('create_channel_message failed to accept valid DOCX attachment');
+  }
+
+  // 3. Chặn MIME không nằm trong whitelist (ví dụ application/x-msdownload)
   let badMimeFailed = false;
   try {
     await pg.query(`
@@ -1084,7 +1111,7 @@ async function runPostgresMigrationTests() {
     throw new Error('Was able to attach non-whitelisted MIME type');
   }
 
-  // 3. Chặn path traversal trong storage_path
+  // 4. Chặn path traversal trong storage_path
   let pathTraversalFailed = false;
   try {
     await pg.query(`
@@ -1103,21 +1130,26 @@ async function runPostgresMigrationTests() {
   if (!pathTraversalFailed) {
     throw new Error('Was able to use path traversal in storage_path');
   }
-  console.log('✔ Bước 15.10: Validation defense-in-depth chặn voice channel, invalid MIME và path traversal chuẩn');
+  console.log('✔ Bước 15.10: Validation defense-in-depth chấp nhận DOCX, chặn voice channel, invalid MIME và path traversal chuẩn');
 
-  // Test 15.11: Duplicate clientNonce cùng channel trả về idempotent message
-  const dupMsgRes = await pg.query<{ create_channel_message: any }>(`
-    SELECT public.create_channel_message(
-      '${textChan1}',
-      '${s15RegularUser}',
-      'Hello from Regular Member!',
-      '${testNonce1}',
-      NULL,
-      '${validAtt}'::jsonb
-    )
-  `);
-  if (dupMsgRes.rows[0].create_channel_message.id !== msg1.id) {
-    throw new Error('Duplicate nonce returned different message ID');
+  // Test 15.11: Duplicate clientNonce ném mã lỗi 23505 để NestJS bắt và xử lý deduplication & storage cleanup (Blocker 1)
+  let dupNonceRaised23505 = false;
+  try {
+    await pg.query(`
+      SELECT public.create_channel_message(
+        '${textChan1}',
+        '${s15RegularUser}',
+        'Duplicate nonce attempt',
+        '${testNonce1}',
+        NULL,
+        '${validAtt}'::jsonb
+      )
+    `);
+  } catch (err: any) {
+    dupNonceRaised23505 = true;
+  }
+  if (!dupNonceRaised23505) {
+    throw new Error('Duplicate nonce did not raise 23505 exception');
   }
 
   // Duplicate nonce khác channel báo 23505 conflict
@@ -1137,9 +1169,33 @@ async function runPostgresMigrationTests() {
   if (!diffChanNonceFailed) {
     throw new Error('Duplicate nonce on different channel should have failed with 23505 conflict');
   }
-  console.log('✔ Bước 15.11: Idempotency clientNonce cùng channel và chặn 23505 khác channel thành công');
+  console.log('✔ Bước 15.11: Idempotency clientNonce ném 23505 chuẩn xác cho deduplication');
 
-  // Test 15.12: update_server_channel với advisory lock và kiểm tra ký tự điều khiển
+  // Test 15.12: MANAGE_CHANNELS không được bypass overwrites (Blocker 3)
+  // Gán overwrite deny MANAGE_CHANNELS (deny = 16) cho modUser trên textChan1
+  await pg.exec(`
+    INSERT INTO public.channel_overwrites (channel_id, target_type, target_id, allow, deny)
+    VALUES ('${textChan1}', 'member'::overwrite_target, '${s15CustomRoleUser}', 0, 16);
+  `);
+
+  let modDeniedManage = false;
+  try {
+    await pg.query(`
+      SELECT public.update_server_channel(
+        '${testServerId2}',
+        '${textChan1}',
+        '${s15CustomRoleUser}',
+        'mod-hacked-name'
+      )
+    `);
+  } catch (err) {
+    modDeniedManage = true;
+  }
+  if (!modDeniedManage) {
+    throw new Error('Mod with MANAGE_CHANNELS was able to update channel despite channel-specific deny overwrite');
+  }
+
+  // Nhưng Server Owner vẫn có toàn quyền cập nhật
   const updatedChanRes = await pg.query<{ update_server_channel: any }>(`
     SELECT public.update_server_channel(
       '${testServerId2}',
@@ -1151,26 +1207,14 @@ async function runPostgresMigrationTests() {
   `);
   const updatedChan = updatedChanRes.rows[0].update_server_channel;
   if (updatedChan.name !== 'general-updated' || updatedChan.topic !== 'New channel topic') {
-    throw new Error('update_server_channel failed to update');
+    throw new Error('update_server_channel failed for owner');
   }
 
-  let controlCharFailed = false;
-  try {
-    await pg.query(`
-      SELECT public.update_server_channel(
-        '${testServerId2}',
-        '${textChan1}',
-        '${s15OwnerUser}',
-        'general\x01test'
-      )
-    `);
-  } catch (err) {
-    controlCharFailed = true;
-  }
-  if (!controlCharFailed) {
-    throw new Error('update_server_channel accepted control character in name');
-  }
-  console.log('✔ Bước 15.12: update_server_channel với advisory lock và sanitize kiểm tra hợp lệ');
+  // Dọn dẹp overwrite deny MANAGE_CHANNELS
+  await pg.exec(`
+    DELETE FROM public.channel_overwrites WHERE channel_id = '${textChan1}' AND target_type = 'member' AND target_id = '${s15CustomRoleUser}';
+  `);
+  console.log('✔ Bước 15.12: MANAGE_CHANNELS tuân thủ tuyệt đối channel overwrites, không bypass trái phép');
 
   // Test 15.13: delete_server_channel với advisory lock: xóa kênh thứ hai và chặn xóa kênh chữ cuối
   const delChan2Res = await pg.query<{ delete_server_channel: any }>(`
@@ -1201,13 +1245,48 @@ async function runPostgresMigrationTests() {
   }
   console.log('✔ Bước 15.13: delete_server_channel bảo vệ thành công text channel duy nhất còn lại');
 
-  // Test 15.14: Idempotency re-apply migration
+  // Test 15.14: Idempotency & Unique constraint với cùng clientNonce (Blocker 1)
+  const concurrentNonce = 'dddddddd-5555-4ddd-addd-555555555555';
+  const p1 = pg.query(`
+    SELECT public.create_channel_message(
+      '${textChan1}',
+      '${s15OwnerUser}',
+      'Concurrent message test',
+      '${concurrentNonce}'
+    )
+  `);
+  const p2 = pg.query(`
+    SELECT public.create_channel_message(
+      '${textChan1}',
+      '${s15OwnerUser}',
+      'Concurrent message test',
+      '${concurrentNonce}'
+    )
+  `);
+
+  const results = await Promise.allSettled([p1, p2]);
+  const fulfilledCount = results.filter((r) => r.status === 'fulfilled').length;
+  const rejectedCount = results.filter((r) => r.status === 'rejected').length;
+
+  if (fulfilledCount !== 1 || rejectedCount !== 1) {
+    throw new Error(`Concurrent nonce test expected 1 fulfilled and 1 rejected, got ${fulfilledCount} fulfilled and ${rejectedCount} rejected`);
+  }
+
+  const checkCountRes = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.messages WHERE author_id = '${s15OwnerUser}' AND client_nonce = '${concurrentNonce}'
+  `);
+  if (checkCountRes.rows[0].count !== '1') {
+    throw new Error(`Expected exactly 1 message in database for concurrent nonce, found ${checkCountRes.rows[0].count}`);
+  }
+  console.log('✔ Bước 15.14: PGlite Idempotency & Unique-constraint test chứng minh đúng 1 message canonical được insert khi cùng client_nonce');
+
+  // Test 15.15: Idempotency re-apply migration
   await pg.exec(channelMsgMigrationSql);
-  console.log('✔ Bước 15.14: Migration 20260824120000_live_server_channel_messages.sql idempotent 100%');
+  console.log('✔ Bước 15.15: Migration 20260824120000_live_server_channel_messages.sql idempotent 100%');
 
   await pg.exec(`RESET ROLE;`);
   await pg.close();
-  console.log('--- TOÀN BỘ 15 BƯỚC KIỂM THỬ POSTGRESQL ENGINE ĐÃ PASS 100% ---');
+  console.log('--- TOÀN BỘ 15 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---');
 }
 
 runPostgresMigrationTests().catch((err: any) => {

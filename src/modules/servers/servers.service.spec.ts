@@ -511,6 +511,116 @@ describe('ServersService', () => {
       await expect(service.leaveServer('usr-owner', 'srv-100')).rejects.toThrow(ConflictException);
     });
   });
+
+  describe('updateChannel & deleteChannel (Checkpoint 12 Blockers 3, 4)', () => {
+    const serverId = 'srv-100';
+    const channelId = 'chan-101';
+    const userId = 'usr-admin';
+
+    it('updateChannel updates channel name/topic and broadcasts server:channel-updated event', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          id: channelId,
+          serverId,
+          name: 'general-chat',
+          type: 'text',
+          topic: 'New topic',
+          position: 0,
+        },
+        error: null,
+      });
+
+      const res = await service.updateChannel(userId, serverId, channelId, {
+        name: 'general-chat',
+        topic: 'New topic',
+      });
+
+      expect(res.name).toBe('general-chat');
+      expect(res.topic).toBe('New topic');
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('update_server_channel', {
+        p_server_id: serverId,
+        p_channel_id: channelId,
+        p_user_id: userId,
+        p_name: 'general-chat',
+        p_topic: 'New topic',
+      });
+      expect(emitMock).toHaveBeenCalledWith('server:channel-updated', {
+        serverId,
+        channel: res,
+      });
+    });
+
+    it('updateChannel throws ForbiddenException when user lacks MANAGE_CHANNELS (code 42501)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '42501', message: 'Bạn không có quyền quản lý kênh trong máy chủ này' },
+      });
+
+      await expect(
+        service.updateChannel(userId, serverId, channelId, { name: 'hacked' }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('deleteChannel successfully deletes non-last text channel and broadcasts event', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          channelId,
+          serverId,
+        },
+        error: null,
+      });
+
+      const res = await service.deleteChannel(userId, serverId, channelId);
+      expect(res.success).toBe(true);
+      expect(emitMock).toHaveBeenCalledWith('server:channel-deleted', {
+        serverId,
+        channelId,
+      });
+    });
+
+    it('deleteChannel throws BadRequestException when attempting to delete the only text channel (code 22023)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '22023', message: 'Không thể xóa kênh chữ duy nhất còn lại của máy chủ' },
+      });
+
+      await expect(service.deleteChannel(userId, serverId, channelId)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('updateChannel xử lý đồng thời hai requests từ service layer và gọi RPC độc lập', async () => {
+      let callOrder: string[] = [];
+      supabaseService.client.rpc.mockImplementation(async (rpcName: string, params: any) => {
+        if (rpcName === 'update_server_channel') {
+          callOrder.push(params.p_name);
+          return {
+            data: {
+              id: channelId,
+              serverId,
+              name: params.p_name,
+              type: 'text',
+              topic: null,
+              position: 0,
+            },
+            error: null,
+          };
+        }
+        return { data: null, error: null };
+      });
+
+      const [res1, res2] = await Promise.all([
+        service.updateChannel(userId, serverId, channelId, { name: 'chan-a' }),
+        service.updateChannel(userId, serverId, channelId, { name: 'chan-b' }),
+      ]);
+
+      expect(res1.name).toBe('chan-a');
+      expect(res2.name).toBe('chan-b');
+      expect(callOrder).toHaveLength(2);
+      expect(supabaseService.client.rpc).toHaveBeenCalledTimes(2);
+    });
+  });
 });
 
 
