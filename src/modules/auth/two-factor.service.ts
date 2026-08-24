@@ -10,6 +10,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import type {
   BackupCodesResponse,
+  LoginResponse,
   TotpEnrollResponse,
   TotpStatusResponse,
 } from '../../shared/dto/auth';
@@ -27,6 +28,17 @@ interface GotrueSession {
 interface EnrollResult {
   id: string;
   totp: { qr_code: string; secret: string; uri: string };
+}
+
+/**
+ * FE hiển thị QR bằng `<img [src]="qrCodeUrl">`, nên phải là ẢNH chứ không phải
+ * chuỗi `otpauth://`. GoTrue trả `totp.qr_code` là SVG (có bản là data-URI sẵn,
+ * có bản là SVG thô) — chuẩn hoá về data-URI để `<img>` luôn render được.
+ */
+function toImageDataUri(qrCode: string): string {
+  if (!qrCode) return qrCode;
+  if (qrCode.startsWith('data:') || qrCode.startsWith('http')) return qrCode;
+  return `data:image/svg+xml;utf-8,${encodeURIComponent(qrCode)}`;
 }
 
 interface ChallengeResult {
@@ -119,7 +131,11 @@ export class TwoFactorService {
       friendly_name: 'Nexus Authenticator',
     });
 
-    return { qrCodeUrl: res.totp.uri, secret: res.totp.secret, factorId: res.id };
+    return {
+      qrCodeUrl: toImageDataUri(res.totp.qr_code),
+      secret: res.totp.secret,
+      factorId: res.id,
+    };
   }
 
   /**
@@ -169,6 +185,104 @@ export class TwoFactorService {
     }
     const codes = await this.generateBackupCodes(userId);
     return { codes };
+  }
+
+  // ── Login-MFA (Phase 2) ──────────────────────────────────────────────────
+
+  /** id của TOTP factor đã verify, hoặc null nếu user chưa bật 2FA. */
+  async getVerifiedFactorId(accessToken: string): Promise<string | null> {
+    const status = await this.getStatus(accessToken);
+    return status.factorId;
+  }
+
+  /** Tạo challenge cho factor (bước sau khi đăng nhập mật khẩu). Trả challengeId. */
+  async challengeForLogin(accessToken: string, factorId: string): Promise<string> {
+    const res = await this.gotrue<ChallengeResult>(
+      `/factors/${factorId}/challenge`,
+      'POST',
+      accessToken,
+    );
+    return res.id;
+  }
+
+  /**
+   * Xác thực bước 2 khi đăng nhập: mã TOTP 6 số HOẶC mã dự phòng.
+   *
+   * - TOTP: verify qua GoTrue → phiên AAL2 thật (access + refresh mới).
+   * - Backup code: Supabase không biết mã này nên không nâng được AAL2; xác minh
+   *   ở DB rồi trả lại chính phiên AAL1 (đã đủ để dùng API của app). Đánh dấu mã
+   *   đã dùng để không tái sử dụng.
+   */
+  async verifyLogin(
+    accessToken: string,
+    challengeId: string,
+    code: string,
+  ): Promise<LoginResponse> {
+    const { data, error } = await this.supabase.client.auth.getUser(accessToken);
+    if (error || !data.user) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ hoặc đã hết hạn.');
+    }
+    const user = data.user;
+    const normalized = code.trim();
+    const isTotp = /^\d{6}$/.test(normalized);
+
+    if (isTotp) {
+      const factor = (user.factors ?? []).find(
+        (f) => f.factor_type === 'totp' && f.status === 'verified',
+      );
+      if (!factor) {
+        throw new BadRequestException('Tài khoản chưa bật 2FA.');
+      }
+      const session = await this.gotrue<GotrueSession>(
+        `/factors/${factor.id}/verify`,
+        'POST',
+        accessToken,
+        { challenge_id: challengeId, code: normalized },
+      );
+      return {
+        accessToken: session.access_token,
+        refreshToken: session.refresh_token,
+        expiresAt: session.expires_at ?? null,
+      };
+    }
+
+    // Mã dự phòng: xác minh ở DB, giữ nguyên phiên AAL1.
+    const ok = await this.verifyBackupCode(user.id, normalized);
+    if (!ok) {
+      throw new UnauthorizedException('Mã xác thực hoặc mã dự phòng không đúng.');
+    }
+    return { accessToken, refreshToken: '', expiresAt: null };
+  }
+
+  /** Kiểm tra + tiêu một mã dự phòng. True nếu mã đúng và còn hiệu lực. */
+  async verifyBackupCode(userId: string, code: string): Promise<boolean> {
+    const hash = this.hashCode(code);
+    const { data, error } = await this.supabase.client
+      .from('mfa_backup_codes')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('code_hash', hash)
+      .is('used_at', null)
+      .limit(1)
+      .maybeSingle<{ id: string }>();
+
+    if (error) {
+      this.logger.error(`Đọc backup code thất bại: ${error.message}`);
+      throw new InternalServerErrorException('Không kiểm tra được mã dự phòng.');
+    }
+    if (!data) {
+      return false;
+    }
+
+    const { error: updateError } = await this.supabase.client
+      .from('mfa_backup_codes')
+      .update({ used_at: new Date().toISOString() })
+      .eq('id', data.id);
+    if (updateError) {
+      this.logger.error(`Đánh dấu backup code đã dùng thất bại: ${updateError.message}`);
+      throw new InternalServerErrorException('Không cập nhật được mã dự phòng.');
+    }
+    return true;
   }
 
   /** Sinh mã mới, xoá bộ cũ, lưu hash. Trả mã gốc (chỉ hiện một lần). */

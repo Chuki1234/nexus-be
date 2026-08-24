@@ -7,10 +7,11 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import type { User } from '@supabase/supabase-js';
-import type { Profile } from '../../shared/dto/auth';
+import type { LoginMfaRequired, Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { TwoFactorService } from './two-factor.service';
 
 export interface RegisteredUser {
   id: string;
@@ -54,7 +55,10 @@ const UNRESOLVABLE_EMAIL = 'khong-ton-tai@nexus.invalid';
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly twoFactor: TwoFactorService,
+  ) {}
 
   /**
    * Tạo tài khoản: một bản ghi trong `auth.users` + một hồ sơ trong `public.profiles`.
@@ -126,7 +130,7 @@ export class AuthService {
    * endpoint riêng cho frontend gọi: một endpoint "tên đăng nhập này có tồn tại
    * không" chính là công cụ dò tài khoản.
    */
-  async login(dto: LoginDto): Promise<LoginSession> {
+  async login(dto: LoginDto): Promise<LoginSession | LoginMfaRequired> {
     const cleanIdentifier = dto.identifier.trim();
     const email =
       (await this.resolveEmail(cleanIdentifier)) ?? UNRESOLVABLE_EMAIL;
@@ -140,6 +144,25 @@ export class AuthService {
     if (error || !data.session) {
       // Cố tình không phân loại lỗi: mọi nguyên nhân đều ra cùng một câu.
       throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    // Đúng mật khẩu nhưng user có TOTP đã bật: phiên này mới ở AAL1. KHÔNG trả
+    // session — bắt qua bước nhập mã. Tạo challenge và trả token AAL1 tạm để
+    // /auth/2fa/verify-login dùng.
+    const factorId = (data.user?.factors ?? []).find(
+      (f) => f.factor_type === 'totp' && f.status === 'verified',
+    )?.id;
+
+    if (factorId) {
+      const mfaChallengeId = await this.twoFactor.challengeForLogin(
+        data.session.access_token,
+        factorId,
+      );
+      return {
+        requiresMfa: true,
+        mfaChallengeId,
+        accessToken: data.session.access_token,
+      };
     }
 
     return {
@@ -191,6 +214,53 @@ export class AuthService {
       displayName: data.display_name,
       email: email ?? '',
       dateOfBirth: data.birthdate,
+    };
+  }
+
+  /**
+   * Đăng nhập nhanh KHÔNG mật khẩu bằng MÃ DỰ PHÒNG 2FA.
+   *
+   * Supabase không cho verify TOTP mà không có phiên (mà phiên chỉ tạo bằng mật
+   * khẩu), nên fast-login chỉ nhận mã dự phòng — thứ backend tự quản được. Quy
+   * trình: resolve identifier → lấy user qua admin magic link → verify+tiêu mã
+   * dự phòng → nếu đúng thì đổi token magic link lấy phiên thật. Mọi lỗi trả
+   * cùng một câu chung, không tiết lộ identifier nào tồn tại.
+   */
+  async fastLoginBackup(identifier: string, code: string): Promise<LoginSession> {
+    const email = await this.resolveEmail(identifier.trim());
+    if (!email) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    // Sinh magic link (không gửi email) để lấy user id + token đổi phiên.
+    const { data: link, error: linkError } =
+      await this.supabase.client.auth.admin.generateLink({
+        type: 'magiclink',
+        email,
+      });
+    if (linkError || !link.user || !link.properties?.hashed_token) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    const ok = await this.twoFactor.verifyBackupCode(link.user.id, code.trim());
+    if (!ok) {
+      throw new UnauthorizedException('Mã dự phòng không đúng hoặc đã được dùng.');
+    }
+
+    // Mã đúng → đổi token magic link lấy phiên thật.
+    const { data: session, error: verifyError } =
+      await this.supabase.authClient.auth.verifyOtp({
+        token_hash: link.properties.hashed_token,
+        type: 'email',
+      });
+    if (verifyError || !session.session) {
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    return {
+      accessToken: session.session.access_token,
+      refreshToken: session.session.refresh_token,
+      expiresAt: session.session.expires_at ?? null,
     };
   }
 

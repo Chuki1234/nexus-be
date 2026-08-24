@@ -13,6 +13,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
+import type { LoginMfaRequired, LoginResponse } from '../../shared/dto/auth';
 import { USERNAME_PATTERN } from '../../shared/dto/auth';
 import {
   AuthService,
@@ -24,6 +25,8 @@ import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { FastLoginDto, VerifyLoginDto } from './dto/two-factor.dto';
+import { TwoFactorService } from './two-factor.service';
 
 /** Đủ cho người gõ nhầm vài lần, không đủ để dò mật khẩu. */
 const STRICT_RATE_LIMIT = { default: { limit: 5, ttl: 60_000 } };
@@ -31,7 +34,10 @@ const CHECK_USERNAME_LIMIT = { default: { limit: 60, ttl: 60_000 } };
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly twoFactor: TwoFactorService,
+  ) {}
 
   /**
    * GET /api/auth/check-username?username=...
@@ -76,8 +82,32 @@ export class AuthController {
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto): Promise<LoginSession> {
+  login(@Body() dto: LoginDto): Promise<LoginSession | LoginMfaRequired> {
     return this.auth.login(dto);
+  }
+
+  /**
+   * POST /api/auth/2fa/verify-login — bước 2 khi đăng nhập với 2FA.
+   *
+   * Public (user chưa hoàn tất đăng nhập): nhận access token AAL1 + challengeId +
+   * mã (TOTP hoặc backup) trong body, trả phiên đầy đủ. Throttle như /login.
+   */
+  @Post('2fa/verify-login')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(STRICT_RATE_LIMIT)
+  verifyLogin(@Body() dto: VerifyLoginDto): Promise<LoginResponse> {
+    return this.twoFactor.verifyLogin(dto.accessToken, dto.challengeId, dto.code);
+  }
+
+  /**
+   * POST /api/auth/2fa/fast-login — đăng nhập nhanh KHÔNG mật khẩu bằng mã dự
+   * phòng 2FA. Public, throttle chặt như /login.
+   */
+  @Post('2fa/fast-login')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(STRICT_RATE_LIMIT)
+  fastLogin(@Body() dto: FastLoginDto): Promise<LoginResponse> {
+    return this.auth.fastLoginBackup(dto.identifier, dto.code);
   }
 
   /**
