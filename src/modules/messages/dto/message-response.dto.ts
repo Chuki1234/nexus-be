@@ -45,3 +45,11 @@ export interface MessagesPaginationResponseDto {
   hasMore: boolean;
   nextCursor?: string;
 }
+
+export interface ChannelMessagesResponseDto {
+  messages: MessageResponseDto[];
+  hasMore: boolean;
+  nextCursor?: string;
+  lastReadMessageId: string | null;
+}
+

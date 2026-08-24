@@ -10,6 +10,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import sharp from 'sharp';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
+import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import {
   formatContentDisposition,
@@ -134,11 +135,19 @@ describe('MessagesService', () => {
       emit: jest.fn(),
     };
 
+    const mockServerPermissionsService = {
+      assertChannelView: jest.fn().mockResolvedValue(undefined),
+      assertChannelSend: jest.fn().mockResolvedValue(undefined),
+      assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+      getChannelPermissions: jest.fn().mockResolvedValue(~0n),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MessagesService,
         { provide: SupabaseService, useValue: mockSupabase },
         { provide: ConversationsService, useValue: mockConversationsService },
+        { provide: ServerPermissionsService, useValue: mockServerPermissionsService },
         { provide: EventEmitter2, useValue: mockEventEmitter },
       ],
     }).compile();

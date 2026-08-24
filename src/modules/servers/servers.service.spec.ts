@@ -1,12 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   InternalServerErrorException,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-
 import { Test, TestingModule } from '@nestjs/testing';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { Room } from '../../shared/socket-events';
+import { ChatGateway } from '../realtime/chat.gateway';
 import { SERVER_TEMPLATES } from './constants/server-templates.constant';
 import { CreateServerDto } from './dto/create-server.dto';
 import { ServersService } from './servers.service';
@@ -14,8 +17,19 @@ import { ServersService } from './servers.service';
 describe('ServersService', () => {
   let service: ServersService;
   let supabaseService: { client: any };
+  let chatGatewayMock: { server: { to: jest.Mock } };
+  let emitMock: jest.Mock;
 
   beforeEach(async () => {
+    emitMock = jest.fn();
+    chatGatewayMock = {
+      server: {
+        to: jest.fn().mockReturnValue({
+          emit: emitMock,
+        }),
+      },
+    };
+
     supabaseService = {
       client: {
         rpc: jest.fn(),
@@ -29,6 +43,10 @@ describe('ServersService', () => {
         {
           provide: SupabaseService,
           useValue: supabaseService,
+        },
+        {
+          provide: ChatGateway,
+          useValue: chatGatewayMock,
         },
       ],
     }).compile();
@@ -295,64 +313,36 @@ describe('ServersService', () => {
   });
 
   describe('createChannel', () => {
-    it('should create a channel successfully if user is a server member', async () => {
+    it('should create a channel successfully via create_server_channel RPC', async () => {
       const dto = {
         name: 'thảo-luận-mới',
         type: 'text' as const,
         topic: 'Thảo luận các chủ đề mới',
       };
 
-      const mockMembership = { server_id: 'server-1' };
-      const mockMaxPos = [{ position: 2 }];
       const mockCreated = {
         id: 'c-new-1',
+        serverId: 'server-1',
         name: 'thảo-luận-mới',
         type: 'text',
         topic: 'Thảo luận các chủ đề mới',
         position: 3,
       };
 
-      supabaseService.client.from.mockImplementation((table: string) => {
-        if (table === 'server_members') {
-          return {
-            select: jest.fn().mockReturnValue({
-              eq: jest.fn().mockReturnValue({
-                eq: jest.fn().mockReturnValue({
-                  maybeSingle: jest.fn().mockResolvedValue({
-                    data: mockMembership,
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-          };
-        }
-        if (table === 'channels') {
-          return {
-            select: jest.fn().mockReturnValue({
-              eq: jest.fn().mockReturnValue({
-                order: jest.fn().mockReturnValue({
-                  limit: jest.fn().mockResolvedValue({
-                    data: mockMaxPos,
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-            insert: jest.fn().mockReturnValue({
-              select: jest.fn().mockReturnValue({
-                single: jest.fn().mockResolvedValue({
-                  data: mockCreated,
-                  error: null,
-                }),
-              }),
-            }),
-          };
-        }
-        return {};
+      supabaseService.client.rpc.mockResolvedValue({
+        data: mockCreated,
+        error: null,
       });
 
       const result = await service.createChannel('user-1', 'server-1', dto);
+
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('create_server_channel', {
+        p_server_id: 'server-1',
+        p_user_id: 'user-1',
+        p_name: 'thảo-luận-mới',
+        p_type: 'text',
+        p_topic: 'Thảo luận các chủ đề mới',
+      });
 
       expect(result).toEqual({
         id: 'c-new-1',
@@ -364,28 +354,15 @@ describe('ServersService', () => {
       });
     });
 
-    it('should throw ForbiddenException if user is not in server_members', async () => {
+    it('should throw ForbiddenException if RPC returns 42501 (not authorized)', async () => {
       const dto = {
         name: 'kenh-cam',
         type: 'text' as const,
       };
 
-      supabaseService.client.from.mockImplementation((table: string) => {
-        if (table === 'server_members') {
-          return {
-            select: jest.fn().mockReturnValue({
-              eq: jest.fn().mockReturnValue({
-                eq: jest.fn().mockReturnValue({
-                  maybeSingle: jest.fn().mockResolvedValue({
-                    data: null,
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-          };
-        }
-        return {};
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '42501', message: 'Bạn không có quyền quản lý kênh trong máy chủ này' },
       });
 
       await expect(
@@ -402,14 +379,138 @@ describe('ServersService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('should throw BadRequestException if channel type is invalid', async () => {
+    it('should throw ConflictException if RPC returns 23505 (duplicate channel name)', async () => {
+      const dto = {
+        name: 'chung',
+        type: 'text' as const,
+      };
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+      });
+
       await expect(
-        service.createChannel('user-1', 'server-1', {
-          name: 'kenh-loi',
-          type: 'invalid-type' as any,
-        }),
-      ).rejects.toThrow(BadRequestException);
+        service.createChannel('user-1', 'server-1', dto),
+      ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('deleteServer', () => {
+    it('should successfully delete server via RPC and broadcast to server & user rooms', async () => {
+      const serverId = 'srv-100';
+      const ownerId = 'usr-owner';
+      const memberIds = ['usr-owner', 'usr-alice', 'usr-bob'];
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          serverId,
+          memberUserIds: memberIds,
+        },
+        error: null,
+      });
+
+      const result = await service.deleteServer(ownerId, serverId);
+
+      expect(result).toEqual({ success: true, serverId });
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('delete_server', {
+        p_server_id: serverId,
+        p_user_id: ownerId,
+      });
+
+      // Kiểm tra broadcast server room
+      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(emitMock).toHaveBeenCalledWith('server:deleted', { serverId });
+
+      // Kiểm tra broadcast user rooms
+      for (const mId of memberIds) {
+        expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.user(mId));
+      }
+    });
+
+    it('should throw ForbiddenException if user is not owner (code 42501)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: '42501', message: 'Chỉ chủ sở hữu máy chủ mới có quyền xóa máy chủ' },
+      });
+
+      await expect(service.deleteServer('usr-member', 'srv-100')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('should throw NotFoundException if server does not exist (code P0002)', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: null,
+        error: { code: 'P0002', message: 'Máy chủ không tồn tại' },
+      });
+
+      await expect(service.deleteServer('usr-owner', 'srv-nonexistent')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('leaveServer', () => {
+    it('should successfully leave server via RPC and broadcast member-left', async () => {
+      const serverId = 'srv-100';
+      const userId = 'usr-member';
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          alreadyLeft: false,
+          serverId,
+        },
+        error: null,
+      });
+
+      const result = await service.leaveServer(userId, serverId);
+
+      expect(result).toEqual({ success: true, serverId, alreadyLeft: false });
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('leave_server', {
+        p_server_id: serverId,
+        p_user_id: userId,
+      });
+
+      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.user(userId));
+      expect(emitMock).toHaveBeenCalledWith('server:member-left', { serverId, userId });
+    });
+
+    it('should return alreadyLeft: true without re-broadcasting if already left (idempotent)', async () => {
+      const serverId = 'srv-100';
+      const userId = 'usr-member';
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          alreadyLeft: true,
+          serverId,
+        },
+        error: null,
+      });
+
+      const result = await service.leaveServer(userId, serverId);
+
+      expect(result).toEqual({ success: true, serverId, alreadyLeft: true });
+      expect(emitMock).not.toHaveBeenCalled();
+    });
+
+    it('should throw ConflictException if owner attempts to leave server', async () => {
+      supabaseService.client.rpc.mockResolvedValue({
+        data: {
+          success: false,
+          reason: 'owner_cannot_leave',
+          message: 'Chủ sở hữu không thể rời máy chủ. Vui lòng chuyển quyền sở hữu hoặc xóa máy chủ.',
+        },
+        error: null,
+      });
+
+      await expect(service.leaveServer('usr-owner', 'srv-100')).rejects.toThrow(ConflictException);
     });
   });
 });
+
 

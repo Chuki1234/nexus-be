@@ -27,13 +27,16 @@ export interface MessageDeletedEvent {
 }
 
 export interface MessageReadEvent {
-  conversationId: string;
+  conversationId: string | null;
+  channelId: string | null;
   userId: string;
+  readerId?: string;
   lastReadMessageId: string;
 }
 
 export interface ReactionUpdatedEvent {
-  conversationId: string;
+  conversationId: string | null;
+  channelId: string | null;
   messageId: string;
   actorUserId: string;
   emoji: string;
@@ -41,4 +44,3 @@ export interface ReactionUpdatedEvent {
   clientMutationId?: string;
   reactions: Array<{ emoji: string; count: number }>;
 }
-

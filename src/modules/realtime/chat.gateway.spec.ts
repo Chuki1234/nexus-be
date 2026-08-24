@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { Room } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
+import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { PresenceService } from './presence.service';
 import { ChatGateway, TypedSocket } from './chat.gateway';
 
@@ -47,11 +48,19 @@ describe('ChatGateway', () => {
       emit: jest.fn(),
     };
 
+    const serverPermissionsServiceMock = {
+      assertChannelView: jest.fn().mockResolvedValue(undefined),
+      assertChannelSend: jest.fn().mockResolvedValue(undefined),
+      assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+      getChannelPermissions: jest.fn().mockResolvedValue(~0n),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ChatGateway,
         { provide: SupabaseService, useValue: supabaseMock },
         { provide: ConversationsService, useValue: conversationsServiceMock },
+        { provide: ServerPermissionsService, useValue: serverPermissionsServiceMock },
         { provide: PresenceService, useValue: presenceServiceMock },
       ],
     }).compile();

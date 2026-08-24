@@ -1,4 +1,4 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 
 export class CreateChannelDto {
   @IsString({ message: 'Tên kênh phải là chuỗi ký tự.' })
@@ -15,4 +15,8 @@ export class CreateChannelDto {
   @IsString({ message: 'Chủ đề kênh phải là chuỗi ký tự.' })
   @MaxLength(1024, { message: 'Chủ đề kênh không được vượt quá 1024 ký tự.' })
   topic?: string;
+
+  @IsOptional()
+  @IsUUID('4', { message: 'categoryId phải là UUID hợp lệ.' })
+  categoryId?: string;
 }
