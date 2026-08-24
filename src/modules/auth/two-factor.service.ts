@@ -29,6 +29,17 @@ interface EnrollResult {
   totp: { qr_code: string; secret: string; uri: string };
 }
 
+/**
+ * FE hiển thị QR bằng `<img [src]="qrCodeUrl">`, nên phải là ẢNH chứ không phải
+ * chuỗi `otpauth://`. GoTrue trả `totp.qr_code` là SVG (có bản là data-URI sẵn,
+ * có bản là SVG thô) — chuẩn hoá về data-URI để `<img>` luôn render được.
+ */
+function toImageDataUri(qrCode: string): string {
+  if (!qrCode) return qrCode;
+  if (qrCode.startsWith('data:') || qrCode.startsWith('http')) return qrCode;
+  return `data:image/svg+xml;utf-8,${encodeURIComponent(qrCode)}`;
+}
+
 interface ChallengeResult {
   id: string;
 }
@@ -119,7 +130,11 @@ export class TwoFactorService {
       friendly_name: 'Nexus Authenticator',
     });
 
-    return { qrCodeUrl: res.totp.uri, secret: res.totp.secret, factorId: res.id };
+    return {
+      qrCodeUrl: toImageDataUri(res.totp.qr_code),
+      secret: res.totp.secret,
+      factorId: res.id,
+    };
   }
 
   /**
