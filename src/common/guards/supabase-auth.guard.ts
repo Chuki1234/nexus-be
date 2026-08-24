@@ -12,6 +12,8 @@ import { SupabaseService } from '../../infra/supabase/supabase.service';
 /** Request đã qua guard mang theo user Supabase đã xác thực. */
 export interface AuthenticatedRequest extends Request {
   user: User;
+  /** Access token đã xác thực — cần khi gọi GoTrue thay mặt user (vd MFA). */
+  accessToken: string;
 }
 
 /**
@@ -50,6 +52,7 @@ export class SupabaseAuthGuard implements CanActivate {
     }
 
     request.user = data.user;
+    request.accessToken = token;
     return true;
   }
 

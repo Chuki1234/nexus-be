@@ -32,11 +32,60 @@ export interface LoginRequest {
   password: string;
 }
 
+/** Khi 2FA không bật: trả session ngay. */
 export interface LoginResponse {
   accessToken: string;
   refreshToken: string;
   /** Giây Unix. Null nếu Supabase không trả về. */
   expiresAt: number | null;
+  requiresMfa?: false;
+}
+
+/**
+ * Khi 2FA bật: trả challenge để frontend điều hướng sang màn nhập TOTP.
+ * `accessToken` ở đây là AAL1 (chỉ xác thực mật khẩu).
+ */
+export interface LoginMfaRequired {
+  requiresMfa: true;
+  mfaChallengeId: string;
+  /** Access token tạm AAL1, chỉ dùng cho /auth/2fa/verify-login. */
+  accessToken: string;
+}
+
+/** Union trả về từ POST /api/auth/login. */
+export type LoginResult = LoginResponse | LoginMfaRequired;
+
+// ── 2FA / TOTP ────────────────────────────────────────────────────────────────
+
+export interface TotpEnrollResponse {
+  /** URI dạng otpauth:// để tạo QR code. */
+  qrCodeUrl: string;
+  /** Secret text (Base32) để nhập tay nếu không quét được QR. */
+  secret: string;
+  factorId: string;
+}
+
+export interface TotpStatusResponse {
+  enabled: boolean;
+  factorId: string | null;
+}
+
+/** Backup codes — trả một lần duy nhất sau khi bật 2FA hoặc regenerate. */
+export interface BackupCodesResponse {
+  codes: string[];
+}
+
+export interface VerifyMfaRequest {
+  challengeId: string;
+  code: string;
+  accessToken: string;
+}
+
+export interface FastLoginTotpRequest {
+  /** Email hoặc tên đăng nhập */
+  identifier: string;
+  /** Mã 6 chữ số từ Google Authenticator hoặc mã dự phòng 8 ký tự */
+  code: string;
 }
 
 export interface CompleteProfileRequest {
@@ -51,6 +100,9 @@ export interface Profile {
   displayName: string | null;
   email: string;
   dateOfBirth: IsoDate;
+  avatarUrl?: string | null;
+  bannerColor?: string | null;
+  customStatus?: string | null;
 }
 
 /** `profile` là null khi tài khoản chưa hoàn tất hồ sơ (đăng nhập Google lần đầu). */
