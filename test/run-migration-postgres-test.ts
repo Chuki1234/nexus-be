@@ -3,7 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 async function runPostgresMigrationTests() {
-  console.log('--- BẮT ĐẦU KIỂM THỬ MIGRATION TRÊN PGlite (WASM Postgres Engine) ---');
+  console.log(
+    '--- BẮT ĐẦU KIỂM THỬ MIGRATION TRÊN PGlite (WASM Postgres Engine) ---',
+  );
   const pg = new PGlite();
 
   const userA = '11111111-1111-4111-a111-111111111111';
@@ -29,7 +31,9 @@ async function runPostgresMigrationTests() {
 
     GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
   `);
-  console.log('✔ Bước 1: Khởi tạo roles Supabase (anon, authenticated, service_role) thành công');
+  console.log(
+    '✔ Bước 1: Khởi tạo roles Supabase (anon, authenticated, service_role) thành công',
+  );
 
   // 2. Khởi tạo schema gốc (enums và tables)
   await pg.exec(`
@@ -128,7 +132,9 @@ async function runPostgresMigrationTests() {
   );
   const sql = fs.readFileSync(migrationPath, 'utf8');
   await pg.exec(sql);
-  console.log('✔ Bước 4: Chạy toàn bộ SQL migration 20260823150000_add_message_forwarded.sql thành công');
+  console.log(
+    '✔ Bước 4: Chạy toàn bộ SQL migration 20260823150000_add_message_forwarded.sql thành công',
+  );
 
   // 5. Kiểm tra Function Signature & Security Definer
   const fnRes = await pg.query<any>(`
@@ -137,10 +143,16 @@ async function runPostgresMigrationTests() {
     JOIN pg_namespace n ON p.pronamespace = n.oid
     WHERE n.nspname = 'public' AND p.proname = 'create_forwarded_message';
   `);
-  if (fnRes.rows.length !== 1 || !fnRes.rows[0].prosecdef || fnRes.rows[0].pronargs !== 5) {
+  if (
+    fnRes.rows.length !== 1 ||
+    !fnRes.rows[0].prosecdef ||
+    fnRes.rows[0].pronargs !== 5
+  ) {
     throw new Error('Function create_forwarded_message metadata check failed!');
   }
-  console.log('✔ Bước 5: Function create_forwarded_message đã được tạo với SECURITY DEFINER và 5 tham số');
+  console.log(
+    '✔ Bước 5: Function create_forwarded_message đã được tạo với SECURITY DEFINER và 5 tham số',
+  );
 
   // 6. Test quyền Anon & Authenticated bị từ chối
   await pg.exec(`SET ROLE anon;`);
@@ -156,7 +168,9 @@ async function runPostgresMigrationTests() {
     throw new Error('Anon role should NOT be able to execute RPC!');
   } catch (err: any) {
     if (!err.message.includes('permission denied')) throw err;
-    console.log('✔ Bước 6a: Anon role bị từ chối thực thi function (Permission Denied)');
+    console.log(
+      '✔ Bước 6a: Anon role bị từ chối thực thi function (Permission Denied)',
+    );
   }
 
   await pg.exec(`SET ROLE authenticated;`);
@@ -172,7 +186,9 @@ async function runPostgresMigrationTests() {
     throw new Error('Authenticated role should NOT be able to execute RPC!');
   } catch (err: any) {
     if (!err.message.includes('permission denied')) throw err;
-    console.log('✔ Bước 6b: Authenticated role bị từ chối thực thi function (Permission Denied)');
+    console.log(
+      '✔ Bước 6b: Authenticated role bị từ chối thực thi function (Permission Denied)',
+    );
   }
   await pg.exec(`RESET ROLE;`);
 
@@ -223,9 +239,13 @@ async function runPostgresMigrationTests() {
     typeof parsedAtts[0].message_id !== 'string' ||
     parsedAtts[0].filename !== 'file1.png'
   ) {
-    throw new Error('Attachment return data mapping failed: ' + JSON.stringify(parsedAtts));
+    throw new Error(
+      'Attachment return data mapping failed: ' + JSON.stringify(parsedAtts),
+    );
   }
-  console.log('✔ Bước 7: Service role gọi thành công, ghi message + attachments nguyên tử với string IDs');
+  console.log(
+    '✔ Bước 7: Service role gọi thành công, ghi message + attachments nguyên tử với string IDs',
+  );
 
   // 8. Test Validation: client_nonce IS NULL
   try {
@@ -240,7 +260,9 @@ async function runPostgresMigrationTests() {
     throw new Error('Should have failed on NULL client_nonce');
   } catch (err: any) {
     if (!err.message.includes('Client nonce is required')) throw err;
-    console.log('✔ Bước 8: Validation NULL client_nonce -> Ném lỗi 22023 chính xác');
+    console.log(
+      '✔ Bước 8: Validation NULL client_nonce -> Ném lỗi 22023 chính xác',
+    );
   }
 
   // 9. Test Validation: prefix storage_path
@@ -263,12 +285,20 @@ async function runPostgresMigrationTests() {
         $5::jsonb
       );
     `,
-      [userA, convId, 'Invalid prefix', '66666666-6666-4666-a666-666666666666', invalidPrefix],
+      [
+        userA,
+        convId,
+        'Invalid prefix',
+        '66666666-6666-4666-a666-666666666666',
+        invalidPrefix,
+      ],
     );
     throw new Error('Should have failed on invalid prefix');
   } catch (err: any) {
     if (!err.message.includes('Invalid attachment metadata')) throw err;
-    console.log('✔ Bước 9: Defense-in-depth prefix storage_path -> Ném lỗi 22023 chính xác');
+    console.log(
+      '✔ Bước 9: Defense-in-depth prefix storage_path -> Ném lỗi 22023 chính xác',
+    );
   }
 
   // 10. Test Validation: size_bytes <= 0 và width <= 0
@@ -291,12 +321,20 @@ async function runPostgresMigrationTests() {
         $5::jsonb
       );
     `,
-      [userA, convId, 'Negative size', '77777777-7777-4777-a777-777777777777', invalidMetadata],
+      [
+        userA,
+        convId,
+        'Negative size',
+        '77777777-7777-4777-a777-777777777777',
+        invalidMetadata,
+      ],
     );
     throw new Error('Should have failed on negative size_bytes');
   } catch (err: any) {
     if (!err.message.includes('Invalid attachment metadata')) throw err;
-    console.log('✔ Bước 10: Validation attachment metadata (size_bytes > 0, width/height > 0) -> Ném lỗi 22023');
+    console.log(
+      '✔ Bước 10: Validation attachment metadata (size_bytes > 0, width/height > 0) -> Ném lỗi 22023',
+    );
   }
 
   // 11. Test Atomic Rollback khi attachment bị lỗi
@@ -340,9 +378,13 @@ async function runPostgresMigrationTests() {
     [userA, failNonce],
   );
   if (checkMsg.rows.length !== 0) {
-    throw new Error('Atomic rollback failed: message row was created despite attachment error!');
+    throw new Error(
+      'Atomic rollback failed: message row was created despite attachment error!',
+    );
   }
-  console.log('✔ Bước 11: Atomic Rollback hoạt động hoàn hảo — khi attachment lỗi, transaction rollback hoàn toàn 0 message row dư thừa');
+  console.log(
+    '✔ Bước 11: Atomic Rollback hoạt động hoàn hảo — khi attachment lỗi, transaction rollback hoàn toàn 0 message row dư thừa',
+  );
 
   // 12. Test Concurrent Race Condition (Unique Violation 23505)
   const raceNonce = 'bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb';
@@ -374,10 +416,15 @@ async function runPostgresMigrationTests() {
     );
     throw new Error('Should have thrown unique violation on duplicate nonce');
   } catch (err: any) {
-    if (!err.message.includes('idx_messages_nonce') && !err.message.includes('duplicate key')) {
+    if (
+      !err.message.includes('idx_messages_nonce') &&
+      !err.message.includes('duplicate key')
+    ) {
       throw err;
     }
-    console.log('✔ Bước 12: Race Condition 23505 (unique violation trên client_nonce) chặn duplicate message thành công');
+    console.log(
+      '✔ Bước 12: Race Condition 23505 (unique violation trên client_nonce) chặn duplicate message thành công',
+    );
   }
 
   // 13. Kiểm thử Migration: Thêm MIME DOCX vào storage.buckets (Idempotent, bảo toàn MIMEs cũ, public = false, 10MB limit)
@@ -416,7 +463,10 @@ async function runPostgresMigrationTests() {
   `);
 
   const docxMigrationSql = fs.readFileSync(
-    path.join(__dirname, '../supabase/migrations/20260823210000_add_docx_to_storage.sql'),
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260823210000_add_docx_to_storage.sql',
+    ),
     'utf8',
   );
 
@@ -427,7 +477,9 @@ async function runPostgresMigrationTests() {
     public: boolean;
     file_size_limit: string;
     allowed_mime_types: string[];
-  }>(`SELECT public, file_size_limit, allowed_mime_types FROM storage.buckets WHERE id = 'message-attachments'`);
+  }>(
+    `SELECT public, file_size_limit, allowed_mime_types FROM storage.buckets WHERE id = 'message-attachments'`,
+  );
 
   const bucket1 = bucketRes1.rows[0];
   if (!bucket1.public === false) {
@@ -436,10 +488,17 @@ async function runPostgresMigrationTests() {
   if (Number(bucket1.file_size_limit) !== 10485760) {
     throw new Error('Migration changed file_size_limit on bucket');
   }
-  if (!bucket1.allowed_mime_types.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) {
+  if (
+    !bucket1.allowed_mime_types.includes(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+  ) {
     throw new Error('Migration did not add DOCX MIME type');
   }
-  if (!bucket1.allowed_mime_types.includes('application/pdf') || !bucket1.allowed_mime_types.includes('image/png')) {
+  if (
+    !bucket1.allowed_mime_types.includes('application/pdf') ||
+    !bucket1.allowed_mime_types.includes('image/png')
+  ) {
     throw new Error('Migration lost existing MIME types');
   }
 
@@ -449,23 +508,35 @@ async function runPostgresMigrationTests() {
     `SELECT allowed_mime_types FROM storage.buckets WHERE id = 'message-attachments'`,
   );
   const docxCount = bucketRes2.rows[0].allowed_mime_types.filter(
-    (m) => m === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    (m) =>
+      m ===
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   ).length;
   if (docxCount !== 1) {
-    throw new Error(`DOCX MIME duplicated on idempotent run: count=${docxCount}`);
+    throw new Error(
+      `DOCX MIME duplicated on idempotent run: count=${docxCount}`,
+    );
   }
 
   // Kiểm thử an toàn với bucket có allowed_mime_types = NULL
-  await pg.exec(`UPDATE storage.buckets SET allowed_mime_types = NULL WHERE id = 'message-attachments';`);
+  await pg.exec(
+    `UPDATE storage.buckets SET allowed_mime_types = NULL WHERE id = 'message-attachments';`,
+  );
   await pg.exec(docxMigrationSql);
   const bucketResNull = await pg.query<{ allowed_mime_types: string[] }>(
     `SELECT allowed_mime_types FROM storage.buckets WHERE id = 'message-attachments'`,
   );
-  if (!bucketResNull.rows[0].allowed_mime_types.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) {
+  if (
+    !bucketResNull.rows[0].allowed_mime_types.includes(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+  ) {
     throw new Error('Migration failed when allowed_mime_types was NULL');
   }
 
-  console.log('✔ Bước 13: Migration 20260823210000_add_docx_to_storage.sql idempotent, bảo toàn public = false, 10MB limit và xử lý an toàn NULL');
+  console.log(
+    '✔ Bước 13: Migration 20260823210000_add_docx_to_storage.sql idempotent, bảo toàn public = false, 10MB limit và xử lý an toàn NULL',
+  );
 
   // 14. Kiểm thử Migration 20260824000000_server_invitations_and_capabilities.sql
   await pg.exec(`
@@ -501,30 +572,60 @@ async function runPostgresMigrationTests() {
 
   // Load server tables schemas
   const serversBaseSql = fs.readFileSync(
-    path.join(__dirname, '../supabase/migrations/20260731090200_servers_roles_channels.sql'),
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260731090200_servers_roles_channels.sql',
+    ),
     'utf8',
   );
   await pg.exec(serversBaseSql);
 
   const socialSql = fs.readFileSync(
-    path.join(__dirname, '../supabase/migrations/20260731090400_social_and_settings.sql'),
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260731090400_social_and_settings.sql',
+    ),
     'utf8',
   );
   await pg.exec(socialSql);
 
+  const templatesSql = fs.readFileSync(
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260815010000_add_server_templates_and_channel_creation.sql',
+    ),
+    'utf8',
+  );
+  await pg.exec(templatesSql);
+
   const fixFkSql = fs.readFileSync(
-    path.join(__dirname, '../supabase/migrations/20260816000000_fix_servers_foreign_keys_and_roles.sql'),
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260816000000_fix_servers_foreign_keys_and_roles.sql',
+    ),
     'utf8',
   );
   await pg.exec(fixFkSql);
 
   const serverInvMigrationSql = fs.readFileSync(
-    path.join(__dirname, '../supabase/migrations/20260824000000_server_invitations_and_capabilities.sql'),
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260824000000_server_invitations_and_capabilities.sql',
+    ),
     'utf8',
   );
 
   // Áp dụng lần 1
   await pg.exec(serverInvMigrationSql);
+
+  const lifecycleMigrationSql = fs.readFileSync(
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260824100000_adjust_default_invite_and_server_lifecycle.sql',
+    ),
+    'utf8',
+  );
+  await pg.exec(lifecycleMigrationSql);
 
   // Khởi tạo test server và members
   const testServerId = '55555555-5555-4555-a555-555555555555';
@@ -569,8 +670,14 @@ async function runPostgresMigrationTests() {
     `SELECT public.create_server_channel('${testServerId}', '${ownerUser}', 'general', 'text', 'Chủ đề chung') as create_server_channel`,
   );
   const chan1 = chan1Res.rows[0].create_server_channel;
-  if (chan1.name !== 'general' || chan1.position !== 0 || chan1.type !== 'text') {
-    throw new Error(`create_server_channel failed for text: ${JSON.stringify(chan1)}`);
+  if (
+    chan1.name !== 'general' ||
+    chan1.position !== 0 ||
+    chan1.type !== 'text'
+  ) {
+    throw new Error(
+      `create_server_channel failed for text: ${JSON.stringify(chan1)}`,
+    );
   }
 
   // 2. Owner tạo voice channel
@@ -578,25 +685,37 @@ async function runPostgresMigrationTests() {
     `SELECT public.create_server_channel('${testServerId}', '${ownerUser}', 'Phòng Đàm Thoại', 'voice', null) as create_server_channel`,
   );
   const chan2 = chan2Res.rows[0].create_server_channel;
-  if (chan2.name !== 'Phòng Đàm Thoại' || chan2.position !== 1 || chan2.type !== 'voice') {
-    throw new Error(`create_server_channel failed for voice: ${JSON.stringify(chan2)}`);
+  if (
+    chan2.name !== 'Phòng Đàm Thoại' ||
+    chan2.position !== 1 ||
+    chan2.type !== 'voice'
+  ) {
+    throw new Error(
+      `create_server_channel failed for voice: ${JSON.stringify(chan2)}`,
+    );
   }
 
   // 3. Regular member không có MANAGE_CHANNELS gọi create_server_channel -> 42501
   let regularCreateFailed = false;
   try {
-    await pg.query(`SELECT public.create_server_channel('${testServerId}', '${regularUser}', 'secret', 'text')`);
+    await pg.query(
+      `SELECT public.create_server_channel('${testServerId}', '${regularUser}', 'secret', 'text')`,
+    );
   } catch (err: any) {
     regularCreateFailed = true;
   }
   if (!regularCreateFailed) {
-    throw new Error('create_server_channel allowed unauthorized member to create channel');
+    throw new Error(
+      'create_server_channel allowed unauthorized member to create channel',
+    );
   }
 
   // 4. Non-member gọi create_server_channel -> 42501
   let outsiderCreateFailed = false;
   try {
-    await pg.query(`SELECT public.create_server_channel('${testServerId}', '${inviteeUser}', 'hacked', 'text')`);
+    await pg.query(
+      `SELECT public.create_server_channel('${testServerId}', '${inviteeUser}', 'hacked', 'text')`,
+    );
   } catch (err: any) {
     outsiderCreateFailed = true;
   }
@@ -618,13 +737,19 @@ async function runPostgresMigrationTests() {
   );
   const join1 = joinRes1.rows[0].join_server_by_invite_code;
   if (!join1.success || join1.alreadyMember !== false) {
-    throw new Error(`join_server_by_invite_code failed on first join: ${JSON.stringify(join1)}`);
+    throw new Error(
+      `join_server_by_invite_code failed on first join: ${JSON.stringify(join1)}`,
+    );
   }
 
   // Kiểm tra uses đã tăng lên 1
-  const inviteCheck1 = await pg.query<{ uses: number }>(`SELECT uses FROM public.invites WHERE code = '${testInviteCode}'`);
+  const inviteCheck1 = await pg.query<{ uses: number }>(
+    `SELECT uses FROM public.invites WHERE code = '${testInviteCode}'`,
+  );
   if (inviteCheck1.rows[0].uses !== 1) {
-    throw new Error(`Invite uses not incremented: ${inviteCheck1.rows[0].uses}`);
+    throw new Error(
+      `Invite uses not incremented: ${inviteCheck1.rows[0].uses}`,
+    );
   }
 
   // Invitee join lại (Idempotent: đã là member, không tăng uses)
@@ -633,11 +758,17 @@ async function runPostgresMigrationTests() {
   );
   const join2 = joinRes2.rows[0].join_server_by_invite_code;
   if (!join2.success || join2.alreadyMember !== true) {
-    throw new Error(`join_server_by_invite_code failed on idempotent join: ${JSON.stringify(join2)}`);
+    throw new Error(
+      `join_server_by_invite_code failed on idempotent join: ${JSON.stringify(join2)}`,
+    );
   }
-  const inviteCheck2 = await pg.query<{ uses: number }>(`SELECT uses FROM public.invites WHERE code = '${testInviteCode}'`);
+  const inviteCheck2 = await pg.query<{ uses: number }>(
+    `SELECT uses FROM public.invites WHERE code = '${testInviteCode}'`,
+  );
   if (inviteCheck2.rows[0].uses !== 1) {
-    throw new Error(`Invite uses erroneously incremented on already-member join: ${inviteCheck2.rows[0].uses}`);
+    throw new Error(
+      `Invite uses erroneously incremented on already-member join: ${inviteCheck2.rows[0].uses}`,
+    );
   }
 
   // Người dùng mới khác join khi đã max_uses (1/1) -> Bị từ chối
@@ -654,7 +785,9 @@ async function runPostgresMigrationTests() {
 
   let maxUsesJoinFailed = false;
   try {
-    await pg.query(`SELECT public.join_server_by_invite_code('${testInviteCode}', '${anotherUser}')`);
+    await pg.query(
+      `SELECT public.join_server_by_invite_code('${testInviteCode}', '${anotherUser}')`,
+    );
   } catch (err) {
     maxUsesJoinFailed = true;
   }
@@ -673,12 +806,16 @@ async function runPostgresMigrationTests() {
   // Người khác cố chấp nhận lời mời -> 42501
   let wrongAcceptFailed = false;
   try {
-    await pg.query(`SELECT public.accept_server_invitation('${invRecordId}', '${regularUser}')`);
+    await pg.query(
+      `SELECT public.accept_server_invitation('${invRecordId}', '${regularUser}')`,
+    );
   } catch (err) {
     wrongAcceptFailed = true;
   }
   if (!wrongAcceptFailed) {
-    throw new Error('accept_server_invitation allowed unauthorized user to accept');
+    throw new Error(
+      'accept_server_invitation allowed unauthorized user to accept',
+    );
   }
 
   // Đúng invitee chấp nhận
@@ -687,20 +824,28 @@ async function runPostgresMigrationTests() {
   );
   const acceptData = acceptRes.rows[0].accept_server_invitation;
   if (!acceptData.success || acceptData.alreadyMember !== false) {
-    throw new Error(`accept_server_invitation failed: ${JSON.stringify(acceptData)}`);
+    throw new Error(
+      `accept_server_invitation failed: ${JSON.stringify(acceptData)}`,
+    );
   }
 
   // Kiểm tra status invitation đã thành accepted
-  const invStatusRes = await pg.query<{ status: string }>(`SELECT status FROM public.server_invitations WHERE id = '${invRecordId}'`);
+  const invStatusRes = await pg.query<{ status: string }>(
+    `SELECT status FROM public.server_invitations WHERE id = '${invRecordId}'`,
+  );
   if (invStatusRes.rows[0].status !== 'accepted') {
-    throw new Error(`Invitation status not updated to accepted: ${invStatusRes.rows[0].status}`);
+    throw new Error(
+      `Invitation status not updated to accepted: ${invStatusRes.rows[0].status}`,
+    );
   }
 
   // Kiểm thử bảo mật: anon và authenticated bị revoke quyền
   await pg.exec(`SET ROLE anon;`);
   let anonCallFailed = false;
   try {
-    await pg.query(`SELECT public.join_server_by_invite_code('${testInviteCode}', '${anotherUser}')`);
+    await pg.query(
+      `SELECT public.join_server_by_invite_code('${testInviteCode}', '${anotherUser}')`,
+    );
   } catch (err) {
     anonCallFailed = true;
   }
@@ -711,31 +856,49 @@ async function runPostgresMigrationTests() {
   await pg.exec(`SET ROLE authenticated;`);
   let authCallFailed = false;
   try {
-    await pg.query(`SELECT public.create_server_channel('${testServerId}', '${ownerUser}', 'chan', 'text')`);
+    await pg.query(
+      `SELECT public.create_server_channel('${testServerId}', '${ownerUser}', 'chan', 'text')`,
+    );
   } catch (err) {
     authCallFailed = true;
   }
   if (!authCallFailed) {
-    throw new Error('authenticated role was able to execute create_server_channel directly');
+    throw new Error(
+      'authenticated role was able to execute create_server_channel directly',
+    );
   }
 
   // Áp dụng lần 2 (Kiểm thử Idempotency của migration 20260824000000)
   await pg.exec(`RESET ROLE;`);
   await pg.exec(serverInvMigrationSql);
 
-  console.log('✔ Bước 14: Migration 20260824000000_server_invitations_and_capabilities.sql idempotent');
+  console.log(
+    '✔ Bước 14: Migration 20260824000000_server_invitations_and_capabilities.sql idempotent',
+  );
 
   // ===========================================================================
   // 15. Kiểm thử migration 20260824120000_live_server_channel_messages.sql
   // ===========================================================================
-  const channelMsgMigrationPath = path.join(__dirname, '../supabase/migrations/20260824120000_live_server_channel_messages.sql');
-  const channelMsgMigrationSql = fs.readFileSync(channelMsgMigrationPath, 'utf8');
+  const channelMsgMigrationPath = path.join(
+    __dirname,
+    '../supabase/migrations/20260824120000_live_server_channel_messages.sql',
+  );
+  const channelMsgMigrationSql = fs.readFileSync(
+    channelMsgMigrationPath,
+    'utf8',
+  );
 
   await pg.exec(channelMsgMigrationSql);
-  console.log('✔ Bước 15.1: Áp dụng migration 20260824120000_live_server_channel_messages.sql thành công');
+  console.log(
+    '✔ Bước 15.1: Áp dụng migration 20260824120000_live_server_channel_messages.sql thành công',
+  );
 
   // Test 15.2: Kiểm tra metadata pg_proc: prosecdef = true và search_path an toàn
-  const procRes = await pg.query<{ proname: string; prosecdef: boolean; proconfig: string[] }>(`
+  const procRes = await pg.query<{
+    proname: string;
+    prosecdef: boolean;
+    proconfig: string[];
+  }>(`
     SELECT p.proname, p.prosecdef, p.proconfig
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
@@ -744,19 +907,31 @@ async function runPostgresMigrationTests() {
   `);
 
   if (procRes.rows.length !== 3) {
-    throw new Error(`Expected 3 RPC functions in public schema, found ${procRes.rows.length}`);
+    throw new Error(
+      `Expected 3 RPC functions in public schema, found ${procRes.rows.length}`,
+    );
   }
 
   for (const row of procRes.rows) {
     if (!row.prosecdef) {
-      throw new Error(`Function ${row.proname} is not SECURITY DEFINER (prosecdef=false)`);
+      throw new Error(
+        `Function ${row.proname} is not SECURITY DEFINER (prosecdef=false)`,
+      );
     }
-    const hasSearchPath = (row.proconfig || []).some((cfg) => cfg.includes('search_path=pg_catalog, public') || cfg.includes('search_path=pg_catalog,public'));
+    const hasSearchPath = (row.proconfig || []).some(
+      (cfg) =>
+        cfg.includes('search_path=pg_catalog, public') ||
+        cfg.includes('search_path=pg_catalog,public'),
+    );
     if (!hasSearchPath) {
-      throw new Error(`Function ${row.proname} missing fixed search_path config: ${JSON.stringify(row.proconfig)}`);
+      throw new Error(
+        `Function ${row.proname} missing fixed search_path config: ${JSON.stringify(row.proconfig)}`,
+      );
     }
   }
-  console.log('✔ Bước 15.2: Kiểm tra SECURITY DEFINER và search_path an toàn cho toàn bộ 3 RPCs thành công');
+  console.log(
+    '✔ Bước 15.2: Kiểm tra SECURITY DEFINER và search_path an toàn cho toàn bộ 3 RPCs thành công',
+  );
 
   // Test 15.3: Quyền thực thi RPCs: anon và authenticated bị revoke, service_role được cấp quyền
   await pg.exec(`SET ROLE anon;`);
@@ -792,11 +967,15 @@ async function runPostgresMigrationTests() {
     s15AuthCallMsgFailed = true;
   }
   if (!s15AuthCallMsgFailed) {
-    throw new Error('authenticated role was able to execute create_channel_message directly');
+    throw new Error(
+      'authenticated role was able to execute create_channel_message directly',
+    );
   }
 
   await pg.exec(`RESET ROLE;`);
-  console.log('✔ Bước 15.3: REVOKE/GRANT phân quyền bảo mật RPCs chính xác (anon/authenticated blocked)');
+  console.log(
+    '✔ Bước 15.3: REVOKE/GRANT phân quyền bảo mật RPCs chính xác (anon/authenticated blocked)',
+  );
 
   // Khởi tạo fixture kiểm thử permissions & channel overwrites với schema chuẩn target_type / target_id
   const testServerId2 = '88888888-8888-4888-a888-888888888888';
@@ -890,10 +1069,18 @@ async function runPostgresMigrationTests() {
     )
   `);
   const msg1 = msg1Res.rows[0].create_channel_message;
-  if (!msg1 || msg1.content !== 'Hello from Regular Member!' || msg1.attachments.length !== 1) {
-    throw new Error('create_channel_message failed for regular member with @everyone permissions');
+  if (
+    !msg1 ||
+    msg1.content !== 'Hello from Regular Member!' ||
+    msg1.attachments.length !== 1
+  ) {
+    throw new Error(
+      'create_channel_message failed for regular member with @everyone permissions',
+    );
   }
-  console.log('✔ Bước 15.4: Member thường gửi tin nhắn thành công qua quyền @everyone');
+  console.log(
+    '✔ Bước 15.4: Member thường gửi tin nhắn thành công qua quyền @everyone',
+  );
 
   // Test 15.5: Channel Overwrite @everyone deny SEND_MESSAGES (deny = 2) trên textChan2
   await pg.exec(`
@@ -918,9 +1105,13 @@ async function runPostgresMigrationTests() {
     regSendDenied = true;
   }
   if (!regSendDenied) {
-    throw new Error('Regular member was able to send message despite @everyone deny SEND_MESSAGES overwrite');
+    throw new Error(
+      'Regular member was able to send message despite @everyone deny SEND_MESSAGES overwrite',
+    );
   }
-  console.log('✔ Bước 15.5: Channel overwrite @everyone deny SEND_MESSAGES chặn member thường chuẩn');
+  console.log(
+    '✔ Bước 15.5: Channel overwrite @everyone deny SEND_MESSAGES chặn member thường chuẩn',
+  );
 
   // Test 15.6: Custom role (Moderator) overwrite allow SEND_MESSAGES trên textChan2
   await pg.exec(`
@@ -942,7 +1133,9 @@ async function runPostgresMigrationTests() {
   if (!modMsgRes.rows[0].create_channel_message) {
     throw new Error('Mod member failed to post with role allow overwrite');
   }
-  console.log('✔ Bước 15.6: Custom Role overwrite ghi đè @everyone deny thành công');
+  console.log(
+    '✔ Bước 15.6: Custom Role overwrite ghi đè @everyone deny thành công',
+  );
 
   // Test 15.7: Member-specific overwrite ghi đè role deny
   // Gán thêm role Muted cho s15CustomRoleUser, nhưng tạo member overwrite allow SEND_MESSAGES
@@ -971,7 +1164,9 @@ async function runPostgresMigrationTests() {
   if (!memOwRes.rows[0].create_channel_message) {
     throw new Error('Member-specific overwrite failed to take precedence');
   }
-  console.log('✔ Bước 15.7: Member-specific overwrite có mức ưu tiên cao nhất theo chuẩn 5 bước');
+  console.log(
+    '✔ Bước 15.7: Member-specific overwrite có mức ưu tiên cao nhất theo chuẩn 5 bước',
+  );
 
   // Test 15.8: Quyền ATTACH_FILES bị deny (deny = 8)
   await pg.exec(`
@@ -997,7 +1192,9 @@ async function runPostgresMigrationTests() {
     attachDenied = true;
   }
   if (!attachDenied) {
-    throw new Error('User was able to attach file despite ATTACH_FILES deny overwrite');
+    throw new Error(
+      'User was able to attach file despite ATTACH_FILES deny overwrite',
+    );
   }
 
   // Nhưng gửi văn bản thuần không attachment vẫn thành công
@@ -1013,12 +1210,16 @@ async function runPostgresMigrationTests() {
     )
   `);
   if (!textOnlyRes.rows[0].create_channel_message) {
-    throw new Error('User failed to send plain text when only ATTACH_FILES was denied');
+    throw new Error(
+      'User failed to send plain text when only ATTACH_FILES was denied',
+    );
   }
   await pg.exec(`
     DELETE FROM public.channel_overwrites WHERE channel_id = '${textChan1}' AND target_type = 'member' AND target_id = '${s15RegularUser}';
   `);
-  console.log('✔ Bước 15.8: Gating độc lập giữa SEND_MESSAGES và ATTACH_FILES chuẩn xác');
+  console.log(
+    '✔ Bước 15.8: Gating độc lập giữa SEND_MESSAGES và ATTACH_FILES chuẩn xác',
+  );
 
   // Test 15.9: Forward message nguyên tử với p_is_forwarded = true
   const fwdMsgRes = await pg.query<{ create_channel_message: any }>(`
@@ -1034,7 +1235,9 @@ async function runPostgresMigrationTests() {
   `);
   const fwdMsg = fwdMsgRes.rows[0].create_channel_message;
   if (!fwdMsg || fwdMsg.isForwarded !== true) {
-    throw new Error('p_is_forwarded failed to store or return isForwarded = true');
+    throw new Error(
+      'p_is_forwarded failed to store or return isForwarded = true',
+    );
   }
 
   const checkDbFwd = await pg.query<{ is_forwarded: boolean }>(`
@@ -1043,7 +1246,9 @@ async function runPostgresMigrationTests() {
   if (!checkDbFwd.rows[0].is_forwarded) {
     throw new Error('is_forwarded not true in messages table');
   }
-  console.log('✔ Bước 15.9: Forward message ghi nhận is_forwarded nguyên tử ngay trong RPC');
+  console.log(
+    '✔ Bước 15.9: Forward message ghi nhận is_forwarded nguyên tử ngay trong RPC',
+  );
 
   // Test 15.10: Validation defense-in-depth & DOCX support
   // 1. Chặn gửi tin nhắn vào voice channel
@@ -1070,7 +1275,8 @@ async function runPostgresMigrationTests() {
     {
       storage_path: `channels/${textChan1}/${docxFileUuid}.docx`,
       filename: 'BaoCaoTienDo.docx',
-      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      mime_type:
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       size_bytes: 204800,
       width: null,
       height: null,
@@ -1087,8 +1293,13 @@ async function runPostgresMigrationTests() {
       false
     )
   `);
-  if (!docxMsgRes.rows[0].create_channel_message || docxMsgRes.rows[0].create_channel_message.attachments.length !== 1) {
-    throw new Error('create_channel_message failed to accept valid DOCX attachment');
+  if (
+    !docxMsgRes.rows[0].create_channel_message ||
+    docxMsgRes.rows[0].create_channel_message.attachments.length !== 1
+  ) {
+    throw new Error(
+      'create_channel_message failed to accept valid DOCX attachment',
+    );
   }
 
   // 3. Chặn MIME không nằm trong whitelist (ví dụ application/x-msdownload)
@@ -1130,7 +1341,9 @@ async function runPostgresMigrationTests() {
   if (!pathTraversalFailed) {
     throw new Error('Was able to use path traversal in storage_path');
   }
-  console.log('✔ Bước 15.10: Validation defense-in-depth chấp nhận DOCX, chặn voice channel, invalid MIME và path traversal chuẩn');
+  console.log(
+    '✔ Bước 15.10: Validation defense-in-depth chấp nhận DOCX, chặn voice channel, invalid MIME và path traversal chuẩn',
+  );
 
   // Test 15.11: Duplicate clientNonce ném mã lỗi 23505 để NestJS bắt và xử lý deduplication & storage cleanup (Blocker 1)
   let dupNonceRaised23505 = false;
@@ -1167,9 +1380,13 @@ async function runPostgresMigrationTests() {
     diffChanNonceFailed = true;
   }
   if (!diffChanNonceFailed) {
-    throw new Error('Duplicate nonce on different channel should have failed with 23505 conflict');
+    throw new Error(
+      'Duplicate nonce on different channel should have failed with 23505 conflict',
+    );
   }
-  console.log('✔ Bước 15.11: Idempotency clientNonce ném 23505 chuẩn xác cho deduplication');
+  console.log(
+    '✔ Bước 15.11: Idempotency clientNonce ném 23505 chuẩn xác cho deduplication',
+  );
 
   // Test 15.12: MANAGE_CHANNELS không được bypass overwrites (Blocker 3)
   // Gán overwrite deny MANAGE_CHANNELS (deny = 16) cho modUser trên textChan1
@@ -1192,7 +1409,9 @@ async function runPostgresMigrationTests() {
     modDeniedManage = true;
   }
   if (!modDeniedManage) {
-    throw new Error('Mod with MANAGE_CHANNELS was able to update channel despite channel-specific deny overwrite');
+    throw new Error(
+      'Mod with MANAGE_CHANNELS was able to update channel despite channel-specific deny overwrite',
+    );
   }
 
   // Nhưng Server Owner vẫn có toàn quyền cập nhật
@@ -1206,7 +1425,10 @@ async function runPostgresMigrationTests() {
     )
   `);
   const updatedChan = updatedChanRes.rows[0].update_server_channel;
-  if (updatedChan.name !== 'general-updated' || updatedChan.topic !== 'New channel topic') {
+  if (
+    updatedChan.name !== 'general-updated' ||
+    updatedChan.topic !== 'New channel topic'
+  ) {
     throw new Error('update_server_channel failed for owner');
   }
 
@@ -1214,7 +1436,9 @@ async function runPostgresMigrationTests() {
   await pg.exec(`
     DELETE FROM public.channel_overwrites WHERE channel_id = '${textChan1}' AND target_type = 'member' AND target_id = '${s15CustomRoleUser}';
   `);
-  console.log('✔ Bước 15.12: MANAGE_CHANNELS tuân thủ tuyệt đối channel overwrites, không bypass trái phép');
+  console.log(
+    '✔ Bước 15.12: MANAGE_CHANNELS tuân thủ tuyệt đối channel overwrites, không bypass trái phép',
+  );
 
   // Test 15.13: delete_server_channel với advisory lock: xóa kênh thứ hai và chặn xóa kênh chữ cuối
   const delChan2Res = await pg.query<{ delete_server_channel: any }>(`
@@ -1241,9 +1465,13 @@ async function runPostgresMigrationTests() {
     delLastTextFailed = true;
   }
   if (!delLastTextFailed) {
-    throw new Error('delete_server_channel allowed deleting the only remaining text channel');
+    throw new Error(
+      'delete_server_channel allowed deleting the only remaining text channel',
+    );
   }
-  console.log('✔ Bước 15.13: delete_server_channel bảo vệ thành công text channel duy nhất còn lại');
+  console.log(
+    '✔ Bước 15.13: delete_server_channel bảo vệ thành công text channel duy nhất còn lại',
+  );
 
   // Test 15.14: Idempotency & Unique constraint với cùng clientNonce (Blocker 1)
   const concurrentNonce = 'dddddddd-5555-4ddd-addd-555555555555';
@@ -1269,29 +1497,156 @@ async function runPostgresMigrationTests() {
   const rejectedCount = results.filter((r) => r.status === 'rejected').length;
 
   if (fulfilledCount !== 1 || rejectedCount !== 1) {
-    throw new Error(`Concurrent nonce test expected 1 fulfilled and 1 rejected, got ${fulfilledCount} fulfilled and ${rejectedCount} rejected`);
+    throw new Error(
+      `Concurrent nonce test expected 1 fulfilled and 1 rejected, got ${fulfilledCount} fulfilled and ${rejectedCount} rejected`,
+    );
   }
 
   const checkCountRes = await pg.query<{ count: string }>(`
     SELECT count(*)::text as count FROM public.messages WHERE author_id = '${s15OwnerUser}' AND client_nonce = '${concurrentNonce}'
   `);
   if (checkCountRes.rows[0].count !== '1') {
-    throw new Error(`Expected exactly 1 message in database for concurrent nonce, found ${checkCountRes.rows[0].count}`);
+    throw new Error(
+      `Expected exactly 1 message in database for concurrent nonce, found ${checkCountRes.rows[0].count}`,
+    );
   }
-  console.log('✔ Bước 15.14: PGlite Idempotency & Unique-constraint test chứng minh đúng 1 message canonical được insert khi cùng client_nonce');
+  console.log(
+    '✔ Bước 15.14: PGlite Idempotency & Unique-constraint test chứng minh đúng 1 message canonical được insert khi cùng client_nonce',
+  );
 
   // Test 15.15: Idempotency re-apply migration
   await pg.exec(channelMsgMigrationSql);
-  console.log('✔ Bước 15.15: Migration 20260824120000_live_server_channel_messages.sql idempotent 100%');
+  console.log(
+    '✔ Bước 15.15: Migration 20260824120000_live_server_channel_messages.sql idempotent 100%',
+  );
+
+  // =========================================================================
+  // BƯỚC 16: Áp dụng và kiểm thử migration 20260824140000_restore_default_create_invite_and_realtime_reliability.sql
+  // =========================================================================
+  const relMigrationPath = path.resolve(
+    __dirname,
+    '../supabase/migrations/20260824140000_restore_default_create_invite_and_realtime_reliability.sql',
+  );
+  const relMigrationSql = fs.readFileSync(relMigrationPath, 'utf8');
+  await pg.exec(relMigrationSql);
+  console.log('✔ Bước 16.1: Áp dụng migration 20260824140000 thành công');
+
+  // 16.2: Kiểm tra @everyone role permission được cập nhật về 3339
+  const defaultRoleRes = await pg.query<{ permissions: string }>(`
+    SELECT permissions::text FROM public.roles WHERE is_default = true AND server_id = '${testServerId2}';
+  `);
+  if (defaultRoleRes.rows[0]?.permissions !== '3339') {
+    throw new Error(
+      `Expected default role permissions to be 3339, got ${defaultRoleRes.rows[0]?.permissions}`,
+    );
+  }
+  console.log(
+    '✔ Bước 16.2: Role @everyone đã được khôi phục quyền CREATE_INVITE (permissions = 3339)',
+  );
+
+  // 16.3: Kiểm tra create_server_with_template tạo server mới với default role permissions = 3339
+  const s16Owner = '77777777-7777-4777-a777-777777777777';
+  await pg.query(
+    `INSERT INTO public.profiles (id, username) VALUES ($1, 's16owner') ON CONFLICT DO NOTHING;`,
+    [s16Owner],
+  );
+  const newServerRes = await pg.query<{ create_server_with_template: any }>(`
+    SELECT public.create_server_with_template(
+      '${s16Owner}',
+      'Server with 3339 Default',
+      NULL,
+      '[{"name":"text-1","type":"text"},{"name":"text-2","type":"text"}]'::jsonb
+    );
+  `);
+  const newServer = newServerRes.rows[0].create_server_with_template;
+  const newServerId = newServer.server.id;
+  const newRoleRes = await pg.query<{ permissions: string }>(`
+    SELECT permissions::text FROM public.roles WHERE is_default = true AND server_id = '${newServerId}';
+  `);
+  if (newRoleRes.rows[0]?.permissions !== '3339') {
+    throw new Error(
+      `New server @everyone permissions should be 3339, got ${newRoleRes.rows[0]?.permissions}`,
+    );
+  }
+  console.log(
+    '✔ Bước 16.3: create_server_with_template tạo role @everyone với 3339 chuẩn xác',
+  );
+
+  // 16.4: Kiểm tra bảng storage_cleanup_outbox và trigger delete_server_channel ghi outbox
+  const chan1Id = newServer.channels[0].id;
+  const chan2Id = newServer.channels[1].id;
+
+  // Tạo message kèm attachment trong chan1Id
+  const msgNonce = '88888888-8888-4888-a888-888888888888';
+  const attStoragePath = `channels/${chan1Id}/11111111-1111-4111-a111-111111111111.png`;
+  const attJson = JSON.stringify([
+    {
+      storage_path: attStoragePath,
+      filename: 'photo.png',
+      mime_type: 'image/png',
+      size_bytes: 1024,
+      width: 100,
+      height: 100,
+    },
+  ]);
+  await pg.query(`
+    SELECT public.create_channel_message(
+      '${chan1Id}',
+      '${s16Owner}',
+      'Message with attachment to be deleted',
+      '${msgNonce}',
+      NULL,
+      '${attJson}'::jsonb
+    )
+  `);
+
+  // Xóa chan1Id -> phải ghi vào storage_cleanup_outbox
+  await pg.query(`
+    SELECT public.delete_server_channel(
+      '${newServerId}',
+      '${chan1Id}',
+      '${s16Owner}'
+    )
+  `);
+
+  const outboxRes = await pg.query<{
+    storage_path: string;
+    status: string;
+    target_type: string;
+  }>(`
+    SELECT storage_path, status, target_type FROM public.storage_cleanup_outbox WHERE storage_path = '${attStoragePath}';
+  `);
+  if (
+    outboxRes.rows.length !== 1 ||
+    outboxRes.rows[0].status !== 'pending' ||
+    outboxRes.rows[0].target_type !== 'channel'
+  ) {
+    throw new Error(
+      `Outbox record missing or incorrect: ${JSON.stringify(outboxRes.rows)}`,
+    );
+  }
+  console.log(
+    '✔ Bước 16.4: delete_server_channel ghi nhận storage_cleanup_outbox chính xác trước khi cascade delete',
+  );
+
+  // 16.5: Idempotency re-apply migration 20260824140000
+  await pg.exec(relMigrationSql);
+  console.log(
+    '✔ Bước 16.5: Migration 20260824140000_restore_default_create_invite_and_realtime_reliability.sql idempotent 100%',
+  );
 
   await pg.exec(`RESET ROLE;`);
   await pg.close();
-  console.log('--- TOÀN BỘ 15 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---');
+  console.log(
+    '--- TOÀN BỘ 16 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
+  );
 }
 
 runPostgresMigrationTests().catch((err: any) => {
-  console.error('❌ Kiểm thử migration thất bại:', err?.message || err, err?.stack);
+  console.error(
+    '❌ Kiểm thử migration thất bại:',
+    err?.message || err,
+    err?.stack,
+  );
   process.exit(1);
 });
-
-

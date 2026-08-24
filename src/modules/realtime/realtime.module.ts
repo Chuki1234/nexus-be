@@ -6,6 +6,7 @@ import { FriendsModule } from '../friends/friends.module';
 import { ServersModule } from '../servers/servers.module';
 import { ChatGateway } from './chat.gateway';
 import { PresenceService } from './presence.service';
+import { RedisStateService } from './redis-state.service';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { PresenceService } from './presence.service';
     ConfigModule,
     forwardRef(() => ServersModule),
   ],
-  providers: [ChatGateway, PresenceService],
-  exports: [ChatGateway, PresenceService],
+  providers: [ChatGateway, PresenceService, RedisStateService],
+  exports: [ChatGateway, PresenceService, RedisStateService],
 })
 export class RealtimeModule {}

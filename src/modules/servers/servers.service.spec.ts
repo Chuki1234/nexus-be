@@ -13,11 +13,12 @@ import { ChatGateway } from '../realtime/chat.gateway';
 import { SERVER_TEMPLATES } from './constants/server-templates.constant';
 import { CreateServerDto } from './dto/create-server.dto';
 import { ServersService } from './servers.service';
+import { ServerPermissionsService } from './server-permissions.service';
 
 describe('ServersService', () => {
   let service: ServersService;
   let supabaseService: { client: any };
-  let chatGatewayMock: { server: { to: jest.Mock } };
+  let chatGatewayMock: { server: { to: jest.Mock }; emitChannelsInvalidated: jest.Mock };
   let emitMock: jest.Mock;
 
   beforeEach(async () => {
@@ -28,6 +29,7 @@ describe('ServersService', () => {
           emit: emitMock,
         }),
       },
+      emitChannelsInvalidated: jest.fn(),
     };
 
     supabaseService = {
@@ -47,6 +49,15 @@ describe('ServersService', () => {
         {
           provide: ChatGateway,
           useValue: chatGatewayMock,
+        },
+        {
+          provide: ServerPermissionsService,
+          useValue: {
+            getChannelPermissions: jest.fn().mockResolvedValue(~0n),
+            assertChannelView: jest.fn().mockResolvedValue(undefined),
+            assertChannelSend: jest.fn().mockResolvedValue(undefined),
+            assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+          },
         },
       ],
     }).compile();
@@ -590,11 +601,30 @@ describe('ServersService', () => {
       );
     });
 
-    it('updateChannel xử lý đồng thời hai requests từ service layer và gọi RPC độc lập', async () => {
+    it('updateChannel: Deferred Barrier kiểm thử hai requests đồng thời tới RPC và emit events độc lập', async () => {
       let callOrder: string[] = [];
+      let barrierReached = false;
+
+      // Deferred Barrier đảm bảo cả 2 request đều được khởi tạo và chờ ở RPC
+      let resolveProceed: () => void;
+      const proceedPromise = new Promise<void>((resolve) => {
+        resolveProceed = resolve;
+      });
+
+      let arrivedCount = 0;
+      let resolveReached: () => void;
+      const reachedPromise = new Promise<void>((resolve) => {
+        resolveReached = resolve;
+      });
+
       supabaseService.client.rpc.mockImplementation(async (rpcName: string, params: any) => {
         if (rpcName === 'update_server_channel') {
           callOrder.push(params.p_name);
+          arrivedCount++;
+          if (arrivedCount === 2) {
+            resolveReached();
+          }
+          await proceedPromise;
           return {
             data: {
               id: channelId,
@@ -610,15 +640,23 @@ describe('ServersService', () => {
         return { data: null, error: null };
       });
 
-      const [res1, res2] = await Promise.all([
-        service.updateChannel(userId, serverId, channelId, { name: 'chan-a' }),
-        service.updateChannel(userId, serverId, channelId, { name: 'chan-b' }),
-      ]);
+      const p1 = service.updateChannel(userId, serverId, channelId, { name: 'chan-a' });
+      const p2 = service.updateChannel(userId, serverId, channelId, { name: 'chan-b' });
+
+      // Chờ cả 2 request cùng tới RPC barrier
+      await reachedPromise;
+      expect(callOrder).toHaveLength(2);
+
+      // Giải phóng barrier
+      resolveProceed!();
+
+      const [res1, res2] = await Promise.all([p1, p2]);
 
       expect(res1.name).toBe('chan-a');
       expect(res2.name).toBe('chan-b');
-      expect(callOrder).toHaveLength(2);
       expect(supabaseService.client.rpc).toHaveBeenCalledTimes(2);
+      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledWith(serverId);
+      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledTimes(2);
     });
   });
 });

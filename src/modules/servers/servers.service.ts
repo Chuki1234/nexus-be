@@ -9,8 +9,10 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { Permission } from '../../shared/permissions';
 import { Room } from '../../shared/socket-events';
 import { ChatGateway } from '../realtime/chat.gateway';
+import { ServerPermissionsService } from './server-permissions.service';
 import {
   SERVER_TEMPLATES,
   ServerTemplateDefinition,
@@ -49,6 +51,7 @@ export class ServersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly chatGateway: ChatGateway,
+    private readonly serverPermissions: ServerPermissionsService,
   ) {}
 
   /**
@@ -216,6 +219,62 @@ export class ServersService {
   }
 
   /**
+   * Lấy danh sách toàn bộ kênh của một máy chủ.
+   */
+  async listServerChannels(
+    userId: string,
+    serverId: string,
+  ): Promise<ChannelSummaryDto[]> {
+    const { data: member, error: memberError } = await this.supabase.client
+      .from('server_members')
+      .select('server_id')
+      .eq('server_id', serverId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (memberError || !member) {
+      throw new ForbiddenException('Bạn không phải là thành viên của máy chủ này.');
+    }
+
+    const { data: channels, error: channelsError } = await this.supabase.client
+      .from('channels')
+      .select('id, server_id, name, type, topic, position')
+      .eq('server_id', serverId)
+      .order('position', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (channelsError) {
+      this.logger.error(`Lỗi tải danh sách kênh: ${channelsError.message}`);
+      throw new InternalServerErrorException('Không thể tải danh sách kênh.');
+    }
+
+    // Filter theo VIEW_CHANNEL — chỉ trả kênh mà user có effective VIEW_CHANNEL permission
+    // Chống rò rỉ metadata kênh private qua REST API
+    const allChannels: RawChannelRow[] = channels || [];
+    const visibleChannels: ChannelSummaryDto[] = [];
+
+    for (const c of allChannels) {
+      try {
+        const perms = await this.serverPermissions.getChannelPermissions(userId, c.id);
+        if ((perms & Permission.VIEW_CHANNEL) !== 0n) {
+          visibleChannels.push({
+            id: c.id,
+            name: c.name,
+            type: (c.type === 'voice' ? 'voice' : 'text') as 'text' | 'voice',
+            topic: c.topic ?? null,
+            unread: false,
+            mentionCount: 0,
+          });
+        }
+      } catch {
+        // Channel permission check failed — skip this channel (safe default: deny)
+      }
+    }
+
+    return visibleChannels;
+  }
+
+  /**
    * Tạo kênh mới trong một máy chủ qua RPC nguyên tử `create_server_channel`:
    * 1. Xác thực quyền MANAGE_CHANNELS / ADMINISTRATOR / Owner trong RPC transaction (chống TOCTOU).
    * 2. Sử dụng Advisory Lock ổn định `pg_advisory_xact_lock` theo serverId chống xung đột position.
@@ -290,6 +349,12 @@ export class ServersService {
       unread: false,
       mentionCount: 0,
     };
+
+    try {
+      this.chatGateway.emitChannelsInvalidated(serverId);
+    } catch (err) {
+      this.logger.warn(`Phát tán server:channels-invalidated thất bại: ${err}`);
+    }
 
     return result;
   }
@@ -541,6 +606,7 @@ export class ServersService {
 
     // Broadcast tới Room.server(serverId) và Room.channel(channelId)
     try {
+      this.chatGateway.emitChannelsInvalidated(serverId);
       this.chatGateway.server.to(Room.server(serverId)).emit('server:channel-updated', {
         serverId,
         channel: result,
@@ -593,6 +659,7 @@ export class ServersService {
 
     // Broadcast tới Room.server(serverId) và Room.channel(channelId)
     try {
+      this.chatGateway.emitChannelsInvalidated(serverId);
       this.chatGateway.server.to(Room.server(serverId)).emit('server:channel-deleted', {
         serverId,
         channelId,

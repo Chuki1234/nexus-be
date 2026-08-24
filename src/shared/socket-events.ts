@@ -227,6 +227,9 @@ export interface ServerToClientEvents {
     channelId: string;
   }) => void;
 
+  /** Sự kiện danh sách kênh trong server bị thay đổi (tạo/sửa/xóa/đổi quyền) */
+  'server:channels-invalidated': (payload: { serverId: string }) => void;
+
   /** Sự kiện thành viên mới tham gia server */
   'server:member-joined': (payload: {
     serverId: string;

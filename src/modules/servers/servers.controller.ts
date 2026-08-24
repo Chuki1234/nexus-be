@@ -87,6 +87,18 @@ export class ServersController {
   }
 
   /**
+   * GET /api/servers/:serverId/channels
+   */
+  @Get(':serverId/channels')
+  @HttpCode(HttpStatus.OK)
+  listChannels(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+  ): Promise<ChannelSummaryDto[]> {
+    return this.servers.listServerChannels(user.id, serverId);
+  }
+
+  /**
    * POST /api/servers/:serverId/channels
    */
   @Post(':serverId/channels')
