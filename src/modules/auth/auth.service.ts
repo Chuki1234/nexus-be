@@ -7,10 +7,11 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import type { User } from '@supabase/supabase-js';
-import type { Profile } from '../../shared/dto/auth';
+import type { LoginMfaRequired, Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { TwoFactorService } from './two-factor.service';
 
 export interface RegisteredUser {
   id: string;
@@ -54,7 +55,10 @@ const UNRESOLVABLE_EMAIL = 'khong-ton-tai@nexus.invalid';
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly twoFactor: TwoFactorService,
+  ) {}
 
   /**
    * Tạo tài khoản: một bản ghi trong `auth.users` + một hồ sơ trong `public.profiles`.
@@ -126,7 +130,7 @@ export class AuthService {
    * endpoint riêng cho frontend gọi: một endpoint "tên đăng nhập này có tồn tại
    * không" chính là công cụ dò tài khoản.
    */
-  async login(dto: LoginDto): Promise<LoginSession> {
+  async login(dto: LoginDto): Promise<LoginSession | LoginMfaRequired> {
     const cleanIdentifier = dto.identifier.trim();
     const email =
       (await this.resolveEmail(cleanIdentifier)) ?? UNRESOLVABLE_EMAIL;
@@ -140,6 +144,25 @@ export class AuthService {
     if (error || !data.session) {
       // Cố tình không phân loại lỗi: mọi nguyên nhân đều ra cùng một câu.
       throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    // Đúng mật khẩu nhưng user có TOTP đã bật: phiên này mới ở AAL1. KHÔNG trả
+    // session — bắt qua bước nhập mã. Tạo challenge và trả token AAL1 tạm để
+    // /auth/2fa/verify-login dùng.
+    const factorId = (data.user?.factors ?? []).find(
+      (f) => f.factor_type === 'totp' && f.status === 'verified',
+    )?.id;
+
+    if (factorId) {
+      const mfaChallengeId = await this.twoFactor.challengeForLogin(
+        data.session.access_token,
+        factorId,
+      );
+      return {
+        requiresMfa: true,
+        mfaChallengeId,
+        accessToken: data.session.access_token,
+      };
     }
 
     return {
