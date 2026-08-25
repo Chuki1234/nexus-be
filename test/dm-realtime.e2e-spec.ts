@@ -79,7 +79,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
         // Make queryBuilder thenable so `await supabase.from(...).select().eq()` works
         // This is needed for getParticipantIds which doesn't call .maybeSingle()/.single()
         queryBuilder.then = function (resolve: any, reject?: any) {
-          if (table === 'conversation_participants' && queryBuilder._field === 'conversation_id') {
+          if (table === 'conversation_participants') {
             // getParticipantIds: return both participants
             return Promise.resolve({
               data: [
@@ -159,6 +159,24 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
         return queryBuilder;
       }),
       rpc: jest.fn().mockImplementation((name: string, params: any) => {
+        if (name === 'create_conversation_message') {
+          return Promise.resolve({
+            data: {
+              id: '101',
+              conversationId: params.p_conversation_id,
+              authorId: params.p_author_id,
+              type: 'default',
+              content: params.p_content,
+              isForwarded: params.p_is_forwarded ?? false,
+              replyToId: params.p_reply_to_id ?? null,
+              clientNonce: params.p_client_nonce,
+              createdAt: new Date().toISOString(),
+              attachments: [],
+              externalMedia: params.p_external_media ?? null,
+            },
+            error: null,
+          });
+        }
         if (name === 'mark_conversation_read') {
           return Promise.resolve({
             data: [{ success: true, updated: true, last_read_message_id: params.p_message_id }],

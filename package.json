@@ -23,6 +23,7 @@
     "test:migration": "ts-node test/run-migration-postgres-test.ts",
     "test:concurrency:pg": "ts-node test/run-channel-concurrency-postgres-test.ts",
     "test:multi-instance": "ts-node test/run-multi-instance-realtime-test.ts",
+    "test:multi-instance:calls": "ts-node test/run-multi-instance-direct-calls-test.ts",
     "check:shared": "node scripts/check-shared.mjs"
   },
   "dependencies": {

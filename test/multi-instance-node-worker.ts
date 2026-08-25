@@ -290,6 +290,86 @@ async function bootstrap() {
             return { data: null, error: { message: err.message, code: err.code } };
           }
         }
+        if (fn === 'start_direct_call') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.start_direct_call($1, $2, $3, $4, $5)`,
+              [
+                params.p_conversation_id,
+                params.p_caller_id,
+                params.p_caller_session_id,
+                params.p_initial_mode,
+                params.p_ring_timeout_seconds || 45,
+              ],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'answer_direct_call') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.answer_direct_call($1, $2, $3)`,
+              [params.p_call_id, params.p_user_id, params.p_client_session_id],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'decline_direct_call') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.decline_direct_call($1, $2)`,
+              [params.p_call_id, params.p_user_id],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'cancel_direct_call') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.cancel_direct_call($1, $2)`,
+              [params.p_call_id, params.p_user_id],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'end_direct_call') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.end_direct_call($1, $2, $3)`,
+              [params.p_call_id, params.p_user_id, params.p_end_reason || 'hangup'],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'mark_direct_call_connected') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.mark_direct_call_connected($1)`,
+              [params.p_call_id],
+            );
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'expire_ringing_direct_calls') {
+          try {
+            const res = await pgPool.query(`SELECT * FROM public.expire_ringing_direct_calls()`);
+            return { data: res.rows, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
         return { data: null, error: null };
       },
       storage: {
@@ -307,7 +387,8 @@ async function bootstrap() {
     .useValue(createMockSupabase())
     .compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication({ rawBody: true });
+  app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters({
     catch(exception: any, host: any) {

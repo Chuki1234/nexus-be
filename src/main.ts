@@ -6,7 +6,7 @@ import { normalizeCorsOrigins } from './common/utils/cors.util';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   app.enableShutdownHooks();
 

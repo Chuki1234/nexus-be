@@ -1,3 +1,5 @@
+import type { GiphyMediaDto } from '../../../shared/dto/messages.dto';
+
 export interface MessageAuthorDto {
   id: string;
   username: string;
@@ -35,6 +37,7 @@ export interface MessageResponseDto {
   editedAt: string | null;
   deletedAt: string | null;
   isForwarded: boolean;
+  externalMedia: GiphyMediaDto | null;
   attachments?: AttachmentResponseDto[];
   reactions?: ReactionSummaryDto[];
   createdAt: string;
@@ -52,4 +55,3 @@ export interface ChannelMessagesResponseDto {
   nextCursor?: string;
   lastReadMessageId: string | null;
 }
-

@@ -14,6 +14,8 @@
  * File này được nhân bản y hệt ở `nexus-fe/src/shared/`.
  */
 
+import type { DirectCallDto } from './dto/direct-calls.dto';
+
 /** `messages.id` là bigint — truyền dạng chuỗi để không mất chính xác trong JS. */
 export type MessageId = string;
 
@@ -45,6 +47,8 @@ export interface ReactionSummaryPayload {
   reactedByMe?: boolean;
 }
 
+import type { GiphyMediaDto } from './dto/messages.dto';
+
 export interface MessagePayload {
   id: MessageId;
   channelId: string | null;
@@ -58,6 +62,7 @@ export interface MessagePayload {
   editedAt: string | null;
   deletedAt: string | null;
   isForwarded: boolean;
+  externalMedia: GiphyMediaDto | null;
   attachments?: AttachmentPayload[];
   reactions?: ReactionSummaryPayload[];
   createdAt: string;
@@ -291,10 +296,17 @@ export interface ServerToClientEvents {
    */
   'voice:participants': (payload: { channelId: string; userIds: string[] }) => void;
 
-  'call:incoming': (payload: { conversationId: string; fromUserId: string }) => void;
-  'call:answered': (payload: { conversationId: string }) => void;
-  'call:declined': (payload: { conversationId: string }) => void;
-  'call:ended': (payload: { conversationId: string }) => void;
+  // Direct Call Signaling (DM 1-1 giữa bạn bè)
+  'direct-call:incoming': (payload: DirectCallDto) => void;
+  'direct-call:ringing': (payload: DirectCallDto) => void;
+  'direct-call:accepted': (payload: DirectCallDto) => void;
+  'direct-call:connected': (payload: { callId: string; connectedAt: string }) => void;
+  'direct-call:declined': (payload: DirectCallDto) => void;
+  'direct-call:cancelled': (payload: DirectCallDto) => void;
+  'direct-call:ended': (payload: DirectCallDto) => void;
+  'direct-call:missed': (payload: DirectCallDto) => void;
+  'direct-call:busy': (payload: { conversationId: string; calleeId: string }) => void;
+  'direct-call:state-sync': (payload: DirectCallDto | null) => void;
 }
 
 /** Tên room trên server. Đặt tập trung để hai bên không tự ghép chuỗi lệch nhau. */
@@ -309,5 +321,5 @@ export const Room = {
 /** Tên phòng LiveKit. Xem NEXUS_CONTEXT §3.5. */
 export const LiveKitRoom = {
   voiceChannel: (channelId: string) => `voice:${channelId}`,
-  directCall: (conversationId: string) => `dm:${conversationId}`,
+  directCall: (callId: string) => `nexus:dm-call:${callId}`,
 } as const;

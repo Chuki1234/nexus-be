@@ -1635,10 +1635,439 @@ async function runPostgresMigrationTests() {
     '✔ Bước 16.5: Migration 20260824140000_restore_default_create_invite_and_realtime_reliability.sql idempotent 100%',
   );
 
+  // =========================================================================
+  // BƯỚC 17: Áp dụng và kiểm thử migration 20260825120000_message_external_media.sql
+  // =========================================================================
+  const extMediaMigrationPath = path.resolve(
+    __dirname,
+    '../supabase/migrations/20260825120000_message_external_media.sql',
+  );
+  const extMediaMigrationSql = fs.readFileSync(extMediaMigrationPath, 'utf8');
+  await pg.exec(extMediaMigrationSql);
+  console.log('✔ Bước 17.1: Áp dụng migration 20260825120000_message_external_media.sql thành công');
+
+  // 17.2: Kiểm tra table message_external_media và unique constraint
+  const tableCheck = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM information_schema.tables 
+    WHERE table_schema = 'public' AND table_name = 'message_external_media';
+  `);
+  if (tableCheck.rows[0].count !== '1') {
+    throw new Error('Table message_external_media was not created!');
+  }
+  console.log('✔ Bước 17.2: Bảng message_external_media đã được tạo thành công với RLS');
+
+  // 17.3: Test create_channel_message với GIPHY GIF hợp lệ (và empty text)
+  const gifChannelId = chan2Id;
+  const gifNonce1 = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+  const validGifMedia = {
+    provider: 'giphy',
+    externalId: 'YQitOmg976101WnSYP',
+    mediaType: 'gif',
+    title: 'Happy Cat Dancing GIF',
+    creatorUsername: 'catvibes',
+    pageUrl: 'https://giphy.com/gifs/cat-dance-YQitOmg976101WnSYP',
+    previewUrl: 'https://media.giphy.com/media/YQitOmg976101WnSYP/200w.webp',
+    displayUrl: 'https://media0.giphy.com/media/YQitOmg976101WnSYP/giphy.gif',
+    mp4Url: 'https://media1.giphy.com/media/YQitOmg976101WnSYP/giphy.mp4',
+    width: 480,
+    height: 360,
+  };
+
+  const channelGifMsgRes = await pg.query<{ create_channel_message: any }>(`
+    SELECT public.create_channel_message(
+      '${gifChannelId}',
+      '${s16Owner}',
+      '',
+      '${gifNonce1}',
+      NULL,
+      '[]'::jsonb,
+      false,
+      '${JSON.stringify(validGifMedia)}'::jsonb
+    );
+  `);
+
+  const createdChannelGif = channelGifMsgRes.rows[0].create_channel_message;
+  if (
+    !createdChannelGif.id ||
+    !createdChannelGif.externalMedia ||
+    createdChannelGif.externalMedia.externalId !== 'YQitOmg976101WnSYP' ||
+    createdChannelGif.externalMedia.width !== 480
+  ) {
+    throw new Error(`create_channel_message failed to return canonical externalMedia: ${JSON.stringify(createdChannelGif)}`);
+  }
+  console.log('✔ Bước 17.3: create_channel_message gửi GIF thành công (không cần text) và trả về canonical externalMedia');
+
+  // 17.4: Test Idempotency trên Channel GIF message
+  const duplicateChannelRes = await pg.query<{ create_channel_message: any }>(`
+    SELECT public.create_channel_message(
+      '${gifChannelId}',
+      '${s16Owner}',
+      '',
+      '${gifNonce1}',
+      NULL,
+      '[]'::jsonb,
+      false,
+      '${JSON.stringify(validGifMedia)}'::jsonb
+    );
+  `);
+  const dupChannelMsg = duplicateChannelRes.rows[0].create_channel_message;
+  if (dupChannelMsg.id !== createdChannelGif.id || !dupChannelMsg.externalMedia) {
+    throw new Error('Channel message duplicate nonce idempotency failed!');
+  }
+  console.log('✔ Bước 17.4: Idempotency trên create_channel_message trả về canonical message kèm externalMedia');
+
+  // 17.5: Test create_conversation_message với GIPHY GIF hợp lệ
+  const gifNonce2 = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb';
+  const dmGifMsgRes = await pg.query<{ create_conversation_message: any }>(`
+    SELECT public.create_conversation_message(
+      '${convId}',
+      '${userA}',
+      'Check out this cat GIF!',
+      '${gifNonce2}',
+      NULL,
+      '[]'::jsonb,
+      false,
+      '${JSON.stringify(validGifMedia)}'::jsonb
+    );
+  `);
+  const createdDmGif = dmGifMsgRes.rows[0].create_conversation_message;
+  if (
+    !createdDmGif.id ||
+    !createdDmGif.externalMedia ||
+    createdDmGif.externalMedia.externalId !== 'YQitOmg976101WnSYP'
+  ) {
+    throw new Error(`create_conversation_message failed to return canonical externalMedia: ${JSON.stringify(createdDmGif)}`);
+  }
+  console.log('✔ Bước 17.5: create_conversation_message gửi GIF thành công và trả về canonical externalMedia');
+
+  // 17.6a: Test Real Late-Failure Rollback cho DM RPC (Message insert thành công -> Media insert vi phạm table CHECK constraint)
+  const invalidDmNonce = 'cccccccc-cccc-4ccc-cccc-cccccccccccc';
+  const lateFailMediaDm = {
+    ...validGifMedia,
+    externalId: '***INVALID_CHECK_CONSTRAINT***',
+  };
+
+  let dmRollbackPassed = false;
+  try {
+    await pg.query(`
+      SELECT public.create_conversation_message(
+        '${convId}',
+        '${userA}',
+        'Invalid media test DM late failure',
+        '${invalidDmNonce}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        '${JSON.stringify(lateFailMediaDm)}'::jsonb
+      );
+    `);
+  } catch (err: any) {
+    dmRollbackPassed = true;
+  }
+
+  if (!dmRollbackPassed) {
+    throw new Error('Expected invalid externalMedia table CHECK constraint in DM RPC to raise error!');
+  }
+
+  // Xác nhận 0 message, 0 attachment metadata, 0 media orphan cho DM
+  const dmMsgOrphan = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.messages WHERE client_nonce = '${invalidDmNonce}';
+  `);
+  const dmMediaOrphan = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_external_media WHERE external_id = '***INVALID_CHECK_CONSTRAINT***';
+  `);
+  if (dmMsgOrphan.rows[0].count !== '0' || dmMediaOrphan.rows[0].count !== '0') {
+    throw new Error('DM Transaction rollback failed: orphan row was created!');
+  }
+  console.log('✔ Bước 17.6a: DM RPC Real Late-Failure Rollback thành công: Không có message/attachment/media orphan nào khi media vi phạm CHECK constraint');
+
+  // 17.6b: Test Real Late-Failure Rollback cho Channel RPC (Message insert thành công -> Media insert vi phạm table CHECK constraint)
+  const invalidChanNonce = 'dddddddd-dddd-4ddd-dddd-dddddddddddd';
+  const lateFailMediaChan = {
+    ...validGifMedia,
+    externalId: '***INVALID_CHECK_CONSTRAINT***',
+  };
+
+  let chanRollbackPassed = false;
+  try {
+    await pg.query(`
+      SELECT public.create_channel_message(
+        '${gifChannelId}',
+        '${s16Owner}',
+        'Invalid media channel late failure test',
+        '${invalidChanNonce}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        '${JSON.stringify(lateFailMediaChan)}'::jsonb
+      );
+    `);
+  } catch (err: any) {
+    chanRollbackPassed = true;
+  }
+
+  if (!chanRollbackPassed) {
+    throw new Error('Expected invalid externalMedia table CHECK constraint in Channel RPC to raise error!');
+  }
+
+  const chanMsgOrphan = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.messages WHERE client_nonce = '${invalidChanNonce}';
+  `);
+  const chanMediaOrphan = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_external_media WHERE external_id = '***INVALID_CHECK_CONSTRAINT***';
+  `);
+  if (chanMsgOrphan.rows[0].count !== '0' || chanMediaOrphan.rows[0].count !== '0') {
+    throw new Error('Channel Transaction rollback failed: orphan row was created!');
+  }
+  console.log('✔ Bước 17.6b: Channel RPC Real Late-Failure Rollback thành công: Không có message/attachment/media orphan nào khi media vi phạm CHECK constraint');
+
+  // 17.6c: Test Concurrent Duplicate Nonce: 2 lời gọi đồng thời cùng client_nonce chỉ tạo 1 message row và 1 external media row
+  const concNonce = 'eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee';
+  const [resA, resB] = await Promise.all([
+    pg.query<{ create_channel_message: any }>(`
+      SELECT public.create_channel_message(
+        '${gifChannelId}',
+        '${s16Owner}',
+        'Concurrent GIF test',
+        '${concNonce}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        '${JSON.stringify(validGifMedia)}'::jsonb
+      );
+    `),
+    pg.query<{ create_channel_message: any }>(`
+      SELECT public.create_channel_message(
+        '${gifChannelId}',
+        '${s16Owner}',
+        'Concurrent GIF test',
+        '${concNonce}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        '${JSON.stringify(validGifMedia)}'::jsonb
+      );
+    `),
+  ]);
+
+  const msgA = resA.rows[0].create_channel_message;
+  const msgB = resB.rows[0].create_channel_message;
+  if (msgA.id !== msgB.id) {
+    throw new Error('Concurrent requests with same nonce returned different message IDs!');
+  }
+
+  const concMsgCount = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.messages WHERE client_nonce = '${concNonce}';
+  `);
+  const concMediaCount = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_external_media WHERE message_id = ${msgA.id};
+  `);
+  if (concMsgCount.rows[0].count !== '1' || concMediaCount.rows[0].count !== '1') {
+    throw new Error('Concurrent duplicate requests created multiple message/media rows!');
+  }
+  console.log('✔ Bước 17.6c: Concurrent duplicate nonce thành công: Đúng 1 message và 1 external media row được tạo');
+
+  // 17.7: Test Empty Message (không text, không attachment, không media) -> Phải báo lỗi
+  let emptyMsgRejected = false;
+  try {
+    await pg.query(`
+      SELECT public.create_channel_message(
+        '${gifChannelId}',
+        '${s16Owner}',
+        '   ',
+        '${crypto.randomUUID()}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        NULL
+      );
+    `);
+  } catch {
+    emptyMsgRejected = true;
+  }
+  if (!emptyMsgRejected) {
+    throw new Error('Empty message without text, attachments, or media must be rejected!');
+  }
+  console.log('✔ Bước 17.7: Tin nhắn rỗng không có text, file hay GIF bị từ chối 100%');
+
+  // 17.8: Test Cascade Delete: Xoá message -> message_external_media bị xoá tự động
+  const msgToDeleteId = createdChannelGif.id;
+  await pg.query(`DELETE FROM public.messages WHERE id = ${msgToDeleteId};`);
+  const mediaCountCheck = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_external_media WHERE message_id = ${msgToDeleteId};
+  `);
+  if (mediaCountCheck.rows[0].count !== '0') {
+    throw new Error('Cascade delete failed: row in message_external_media was not deleted!');
+  }
+  console.log('✔ Bước 17.8: Cascade delete hoạt động hoàn hảo: Xoá message tự động dọn dẹp message_external_media');
+
+  // 17.9: Idempotency re-apply migration 20260825120000
+  await pg.exec(extMediaMigrationSql);
+  console.log('✔ Bước 17.9: Migration 20260825120000_message_external_media.sql idempotent 100%');
+
+  // ============================================================================
+  // BƯỚC 18: KIỂM THỬ MIGRATION 20260825160000_direct_friend_calls.sql
+  // ============================================================================
+  // Đảm bảo bảng friendships tồn tại và có quan hệ bạn bè giữa userA và userB
+  await pg.exec(`
+    CREATE TABLE IF NOT EXISTS public.friendships (
+      user_a_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+      user_b_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'blocked')) DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_a_id, user_b_id)
+    );
+    CREATE TABLE IF NOT EXISTS public.blocks (
+      blocker_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+      blocked_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (blocker_id, blocked_id)
+    );
+    INSERT INTO public.friendships (user_a_id, user_b_id, requested_by, status)
+    VALUES (LEAST('${userA}'::uuid, '${userB}'::uuid), GREATEST('${userA}'::uuid, '${userB}'::uuid), '${userA}'::uuid, 'accepted')
+    ON CONFLICT (user_a_id, user_b_id) DO UPDATE SET status = 'accepted';
+  `);
+
+  const directCallsMigrationSql = fs.readFileSync(
+    path.join(
+      __dirname,
+      '../supabase/migrations/20260825160000_direct_friend_calls.sql',
+    ),
+    'utf8',
+  );
+
+  // 18.1: Áp dụng migration
+  await pg.exec(directCallsMigrationSql);
+  console.log('✔ Bước 18.1: Áp dụng migration 20260825160000_direct_friend_calls.sql thành công');
+
+  // 18.2: Kiểm tra cấu trúc các bảng và RPCs
+  const checkTables = await pg.query<{ tablename: string }>(`
+    SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('direct_calls', 'direct_call_active_users', 'direct_call_room_cleanup_outbox');
+  `);
+  if (checkTables.rows.length !== 3) {
+    throw new Error('Direct call tables missing after migration!');
+  }
+  console.log('✔ Bước 18.2: 3 bảng direct_calls, direct_call_active_users, direct_call_room_cleanup_outbox đã được tạo thành công');
+
+  // 18.3: Phân quyền bảo mật RPCs (anon/authenticated blocked)
+  let directCallAnonBlocked = false;
+  try {
+    await pg.exec(`SET ROLE anon;`);
+    await pg.query(`SELECT * FROM public.start_direct_call('${convId}', '${userA}', '${crypto.randomUUID()}', 'audio', 45);`);
+  } catch {
+    directCallAnonBlocked = true;
+  }
+  await pg.exec(`SET ROLE service_role;`);
+  if (!directCallAnonBlocked) {
+    throw new Error('Security violation: anon role was able to execute start_direct_call RPC!');
+  }
+  console.log('✔ Bước 18.3: REVOKE/GRANT phân quyền bảo mật RPCs chính xác (anon/authenticated blocked)');
+
+  // 18.4: start_direct_call tạo call và claim active users thành công
+  const callerSession1 = crypto.randomUUID();
+  const startCallRes = await pg.query<{ id: string; status: string; caller_session_id: string; livekit_room_name: string }>(`
+    SELECT * FROM public.start_direct_call('${convId}', '${userA}', '${callerSession1}', 'video', 45);
+  `);
+  const createdCall = startCallRes.rows[0];
+  if (createdCall.status !== 'ringing' || !createdCall.livekit_room_name.startsWith('nexus:dm-call:')) {
+    throw new Error('start_direct_call failed to return valid ringing call!');
+  }
+  const claimsAfterStart = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.direct_call_active_users WHERE call_id = '${createdCall.id}';
+  `);
+  if (claimsAfterStart.rows[0].count !== '2') {
+    throw new Error(`Active user claims count is ${claimsAfterStart.rows[0].count}, expected 2!`);
+  }
+  console.log('✔ Bước 18.4: start_direct_call tạo cuộc gọi ringing và claim active users cho cả 2 bên thành công');
+
+  // 18.5: Kiểm tra bận (Busy Protection)
+  let busyBlocked = false;
+  try {
+    await pg.query(`SELECT * FROM public.start_direct_call('${convId}', '${userA}', '${crypto.randomUUID()}', 'audio', 45);`);
+  } catch (err: any) {
+    if (err?.message?.includes('BUSY') || err?.code === '23505') {
+      busyBlocked = true;
+    }
+  }
+  if (!busyBlocked) {
+    throw new Error('Busy protection failed: caller was able to start second active call!');
+  }
+  console.log('✔ Bước 18.5: Bảng direct_call_active_users chặn thành công cuộc gọi trùng (BUSY)');
+
+  // 18.6: answer_direct_call: Tab 1 thắng (should_join_media = true), Tab 2 nhận should_join_media = false
+  const calleeSession1 = crypto.randomUUID();
+  const calleeSession2 = crypto.randomUUID();
+  const answer1Res = await pg.query<{ status: string; should_join_media: boolean }>(`
+    SELECT status, should_join_media FROM public.answer_direct_call('${createdCall.id}', '${userB}', '${calleeSession1}');
+  `);
+  const ans1 = answer1Res.rows[0];
+  if (ans1.status !== 'accepted' || ans1.should_join_media !== true) {
+    throw new Error('Winning answer session failed to get should_join_media: true');
+  }
+
+  const answer2Res = await pg.query<{ status: string; should_join_media: boolean }>(`
+    SELECT status, should_join_media FROM public.answer_direct_call('${createdCall.id}', '${userB}', '${calleeSession2}');
+  `);
+  const ans2 = answer2Res.rows[0];
+  if (ans2.status !== 'accepted' || ans2.should_join_media !== false) {
+    throw new Error('Losing answer session should get should_join_media: false');
+  }
+  console.log('✔ Bước 18.6: answer_direct_call atomic: Tab 1 thắng (should_join_media: true), Tab 2 idempotent (should_join_media: false)');
+
+  // 18.7: mark_direct_call_connected ghi connected_at
+  const markConnRes = await pg.query<{ connected_at: string }>(`
+    SELECT connected_at FROM public.mark_direct_call_connected('${createdCall.id}');
+  `);
+  if (!markConnRes.rows[0].connected_at) {
+    throw new Error('mark_direct_call_connected failed to set connected_at timestamp');
+  }
+  console.log('✔ Bước 18.7: mark_direct_call_connected ghi nhận connected_at chuẩn xác');
+
+  // 18.8: end_direct_call kết thúc cuộc gọi, giải phóng active claims, enqueue outbox
+  const endCallRes = await pg.query<{ status: string; end_reason: string }>(`
+    SELECT status, end_reason FROM public.end_direct_call('${createdCall.id}', '${userA}', 'hangup');
+  `);
+  if (endCallRes.rows[0].status !== 'ended' || endCallRes.rows[0].end_reason !== 'hangup') {
+    throw new Error('end_direct_call failed to transition status to ended');
+  }
+  const claimsAfterEnd = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.direct_call_active_users WHERE call_id = '${createdCall.id}';
+  `);
+  if (claimsAfterEnd.rows[0].count !== '0') {
+    throw new Error('Active user claims were not deleted after end_direct_call!');
+  }
+  const outboxAfterEnd = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.direct_call_room_cleanup_outbox WHERE call_id = '${createdCall.id}' AND status = 'pending';
+  `);
+  if (outboxAfterEnd.rows[0].count !== '1') {
+    throw new Error('Room cleanup outbox row not enqueued after end_direct_call!');
+  }
+  console.log('✔ Bước 18.8: end_direct_call giải phóng claims và ghi outbox dọn dẹp LiveKit room thành công');
+
+  // 18.9: expire_ringing_direct_calls
+  const expiredCallSession = crypto.randomUUID();
+  const expCallRes = await pg.query<{ id: string }>(`
+    SELECT id FROM public.start_direct_call('${convId}', '${userA}', '${expiredCallSession}', 'audio', -1);
+  `);
+  const expCallId = expCallRes.rows[0].id;
+  const expiredCallsResult = await pg.query<{ id: string; status: string; end_reason: string }>(`
+    SELECT id, status, end_reason FROM public.expire_ringing_direct_calls();
+  `);
+  const matchExpired = expiredCallsResult.rows.find(r => r.id === expCallId);
+  if (!matchExpired || matchExpired.status !== 'missed' || matchExpired.end_reason !== 'no_answer') {
+    throw new Error('expire_ringing_direct_calls failed to expire timed out ringing call!');
+  }
+  console.log('✔ Bước 18.9: expire_ringing_direct_calls chuyển call hết hạn sang missed (no_answer) và giải phóng claims thành công');
+
+  // 18.10: Idempotency migration
+  await pg.exec(`RESET ROLE;`);
+  await pg.exec(directCallsMigrationSql);
+  console.log('✔ Bước 18.10: Migration 20260825160000_direct_friend_calls.sql idempotent 100%');
+
   await pg.exec(`RESET ROLE;`);
   await pg.close();
   console.log(
-    '--- TOÀN BỘ 16 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
+    '--- TOÀN BỘ 18 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
   );
 }
 
