@@ -1,3 +1,4 @@
+import { json, urlencoded } from 'express';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
@@ -6,7 +7,20 @@ import { normalizeCorsOrigins } from './common/utils/cors.util';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    bodyParser: false,
+  });
+
+  app.use(
+    json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+      type: ['application/json', 'application/webhook+json', '*/*+json'],
+    }),
+  );
+  app.use(urlencoded({ extended: true }));
 
   app.enableShutdownHooks();
 

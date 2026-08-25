@@ -154,7 +154,13 @@ export class DirectCallsController {
     @Req() req: Request,
     @Headers('authorization') authHeader?: string,
   ): Promise<void> {
-    const rawBody = (req as any).rawBody || req.body;
+    const rawBody =
+      (req as any).rawBody ||
+      (typeof req.body === 'string'
+        ? req.body
+        : req.body
+          ? JSON.stringify(req.body)
+          : '');
     await this.directCallsService.handleWebhook(rawBody, authHeader);
   }
 }

@@ -440,7 +440,19 @@ export class DirectCallsService {
     }
 
     try {
-      const rawString = typeof body === 'string' ? body : body.toString('utf8');
+      const isBuf = Buffer.isBuffer(body);
+      const rawString = isBuf
+        ? (body as Buffer).toString('utf8')
+        : typeof body === 'string'
+          ? body
+          : body
+            ? JSON.stringify(body)
+            : '';
+
+      this.logger.debug(
+        `Webhook payload type: ${typeof body}, isBuffer: ${isBuf}, length: ${rawString.length}`,
+      );
+
       const event = await this.webhookReceiver.receive(rawString, authHeader);
 
       if (event.event === 'participant_joined' && event.room) {
