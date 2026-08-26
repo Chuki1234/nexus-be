@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -13,7 +14,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
-import type { LoginMfaRequired, LoginResponse } from '../../shared/dto/auth';
+import type { LoginMfaRequired, LoginResponse, LoginResult } from '../../shared/dto/auth';
 import { USERNAME_PATTERN } from '../../shared/dto/auth';
 import {
   AuthService,
@@ -26,6 +27,7 @@ import { DeleteAccountDto } from './dto/delete-account.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { FastLoginDto, VerifyLoginDto } from './dto/two-factor.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { TwoFactorService } from './two-factor.service';
 
 /** Đủ cho người gõ nhầm vài lần, không đủ để dò mật khẩu. */
@@ -75,14 +77,14 @@ export class AuthController {
   /**
    * POST /api/auth/login
    *
-   * Nhận email HOẶC tên đăng nhập. Phải chạy ở backend vì tra tên đăng nhập cần
-   * đọc bảng `profiles` — frontend không được phép đọc bảng (NEXUS_CONTEXT §3.4).
-   *
-   * Trả token về cho frontend tự nạp vào Supabase client bằng `setSession`.
+   * Nhận email HOẶC tên đăng nhập.
+   * Trả `LoginResponse` (session đầy đủ) nếu không có 2FA, hoặc `LoginMfaRequired`
+   * (requiresMfa: true + challengeId) nếu user đã bật 2FA.
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto): Promise<LoginSession | LoginMfaRequired> {
+  @Throttle(STRICT_RATE_LIMIT)
+  login(@Body() dto: LoginDto): Promise<LoginResult> {
     return this.auth.login(dto);
   }
 
@@ -106,7 +108,7 @@ export class AuthController {
   @Post('2fa/fast-login')
   @HttpCode(HttpStatus.OK)
   @Throttle(STRICT_RATE_LIMIT)
-  fastLogin(@Body() dto: FastLoginDto): Promise<LoginResponse> {
+  fastLogin(@Body() dto: FastLoginDto): Promise<LoginSession> {
     return this.auth.fastLoginBackup(dto.identifier, dto.code);
   }
 
@@ -114,7 +116,6 @@ export class AuthController {
    * GET /api/auth/me
    *
    * `profile` là null khi tài khoản chưa hoàn tất hồ sơ (đăng nhập Google lần đầu).
-   * Frontend dựa vào đây thay vì tự đọc bảng `profiles`.
    */
   @Get('me')
   @UseGuards(SupabaseAuthGuard)
@@ -126,10 +127,6 @@ export class AuthController {
 
   /**
    * POST /api/auth/complete-profile
-   *
-   * Dành cho tài khoản đăng nhập bằng Google/SĐT: `auth.users` đã có sẵn nhưng
-   * chưa có hồ sơ `profiles`. `SupabaseAuthGuard` xác thực access token rồi cho
-   * biết đây là ai — client không tự khai id được.
    */
   @Post('complete-profile')
   @HttpCode(HttpStatus.CREATED)
@@ -142,6 +139,21 @@ export class AuthController {
       { id: user.id, email: user.email ?? null },
       dto,
     );
+  }
+
+  /**
+   * PATCH /api/auth/profile
+   *
+   * Cập nhật ảnh đại diện, tên hiển thị, banner, trạng thái...
+   */
+  @Patch('profile')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  updateProfile(
+    @CurrentUser() user: User,
+    @Body() dto: UpdateProfileDto,
+  ): Promise<ProfileView> {
+    return this.auth.updateProfile(user.id, dto);
   }
 
   /** Xóa vĩnh viễn tài khoản của chính người đang đăng nhập. */

@@ -3,11 +3,12 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { SupabaseService } from '../../infra/supabase/supabase.service';
 import type { User } from '@supabase/supabase-js';
-import type { LoginMfaRequired, Profile } from '../../shared/dto/auth';
+import { SupabaseService } from '../../infra/supabase/supabase.service';
+import type { LoginMfaRequired, LoginResponse, Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -23,32 +24,12 @@ export interface RegisteredUser {
 /** Hồ sơ trả về cho frontend. Không lộ cột nội bộ nào ngoài các trường này. */
 export type ProfileView = Profile;
 
-export interface LoginSession {
-  accessToken: string;
-  refreshToken: string;
-  /** Giây Unix. Null nếu Supabase không trả về. */
-  expiresAt: number | null;
-}
+export type LoginSession = LoginResponse | LoginMfaRequired;
 
 /** Mã lỗi Postgres cho vi phạm ràng buộc duy nhất. */
 const UNIQUE_VIOLATION = '23505';
 
-/**
- * Câu duy nhất trả về cho MỌI kiểu đăng nhập hỏng.
- *
- * Không được tách thành "tài khoản không tồn tại" / "sai mật khẩu" / "chưa xác
- * nhận email": chênh lệch đó đủ để dò xem một email hay tên đăng nhập đã có
- * người dùng hay chưa.
- */
 const INVALID_LOGIN = 'Email/tên đăng nhập hoặc mật khẩu không đúng.';
-
-/**
- * Email không thể tồn tại (TLD `.invalid` được RFC 2606 dành riêng).
- *
- * Khi không tra ra tên đăng nhập, vẫn gọi Supabase bằng địa chỉ này thay vì trả
- * lỗi ngay: hai nhánh chạy cùng một lượng việc nên thời gian phản hồi không tố
- * cáo tài khoản có tồn tại hay không.
- */
 const UNRESOLVABLE_EMAIL = 'khong-ton-tai@nexus.invalid';
 
 @Injectable()
@@ -62,10 +43,6 @@ export class AuthService {
 
   /**
    * Tạo tài khoản: một bản ghi trong `auth.users` + một hồ sơ trong `public.profiles`.
-   *
-   * Hai bước này không nằm chung transaction được (một bên là Admin API, một bên
-   * là Postgres), nên nếu bước hai hỏng thì phải xoá tay bản ghi ở bước một —
-   * xem `rollbackUser`.
    */
   async register(dto: RegisterDto): Promise<RegisteredUser> {
     const displayName = dto.displayName ?? null;
@@ -73,9 +50,6 @@ export class AuthService {
     const { data, error } = await this.supabase.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      // Dự án chưa cấu hình SMTP nên không gửi được thư xác nhận; đánh dấu đã
-      // xác nhận để người dùng đăng nhập được ngay. Khi bật SMTP thì bỏ dòng này
-      // và cho frontend hiện màn "kiểm tra hộp thư" thay vì tự đăng nhập.
       email_confirm: true,
       user_metadata: { username: dto.username, display_name: displayName },
     });
@@ -102,8 +76,6 @@ export class AuthService {
       });
 
     if (profileError) {
-      // Không để lại auth user mồ côi: email đó sẽ vừa không đăng ký lại được
-      // (đã tồn tại) vừa không dùng được (thiếu hồ sơ).
       await this.rollbackUser(userId);
 
       if (profileError.code === UNIQUE_VIOLATION) {
@@ -125,10 +97,7 @@ export class AuthService {
 
   /**
    * Đăng nhập bằng email HOẶC tên đăng nhập.
-   *
-   * Việc đổi tên đăng nhập thành email phải nằm ở đây, không được tách thành một
-   * endpoint riêng cho frontend gọi: một endpoint "tên đăng nhập này có tồn tại
-   * không" chính là công cụ dò tài khoản.
+   * Nếu user bật 2FA, trả LoginMfaRequired thay vì session đầy đủ.
    */
   async login(dto: LoginDto): Promise<LoginSession | LoginMfaRequired> {
     const cleanIdentifier = dto.identifier.trim();
@@ -141,8 +110,7 @@ export class AuthService {
         password: dto.password,
       });
 
-    if (error || !data.session) {
-      // Cố tình không phân loại lỗi: mọi nguyên nhân đều ra cùng một câu.
+    if (error || !data.session || !data.user) {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
 
@@ -169,34 +137,20 @@ export class AuthService {
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
       expiresAt: data.session.expires_at ?? null,
-    };
+    } satisfies LoginResponse;
   }
 
   /**
-   * Hồ sơ của người đang đăng nhập, hoặc null nếu chưa tạo.
-   *
-   * Frontend không được tự đọc bảng `profiles` (NEXUS_CONTEXT §3.4), nên đây là
-   * đường duy nhất để biết "tài khoản này đã hoàn tất hồ sơ chưa" — thứ mà
-   * `profileGuard` cần trước mỗi trang.
-   *
-   * Trả null thay vì ném 404: chưa có hồ sơ là trạng thái bình thường của tài
-   * khoản Google mới, không phải lỗi.
-   */
-  /**
+   * Hồ sơ của người đang đăng nhập.
    * `email` không nằm trong bảng `profiles` (chỉ Auth mới có) nên lấy từ
    * token của người gọi thay vì select thêm một cột không tồn tại.
    */
-  async getProfile(userId: string, email: string | null): Promise<ProfileView | null> {
+  async getProfile(userId: string, email?: string | null): Promise<ProfileView | null> {
     const { data, error } = await this.supabase.client
       .from('profiles')
-      .select('id, username, display_name, birthdate')
+      .select('*')
       .eq('id', userId)
-      .maybeSingle<{
-        id: string;
-        username: string;
-        display_name: string | null;
-        birthdate: string;
-      }>();
+      .maybeSingle<any>();
 
     if (error) {
       this.logger.error(`Đọc hồ sơ thất bại: ${error.message}`);
@@ -211,9 +165,12 @@ export class AuthService {
     return {
       id: data.id,
       username: data.username,
-      displayName: data.display_name,
-      email: email ?? '',
-      dateOfBirth: data.birthdate,
+      displayName: data.display_name ?? null,
+      email: email ?? data.email ?? '',
+      dateOfBirth: data.birthdate ?? data.date_of_birth ?? '',
+      avatarUrl: data.avatar_url ?? null,
+      bannerColor: data.banner_url ?? data.banner_color ?? null,
+      customStatus: data.status_message ?? data.custom_status ?? null,
     };
   }
 
@@ -242,12 +199,7 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
 
-    const ok = await this.twoFactor.verifyBackupCode(link.user.id, code.trim());
-    if (!ok) {
-      throw new UnauthorizedException('Mã dự phòng không đúng hoặc đã được dùng.');
-    }
-
-    // Mã đúng → đổi token magic link lấy phiên thật.
+    // Đổi token magic link lấy session AAL1 trước
     const { data: session, error: verifyError } =
       await this.supabase.authClient.auth.verifyOtp({
         token_hash: link.properties.hashed_token,
@@ -257,11 +209,85 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
 
+    const normalized = code.trim();
+    const isTotp = /^\d{6}$/.test(normalized);
+
+    if (isTotp) {
+      const factor = (link.user.factors ?? []).find(
+        (f) => f.factor_type === 'totp' && f.status === 'verified',
+      );
+      if (factor) {
+        try {
+          const challengeId = await this.twoFactor.challengeForLogin(
+            session.session.access_token,
+            factor.id,
+          );
+          const verified = await this.twoFactor.verifyLogin(
+            session.session.access_token,
+            challengeId,
+            normalized,
+          );
+          return {
+            accessToken: verified.accessToken,
+            refreshToken: verified.refreshToken,
+            expiresAt: verified.expiresAt,
+          };
+        } catch {
+          throw new UnauthorizedException('Mã xác thực Google Authenticator không đúng hoặc đã hết hạn.');
+        }
+      }
+    }
+
+    // Mã dự phòng
+    const ok = await this.twoFactor.verifyBackupCode(link.user.id, normalized);
+    if (!ok) {
+      throw new UnauthorizedException('Mã xác thực 2FA hoặc mã dự phòng không đúng.');
+    }
+
     return {
       accessToken: session.session.access_token,
       refreshToken: session.session.refresh_token,
       expiresAt: session.session.expires_at ?? null,
     };
+  }
+
+  /**
+   * Cập nhật thông tin hồ sơ người dùng (avatar, display name, banner, status).
+   */
+  async updateProfile(
+    userId: string,
+    dto: {
+      displayName?: string | null;
+      avatarUrl?: string | null;
+      bannerColor?: string | null;
+      customStatus?: string | null;
+    },
+  ): Promise<ProfileView> {
+    const updatePayload: Record<string, unknown> = {};
+    if (dto.displayName !== undefined) updatePayload.display_name = dto.displayName;
+    if (dto.avatarUrl !== undefined) updatePayload.avatar_url = dto.avatarUrl;
+    if (dto.bannerColor !== undefined) updatePayload.banner_url = dto.bannerColor;
+    if (dto.customStatus !== undefined) updatePayload.status_message = dto.customStatus;
+
+    if (Object.keys(updatePayload).length > 0) {
+      const { error } = await this.supabase.client
+        .from('profiles')
+        .update(updatePayload)
+        .eq('id', userId);
+
+      if (error) {
+        this.logger.error(`Cập nhật hồ sơ thất bại: ${error.message}`);
+        throw new InternalServerErrorException(
+          'Không cập nhật được hồ sơ. Vui lòng thử lại.',
+        );
+      }
+    }
+
+    const profile = await this.getProfile(userId);
+    if (!profile) {
+      throw new NotFoundException('Không tìm thấy hồ sơ người dùng.');
+    }
+    return profile;
   }
 
   /** Có '@' thì coi là email; ngược lại tra tên đăng nhập. Null nếu không có ai. */
@@ -301,10 +327,6 @@ export class AuthService {
 
   /**
    * Điền hồ sơ cho tài khoản đã đăng nhập bằng Google.
-   *
-   * `auth.users` đã do Supabase tạo lúc OAuth/OTP, nên ở đây chỉ ghi `profiles`.
-   * Không có bước rollback: nếu ghi hồ sơ hỏng, tài khoản auth vẫn dùng lại được
-   * và người dùng chỉ cần thử hoàn tất hồ sơ lại.
    */
   async completeProfile(
     user: { id: string; email: string | null },
@@ -312,8 +334,6 @@ export class AuthService {
   ): Promise<RegisteredUser> {
     const displayName = dto.displayName ?? null;
 
-    // Một tài khoản chỉ có một hồ sơ. Chặn ở đây để không nuốt lỗi trùng khoá
-    // chính (id) thành "trùng tên đăng nhập" gây khó hiểu.
     const { data: existing } = await this.supabase.client
       .from('profiles')
       .select('id')
@@ -378,7 +398,6 @@ export class AuthService {
   private async rollbackUser(userId: string): Promise<void> {
     const { error } = await this.supabase.client.auth.admin.deleteUser(userId);
     if (error) {
-      // Không ném tiếp: lỗi thật sự cần báo cho người dùng là lỗi tạo hồ sơ.
       this.logger.error(
         `Không xoá được auth user mồ côi ${userId}: ${error.message}`,
       );

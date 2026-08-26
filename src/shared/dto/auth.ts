@@ -43,7 +43,8 @@ export interface LoginResponse {
 
 /**
  * Khi 2FA bật: trả challenge để frontend điều hướng sang màn nhập TOTP.
- * `accessToken` ở đây là AAL1 (chỉ xác thực mật khẩu).
+ * `accessToken` ở đây là AAL1 (chỉ xác thực mật khẩu) — không đủ để gọi API;
+ * cần gửi lên /auth/2fa/verify-login để nâng lên AAL2 và nhận session thật.
  */
 export interface LoginMfaRequired {
   requiresMfa: true;
@@ -58,9 +59,9 @@ export type LoginResult = LoginResponse | LoginMfaRequired;
 // ── 2FA / TOTP ────────────────────────────────────────────────────────────────
 
 export interface TotpEnrollResponse {
-  /** URI dạng otpauth:// để tạo QR code. */
+  /** URI dạng otpauth:// để tạo QR code ở frontend. */
   qrCodeUrl: string;
-  /** Secret text (Base32) để nhập tay nếu không quét được QR. */
+  /** Secret text (Base32) để nhập tay vào app nếu không quét được QR. */
   secret: string;
   factorId: string;
 }
@@ -70,7 +71,10 @@ export interface TotpStatusResponse {
   factorId: string | null;
 }
 
-/** Backup codes — trả một lần duy nhất sau khi bật 2FA hoặc regenerate. */
+/**
+ * Backup codes trả về một lần duy nhất sau khi bật 2FA (hoặc khi tạo lại).
+ * Frontend phải nhắc người dùng lưu lại, vì sau đó không xem lại được.
+ */
 export interface BackupCodesResponse {
   codes: string[];
 }
@@ -78,6 +82,7 @@ export interface BackupCodesResponse {
 export interface VerifyMfaRequest {
   challengeId: string;
   code: string;
+  /** Access token tạm AAL1 nhận được từ /login khi requiresMfa = true. */
   accessToken: string;
 }
 

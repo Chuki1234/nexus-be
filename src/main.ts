@@ -24,6 +24,16 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
 
+  // Chuyển hướng các request không thuộc /api (như OAuth redirect từ Supabase bị trỏ nhầm về 3000)
+  // sang cổng frontend (4200).
+  app.use((req: any, res: any, next: any) => {
+    if (!req.url.startsWith('/api')) {
+      const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200';
+      return res.redirect(`${frontendUrl}${req.url}`);
+    }
+    next();
+  });
+
   // Frontend gọi http://localhost:3000/api/...
   app.setGlobalPrefix('api');
 
