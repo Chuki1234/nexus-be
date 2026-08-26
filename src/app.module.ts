@@ -14,6 +14,7 @@ import { FriendsModule } from './modules/friends/friends.module';
 import { ConversationsModule } from './modules/conversations/conversations.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
+import { DirectCallsModule } from './modules/direct-calls/direct-calls.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
     ConversationsModule,
     MessagesModule,
     RealtimeModule,
+    DirectCallsModule,
   ],
   controllers: [AppController],
   providers: [

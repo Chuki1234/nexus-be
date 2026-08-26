@@ -16,6 +16,8 @@ import {
   type ClientToServerEvents,
   type JoinConversationResponse,
   type ServerToClientEvents,
+  type VoiceMemberState,
+  type VoiceServerStatesSyncPayload,
 } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
@@ -25,6 +27,7 @@ import {
   CHAT_EVENTS,
   type MessageCreatedEvent,
   type MessageDeletedEvent,
+  type MessageHiddenForUserEvent,
   type MessageReadEvent,
   type MessageUpdatedEvent,
   type ReactionUpdatedEvent,
@@ -209,6 +212,17 @@ export class ChatGateway
         }
       });
 
+      // Tự động dọn dẹp voice states nếu user ngắt kết nối
+      const affectedServers = await this.redisState.removeUserFromAllVoiceStates(userId);
+      for (const item of affectedServers) {
+        this.server.to(Room.server(item.serverId)).emit('voice:state-updated', {
+          serverId: item.serverId,
+          channelId: item.channelId,
+          userId,
+          state: null,
+        });
+      }
+
       this.logger.log(`Socket ${client.id} (user ${userId}) đã ngắt kết nối`);
     }
   }
@@ -380,6 +394,274 @@ export class ChatGateway
   }
 
   // ---------------------------------------------------------------------------
+  // Server Voice States Handlers (Realtime Voice Presence)
+  // ---------------------------------------------------------------------------
+
+  @SubscribeMessage('voice:state-update')
+  async handleVoiceStateUpdate(
+    client: TypedSocket,
+    payload: {
+      serverId: string;
+      channelId: string | null;
+      isMuted?: boolean;
+      isDeafened?: boolean;
+      isCameraOn?: boolean;
+      isScreenSharing?: boolean;
+    },
+  ): Promise<void> {
+    const userId = client.data.userId;
+    if (!userId || !isValidUuid(payload?.serverId)) return;
+
+    if (payload.channelId === null) {
+      // User rời khỏi kênh voice trong server
+      const prevChannelId = await this.redisState.removeServerVoiceState(
+        payload.serverId,
+        userId,
+      );
+      this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
+        serverId: payload.serverId,
+        channelId: prevChannelId,
+        userId,
+        state: null,
+      });
+      return;
+    }
+
+    if (!isValidUuid(payload.channelId)) return;
+
+    // Kiểm tra quyền xem kênh voice
+    try {
+      await this.serverPermissionsService.assertChannelView(userId, payload.channelId);
+    } catch {
+      return;
+    }
+
+    // Lấy thông tin user profile
+    const { data: profile } = await this.supabase.client
+      .from('profiles')
+      .select('id, username, display_name, avatar_url')
+      .eq('id', userId)
+      .maybeSingle();
+
+    const displayName = profile?.display_name || profile?.username || 'Nexus Member';
+    const username = profile?.username || 'nexus_member';
+    const avatarUrl = profile?.avatar_url || null;
+
+    const voiceState: VoiceMemberState = {
+      userId,
+      channelId: payload.channelId,
+      serverId: payload.serverId,
+      name: displayName,
+      username,
+      displayName,
+      avatarUrl,
+      isMuted: payload.isMuted ?? false,
+      isDeafened: payload.isDeafened ?? false,
+      isCameraOn: payload.isCameraOn ?? false,
+      isScreenSharing: payload.isScreenSharing ?? false,
+      joinedAt: new Date().toISOString(),
+    };
+
+    await this.redisState.setServerVoiceState(payload.serverId, userId, voiceState);
+
+    this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
+      serverId: payload.serverId,
+      channelId: payload.channelId,
+      userId,
+      state: voiceState,
+    });
+  }
+
+  @SubscribeMessage('voice:get-server-states')
+  async handleGetServerVoiceStates(
+    client: TypedSocket,
+    payload: { serverId: string },
+  ): Promise<VoiceServerStatesSyncPayload> {
+    if (!isValidUuid(payload?.serverId)) {
+      return { serverId: payload?.serverId || '', states: [] };
+    }
+
+    const states = await this.redisState.getServerVoiceStates(payload.serverId);
+    return {
+      serverId: payload.serverId,
+      states,
+    };
+  }
+
+  @SubscribeMessage('voice:move-member')
+  async handleVoiceMoveMember(
+    client: TypedSocket,
+    payload: {
+      serverId: string;
+      targetUserId: string;
+      targetChannelId: string;
+    },
+  ): Promise<void> {
+    const userId = client.data.userId;
+    if (
+      !userId ||
+      !isValidUuid(payload?.serverId) ||
+      !isValidUuid(payload?.targetUserId) ||
+      !isValidUuid(payload?.targetChannelId)
+    ) {
+      return;
+    }
+
+    try {
+      const caps = await this.serverPermissionsService.getCapabilities(
+        userId,
+        payload.serverId,
+      );
+      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
+        this.logger.warn(`User ${userId} không có quyền di chuyển voice member`);
+        return;
+      }
+
+      // Lấy thông tin kênh đích
+      const { data: targetChannel } = await this.supabase.client
+        .from('channels')
+        .select('id, name, type')
+        .eq('id', payload.targetChannelId)
+        .eq('server_id', payload.serverId)
+        .maybeSingle();
+
+      if (!targetChannel || targetChannel.type !== 'voice') {
+        return;
+      }
+
+      // Gửi event chỉ thị chuyển kênh tới target user
+      this.server
+        .to(Room.user(payload.targetUserId))
+        .emit('voice:force-move', {
+          serverId: payload.serverId,
+          channelId: targetChannel.id,
+          channelName: targetChannel.name,
+        });
+
+      this.logger.log(
+        `Chủ server ${userId} đã chuyển user ${payload.targetUserId} sang kênh thoại ${targetChannel.name} (${targetChannel.id})`,
+      );
+    } catch (err) {
+      this.logger.error(`Lỗi khi di chuyển voice member:`, err);
+    }
+  }
+
+  @SubscribeMessage('voice:kick-member')
+  async handleVoiceKickMember(
+    client: TypedSocket,
+    payload: {
+      serverId: string;
+      targetUserId: string;
+    },
+  ): Promise<void> {
+    const userId = client.data.userId;
+    if (
+      !userId ||
+      !isValidUuid(payload?.serverId) ||
+      !isValidUuid(payload?.targetUserId)
+    ) {
+      return;
+    }
+
+    try {
+      const caps = await this.serverPermissionsService.getCapabilities(
+        userId,
+        payload.serverId,
+      );
+      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
+        this.logger.warn(`User ${userId} không có quyền kick voice member`);
+        return;
+      }
+
+      // Gửi event chỉ thị ngắt kết nối voice tới target user
+      this.server
+        .to(Room.user(payload.targetUserId))
+        .emit('voice:force-disconnect', {
+          serverId: payload.serverId,
+        });
+
+      // Xóa khỏi redis state và broadcast update
+      const prevChannelId = await this.redisState.removeServerVoiceState(
+        payload.serverId,
+        payload.targetUserId,
+      );
+
+      this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
+        serverId: payload.serverId,
+        channelId: prevChannelId,
+        userId: payload.targetUserId,
+        state: null,
+      });
+
+      this.logger.log(
+        `Chủ server ${userId} đã ngắt kết nối voice user ${payload.targetUserId}`,
+      );
+    } catch (err) {
+      this.logger.error(`Lỗi khi kick voice member:`, err);
+    }
+  }
+
+  @SubscribeMessage('voice:server-mute-member')
+  async handleVoiceServerMuteMember(
+    client: TypedSocket,
+    payload: {
+      serverId: string;
+      targetUserId: string;
+      isMuted: boolean;
+    },
+  ): Promise<void> {
+    const userId = client.data.userId;
+    if (
+      !userId ||
+      !isValidUuid(payload?.serverId) ||
+      !isValidUuid(payload?.targetUserId)
+    ) {
+      return;
+    }
+
+    try {
+      const caps = await this.serverPermissionsService.getCapabilities(
+        userId,
+        payload.serverId,
+      );
+      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
+        return;
+      }
+
+      // Gửi event chỉ thị bật/tắt mic tới target user
+      this.server
+        .to(Room.user(payload.targetUserId))
+        .emit('voice:force-mute', {
+          serverId: payload.serverId,
+          isMuted: payload.isMuted,
+        });
+
+      // Cập nhật trạng thái voice trong Redis nếu đang có
+      const serverStates = await this.redisState.getServerVoiceStates(payload.serverId);
+      const targetState = serverStates.find((s) => s.userId === payload.targetUserId);
+      if (targetState) {
+        const updatedState: VoiceMemberState = {
+          ...targetState,
+          isMuted: payload.isMuted,
+        };
+        await this.redisState.setServerVoiceState(
+          payload.serverId,
+          payload.targetUserId,
+          updatedState,
+        );
+        this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
+          serverId: payload.serverId,
+          channelId: targetState.channelId,
+          userId: payload.targetUserId,
+          state: updatedState,
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Lỗi khi server-mute voice member:`, err);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Typing Indicators (Conversation & Channel)
   // ---------------------------------------------------------------------------
 
@@ -513,6 +795,20 @@ export class ChatGateway
         messageId,
       });
     }
+  }
+
+  @OnEvent(CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER)
+  handleMessageHiddenForUser(event: MessageHiddenForUserEvent): void {
+    const { userId, messageId, conversationId, channelId } = event;
+    // CHỈ emit tới Room riêng của user đó: Room.user(userId)
+    // Tuyệt đối KHÔNG emit vào room conversation hay channel!
+    this.server?.to(Room.user(userId)).emit('message:hidden-for-user', {
+      messageId,
+      userId,
+      conversationId: conversationId ?? null,
+      channelId: channelId ?? null,
+      hiddenAt: new Date().toISOString(),
+    });
   }
 
   @OnEvent(CHAT_EVENTS.MESSAGE_READ)

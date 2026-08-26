@@ -16,5 +16,8 @@ export class SendMessageDto {
     message: 'replyToId phải là chuỗi số nguyên dương (bigint).',
   })
   replyToId?: string;
+
+  @IsOptional()
+  externalMedia?: any;
 }
 

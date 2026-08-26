@@ -57,6 +57,10 @@ describe('ChatGateway', () => {
       setTypingUpdateCallback: jest.fn(),
       startTyping: jest.fn().mockResolvedValue([]),
       stopTyping: jest.fn().mockResolvedValue([]),
+      setServerVoiceState: jest.fn().mockResolvedValue(undefined),
+      removeServerVoiceState: jest.fn().mockResolvedValue(null),
+      getServerVoiceStates: jest.fn().mockResolvedValue([]),
+      removeUserFromAllVoiceStates: jest.fn().mockResolvedValue([]),
     };
 
     const serverPermissionsServiceMock = {
@@ -331,6 +335,7 @@ describe('ChatGateway', () => {
         editedAt: null,
         deletedAt: null,
         isForwarded: false,
+        externalMedia: null,
         createdAt: '2026-08-22T10:00:00Z',
       };
 
@@ -374,6 +379,7 @@ describe('ChatGateway', () => {
         editedAt: '2026-08-22T10:05:00Z',
         deletedAt: null,
         isForwarded: false,
+        externalMedia: null,
         createdAt: '2026-08-22T10:00:00Z',
       };
 
@@ -505,6 +511,112 @@ describe('ChatGateway', () => {
         'peer-bob': { status: 'online', lastSeenAt: null },
         'peer-charlie': { status: 'offline', lastSeenAt: null },
       });
+    });
+  });
+
+  describe('Voice States Handlers (Realtime Voice Presence)', () => {
+    it('handleVoiceStateUpdate: broadcast voice state khi user tham gia kênh', async () => {
+      supabaseMock.client.from = jest.fn().mockReturnValue({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        maybeSingle: jest.fn().mockResolvedValue({
+          data: {
+            id: 'user-123',
+            username: 'alice',
+            display_name: 'Alice',
+            avatar_url: 'https://avatar.url',
+          },
+        }),
+      });
+
+      const mockClient = {
+        data: { userId: 'user-123' },
+      } as unknown as TypedSocket;
+
+      const serverId = validUuid;
+      const channelId = '22222222-2222-4222-a222-222222222222';
+
+      await gateway.handleVoiceStateUpdate(mockClient, {
+        serverId,
+        channelId,
+        isMuted: false,
+        isCameraOn: true,
+        isScreenSharing: true,
+      });
+
+      expect(redisStateMock.setServerVoiceState).toHaveBeenCalledWith(
+        serverId,
+        'user-123',
+        expect.objectContaining({
+          userId: 'user-123',
+          channelId,
+          serverId,
+          displayName: 'Alice',
+          isCameraOn: true,
+          isScreenSharing: true,
+        }),
+      );
+
+      expect(serverMock.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(serverMock.emit).toHaveBeenCalledWith(
+        'voice:state-updated',
+        expect.objectContaining({
+          serverId,
+          channelId,
+          userId: 'user-123',
+          state: expect.objectContaining({
+            isScreenSharing: true,
+          }),
+        }),
+      );
+    });
+
+    it('handleVoiceStateUpdate: broadcast state: null khi user rời kênh', async () => {
+      redisStateMock.removeServerVoiceState.mockResolvedValueOnce('22222222-2222-4222-a222-222222222222');
+
+      const mockClient = {
+        data: { userId: 'user-123' },
+      } as unknown as TypedSocket;
+
+      const serverId = validUuid;
+
+      await gateway.handleVoiceStateUpdate(mockClient, {
+        serverId,
+        channelId: null,
+      });
+
+      expect(redisStateMock.removeServerVoiceState).toHaveBeenCalledWith(serverId, 'user-123');
+      expect(serverMock.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(serverMock.emit).toHaveBeenCalledWith('voice:state-updated', {
+        serverId,
+        channelId: '22222222-2222-4222-a222-222222222222',
+        userId: 'user-123',
+        state: null,
+      });
+    });
+
+    it('handleGetServerVoiceStates: trả về snapshot voice states của server', async () => {
+      const mockClient = {
+        data: { userId: 'user-123' },
+      } as unknown as TypedSocket;
+
+      redisStateMock.getServerVoiceStates.mockResolvedValueOnce([
+        {
+          userId: 'user-123',
+          channelId: '22222222-2222-4222-a222-222222222222',
+          serverId: validUuid,
+          displayName: 'Alice',
+          isMuted: true,
+        },
+      ]);
+
+      const res = await gateway.handleGetServerVoiceStates(mockClient, {
+        serverId: validUuid,
+      });
+
+      expect(res.serverId).toBe(validUuid);
+      expect(res.states.length).toBe(1);
+      expect(res.states[0].displayName).toBe('Alice');
     });
   });
 });

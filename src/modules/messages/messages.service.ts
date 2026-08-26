@@ -28,6 +28,8 @@ import type {
 } from './dto/message-response.dto';
 import type { SendMessageDto } from './dto/send-message.dto';
 import type { SetReactionDto } from './dto/set-reaction.dto';
+import type { GiphyMediaDto } from '../../shared/dto/messages.dto';
+import { validateAndSanitizeGiphyMedia } from './validators/giphy-media.validator';
 
 interface RawMessageRow {
   id: number | string;
@@ -261,28 +263,68 @@ export class MessagesService {
 
     const limit = query.limit ?? 50;
 
-    let q = this.supabase.client
-      .from('messages')
-      .select(
-        'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-      )
-      .eq('conversation_id', conversationId);
+    let rawMessages: RawMessageRow[] | null = null;
 
-    if (query.before) {
-      q = q.lt('id', query.before);
+    // 1. Ưu tiên gọi RPC get_conversation_messages_paged
+    try {
+      const { data, error } = await this.supabase.client.rpc(
+        'get_conversation_messages_paged',
+        {
+          p_conversation_id: conversationId,
+          p_user_id: userId,
+          p_limit: limit,
+          p_before: query.before ? Number(query.before) : null,
+          p_after: query.after ? Number(query.after) : null,
+        },
+      );
+      if (!error && Array.isArray(data)) {
+        rawMessages = data as RawMessageRow[];
+      }
+    } catch {
+      // Fallback
     }
-    if (query.after) {
-      q = q.gt('id', query.after);
-    }
 
-    // Lấy dư 1 bản ghi để kiểm tra hasMore
-    q = q.order('id', { ascending: false }).limit(limit + 1);
+    // 2. Fallback sang query trực tiếp nếu RPC chưa có trong Database
+    if (rawMessages === null) {
+      let q = this.supabase.client
+        .from('messages')
+        .select(
+          'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        )
+        .eq('conversation_id', conversationId);
 
-    const { data: rawMessages, error } = await q;
+      if (query.before) {
+        q = q.lt('id', query.before);
+      } else if (query.after) {
+        q = q.gt('id', query.after);
+      }
 
-    if (error) {
-      this.logger.error('Lỗi tải tin nhắn:', error);
-      throw new InternalServerErrorException('Lỗi tải lịch sử tin nhắn.');
+      q = q.order('id', { ascending: false }).limit(limit + 1);
+
+      const { data: directMessages, error: directErr } = await q;
+
+      if (directErr) {
+        this.logger.error('Lỗi tải tin nhắn trực tiếp:', directErr);
+        throw new InternalServerErrorException('Lỗi tải lịch sử tin nhắn.');
+      }
+
+      let list = (directMessages ?? []) as RawMessageRow[];
+
+      try {
+        const { data: hiddenData } = await this.supabase.client
+          .from('message_hidden_users')
+          .select('message_id')
+          .eq('user_id', userId);
+
+        if (hiddenData && hiddenData.length > 0) {
+          const hiddenSet = new Set(hiddenData.map((h: any) => String(h.message_id)));
+          list = list.filter((m) => !hiddenSet.has(String(m.id)));
+        }
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
+      }
+
+      rawMessages = list;
     }
 
     const messagesList = (rawMessages ?? []) as RawMessageRow[];
@@ -315,18 +357,20 @@ export class MessagesService {
       }
     }
 
-    // 2. Lấy attachments & reactions cho các tin nhắn chưa bị xoá (deleted_at === null)
+    // 2. Lấy attachments, reactions & externalMedia cho các tin nhắn chưa bị xoá (deleted_at === null)
     const activeRows = finalRows.filter((m) => !m.deleted_at);
     const activeMessageIds = activeRows.map((m) => m.id);
-    const [attachmentMap, reactionMap] = await Promise.all([
+    const [attachmentMap, reactionMap, extMediaMap] = await Promise.all([
       this.loadAttachmentsForMessages(activeMessageIds),
       this.loadReactionsForMessages(activeMessageIds, userId),
+      this.loadExternalMediaForMessages(activeMessageIds),
     ]);
 
     const formattedMessages: MessageResponseDto[] = finalRows.map((m) => {
       const msgId = m.id.toString();
       const atts = m.deleted_at ? undefined : attachmentMap.get(msgId);
       const reacts = m.deleted_at ? undefined : (reactionMap.get(msgId) ?? []);
+      const extMedia = m.deleted_at ? null : (extMediaMap.get(msgId) ?? null);
       return {
         id: msgId,
         channelId: m.channel_id,
@@ -336,6 +380,7 @@ export class MessagesService {
         type: m.type,
         content: m.deleted_at ? null : m.content,
         isForwarded: Boolean(m.is_forwarded),
+        externalMedia: extMedia,
         replyToId: m.reply_to_id ? m.reply_to_id.toString() : null,
         clientNonce: m.client_nonce,
         editedAt: m.edited_at,
@@ -370,25 +415,68 @@ export class MessagesService {
 
     const limit = query.limit ?? 50;
 
-    let q = this.supabase.client
-      .from('messages')
-      .select(
-        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-      )
-      .eq('channel_id', channelId);
+    let rawMessages: RawMessageRow[] | null = null;
 
-    if (query.before) {
-      q = q.lt('id', query.before);
-    } else if (query.after) {
-      q = q.gt('id', query.after);
+    // 1. Ưu tiên gọi RPC get_channel_messages_paged
+    try {
+      const { data, error: msgError } = await this.supabase.client.rpc(
+        'get_channel_messages_paged',
+        {
+          p_channel_id: channelId,
+          p_user_id: userId,
+          p_limit: limit,
+          p_before: query.before ? Number(query.before) : null,
+          p_after: query.after ? Number(query.after) : null,
+        },
+      );
+      if (!msgError && Array.isArray(data)) {
+        rawMessages = data as RawMessageRow[];
+      }
+    } catch {
+      // Fallback
     }
 
-    q = q.order('id', { ascending: false }).limit(limit + 1);
+    // 2. Fallback sang query trực tiếp nếu RPC chưa có trong Database
+    if (rawMessages === null) {
+      let q = this.supabase.client
+        .from('messages')
+        .select(
+          'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        )
+        .eq('channel_id', channelId);
 
-    const { data: rawMessages, error: msgError } = await q;
-    if (msgError) {
-      this.logger.error('Lỗi lấy tin nhắn kênh:', msgError);
-      throw new InternalServerErrorException('Lỗi tải tin nhắn kênh.');
+      if (query.before) {
+        q = q.lt('id', query.before);
+      } else if (query.after) {
+        q = q.gt('id', query.after);
+      }
+
+      q = q.order('id', { ascending: false }).limit(limit + 1);
+
+      const { data: directMessages, error: directErr } = await q;
+
+      if (directErr) {
+        this.logger.error('Lỗi tải tin nhắn kênh trực tiếp:', directErr);
+        throw new InternalServerErrorException('Lỗi tải tin nhắn kênh.');
+      }
+
+      let list = (directMessages ?? []) as RawMessageRow[];
+
+      try {
+        const { data: hiddenData } = await this.supabase.client
+          .from('message_hidden_users')
+          .select('message_id')
+          .eq('user_id', userId);
+
+        if (hiddenData && hiddenData.length > 0) {
+          const hiddenSet = new Set(hiddenData.map((h: any) => String(h.message_id)));
+          list = list.filter((m) => !hiddenSet.has(String(m.id)));
+        }
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
+      }
+
+      rawMessages = list;
     }
 
     const messages = (rawMessages || []) as RawMessageRow[];
@@ -417,12 +505,13 @@ export class MessagesService {
       }
     }
 
-    // 2. Lấy attachments & reactions cho tin nhắn chưa bị xóa
+    // 2. Lấy attachments, reactions & externalMedia cho tin nhắn chưa bị xóa
     const activeRows = finalRows.filter((m) => !m.deleted_at);
     const activeMessageIds = activeRows.map((m) => m.id);
-    const [attachmentMap, reactionMap] = await Promise.all([
+    const [attachmentMap, reactionMap, extMediaMap] = await Promise.all([
       this.loadAttachmentsForMessages(activeMessageIds),
       this.loadReactionsForMessages(activeMessageIds, userId),
+      this.loadExternalMediaForMessages(activeMessageIds),
     ]);
 
     // 3. Lấy read state của user trên channel này
@@ -441,6 +530,7 @@ export class MessagesService {
       const msgId = m.id.toString();
       const atts = m.deleted_at ? undefined : attachmentMap.get(msgId);
       const reacts = m.deleted_at ? undefined : (reactionMap.get(msgId) ?? []);
+      const extMedia = m.deleted_at ? null : (extMediaMap.get(msgId) ?? null);
       return {
         id: msgId,
         channelId: m.channel_id,
@@ -450,6 +540,7 @@ export class MessagesService {
         type: m.type,
         content: m.deleted_at ? null : m.content,
         isForwarded: Boolean(m.is_forwarded),
+        externalMedia: extMedia,
         replyToId: m.reply_to_id ? m.reply_to_id.toString() : null,
         clientNonce: m.client_nonce,
         editedAt: m.edited_at,
@@ -625,13 +716,61 @@ export class MessagesService {
   }
 
   /**
-   * Gửi tin nhắn mới vào cuộc trò chuyện (hỗ trợ text và tối đa 5 file đính kèm).
+   * Helper tải gộp (batch load) metadata externalMedia (GIPHY) cho danh sách message IDs.
+   * O(1) database query, chống N+1 query.
+   */
+  private async loadExternalMediaForMessages(
+    messageIds: (number | string)[],
+  ): Promise<Map<string, GiphyMediaDto>> {
+    const mediaMap = new Map<string, GiphyMediaDto>();
+    if (messageIds.length === 0) return mediaMap;
+
+    const { data: rawMedia, error: mediaErr } = await this.supabase.client
+      .from('message_external_media')
+      .select(
+        'message_id, provider, external_id, media_type, title, creator_username, page_url, preview_url, display_url, mp4_url, width, height',
+      )
+      .in('message_id', messageIds);
+
+    if (mediaErr) {
+      this.logger.error('Lỗi tải metadata externalMedia:', mediaErr);
+      return mediaMap;
+    }
+
+    if (!rawMedia || rawMedia.length === 0) {
+      return mediaMap;
+    }
+
+    for (const item of rawMedia as any[]) {
+      const msgIdStr = item.message_id.toString();
+      mediaMap.set(msgIdStr, {
+        provider: item.provider as 'giphy',
+        externalId: item.external_id,
+        mediaType: item.media_type as 'gif',
+        title: item.title || '',
+        creatorUsername: item.creator_username,
+        pageUrl: item.page_url,
+        previewUrl: item.preview_url,
+        displayUrl: item.display_url,
+        mp4Url: item.mp4_url,
+        width: item.width,
+        height: item.height,
+      });
+    }
+
+    return mediaMap;
+  }
+
+  /**
+   * Gửi tin nhắn mới vào cuộc trò chuyện (hỗ trợ text, tệp đính kèm và ảnh GIF GIPHY).
+   * Ghi nhận cơ sở dữ liệu nguyên tử qua PostgreSQL RPC create_conversation_message.
    */
   async createConversationMessage(
     userId: string,
     conversationId: string,
     dto: SendMessageDto,
     files?: Express.Multer.File[],
+    isForwarded?: boolean,
   ): Promise<MessageResponseDto> {
     const isMember = await this.conversationsService.verifyMembership(
       userId,
@@ -646,9 +785,14 @@ export class MessagesService {
     const text = dto.content?.trim() || null;
     const uploadFiles = files || [];
 
-    if (!text && uploadFiles.length === 0) {
+    let sanitizedMedia: GiphyMediaDto | null = null;
+    if (dto.externalMedia) {
+      sanitizedMedia = validateAndSanitizeGiphyMedia(dto.externalMedia);
+    }
+
+    if (!text && uploadFiles.length === 0 && !sanitizedMedia) {
       throw new BadRequestException(
-        'Tin nhắn phải có nội dung văn bản hoặc ít nhất một file đính kèm.',
+        'Tin nhắn phải có nội dung văn bản, tệp đính kèm hoặc ảnh GIF.',
       );
     }
 
@@ -713,7 +857,6 @@ export class MessagesService {
           const isAnimated =
             f.mimetype === 'image/gif' || f.mimetype === 'image/webp';
           const image = sharp(f.buffer, {
-            // Cho phép đọc metadata ảnh động mà không bị chặn sớm bởi limitInputPixels mặc định
             limitInputPixels: 100_000_000,
             animated: isAnimated,
           });
@@ -735,7 +878,6 @@ export class MessagesService {
             );
           }
 
-          // 1. Giới hạn kích thước mỗi khung hình (frame dimensions)
           const MAX_FRAME_DIMENSION = 4096;
           if (
             frameWidth > MAX_FRAME_DIMENSION ||
@@ -746,7 +888,6 @@ export class MessagesService {
             );
           }
 
-          // 2. Giới hạn số lượng khung hình (frame count)
           const MAX_FRAME_COUNT = 300;
           if (framePages > MAX_FRAME_COUNT) {
             throw new BadRequestException(
@@ -754,7 +895,6 @@ export class MessagesService {
             );
           }
 
-          // 3. Giới hạn pixel giải mã mỗi frame (per-frame decoded pixels)
           const MAX_PER_FRAME_PIXELS = 25_000_000;
           if (frameWidth * frameHeight > MAX_PER_FRAME_PIXELS) {
             throw new BadRequestException(
@@ -762,7 +902,6 @@ export class MessagesService {
             );
           }
 
-          // 4. Giới hạn tổng pixel giải mã toàn bộ ảnh (total decoded pixels)
           const MAX_TOTAL_DECODED_PIXELS = 100_000_000;
           const totalDecodedPixels = frameWidth * frameHeight * framePages;
           if (totalDecodedPixels > MAX_TOTAL_DECODED_PIXELS) {
@@ -793,7 +932,25 @@ export class MessagesService {
       });
     }
 
-    // 1. Kiểm tra idempotency qua clientNonce (nếu có)
+    // 1. Kiểm tra replyToId nếu có
+    if (dto.replyToId) {
+      const { data: replyTarget, error: replyErr } = await this.supabase.client
+        .from('messages')
+        .select('id, conversation_id, deleted_at')
+        .eq('id', dto.replyToId)
+        .maybeSingle();
+
+      if (replyErr || !replyTarget) {
+        throw new BadRequestException('Tin nhắn được trả lời không tồn tại.');
+      }
+      if (replyTarget.conversation_id !== conversationId) {
+        throw new BadRequestException(
+          'Tin nhắn được trả lời không thuộc cuộc trò chuyện này.',
+        );
+      }
+    }
+
+    // 2. Kiểm tra idempotency trước khi upload file
     if (dto.clientNonce) {
       const { data: existing } = await this.supabase.client
         .from('messages')
@@ -812,8 +969,12 @@ export class MessagesService {
           );
         }
         const author = await this.getAuthorProfile(userId);
-        const attMap = await this.loadAttachmentsForMessages([raw.id]);
+        const [attMap, extMediaMap] = await Promise.all([
+          this.loadAttachmentsForMessages([raw.id]),
+          this.loadExternalMediaForMessages([raw.id]),
+        ]);
         const existingAtts = attMap.get(raw.id.toString());
+        const existingMedia = extMediaMap.get(raw.id.toString()) || null;
 
         return {
           id: raw.id.toString(),
@@ -824,6 +985,7 @@ export class MessagesService {
           type: raw.type,
           content: raw.deleted_at ? null : raw.content,
           isForwarded: Boolean(raw.is_forwarded),
+          externalMedia: existingMedia,
           replyToId: raw.reply_to_id ? raw.reply_to_id.toString() : null,
           clientNonce: raw.client_nonce,
           editedAt: raw.edited_at,
@@ -831,38 +993,15 @@ export class MessagesService {
           ...(existingAtts && existingAtts.length > 0
             ? { attachments: existingAtts }
             : {}),
+          reactions: [],
           createdAt: raw.created_at,
         };
       }
     }
 
-    // 2. Validate replyToId nếu có
-    if (dto.replyToId) {
-      if (!/^[1-9]\d*$/.test(dto.replyToId)) {
-        throw new BadRequestException(
-          'replyToId phải là chuỗi số nguyên dương (bigint).',
-        );
-      }
-
-      const { data: replyMsg, error: replyErr } = await this.supabase.client
-        .from('messages')
-        .select('id, conversation_id')
-        .eq('id', dto.replyToId)
-        .maybeSingle();
-
-      if (replyErr || !replyMsg) {
-        throw new BadRequestException('Tin nhắn được trả lời không tồn tại.');
-      }
-
-      if (replyMsg.conversation_id !== conversationId) {
-        throw new BadRequestException(
-          'Tin nhắn được trả lời không thuộc cuộc trò chuyện này.',
-        );
-      }
-    }
-
     // 3. Upload file lên Storage (Message Attachments Bucket)
     const uploadedPaths: string[] = [];
+    const attachmentsToRpc: any[] = [];
     try {
       for (const item of processedMetadata) {
         const uniqueId = crypto.randomUUID();
@@ -881,9 +1020,16 @@ export class MessagesService {
         }
 
         uploadedPaths.push(storagePath);
+        attachmentsToRpc.push({
+          storage_path: storagePath,
+          filename: item.normalizedFilename,
+          mime_type: item.file.mimetype,
+          size_bytes: item.file.size,
+          width: item.width,
+          height: item.height,
+        });
       }
     } catch (uploadErr) {
-      // Dọn dẹp các file đã tải lên trước đó nếu có lỗi
       if (uploadedPaths.length > 0) {
         await this.supabase.client.storage
           .from('message-attachments')
@@ -894,142 +1040,130 @@ export class MessagesService {
       );
     }
 
-    // 4. Chèn tin nhắn mới vào bảng messages
-    const { data: newMsg, error: insertErr } = await this.supabase.client
-      .from('messages')
-      .insert({
-        conversation_id: conversationId,
-        author_id: userId,
-        content: text,
-        client_nonce: dto.clientNonce ?? null,
-        reply_to_id: dto.replyToId ?? null,
-      })
-      .select(
-        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-      )
-      .single();
+    const nonce = dto.clientNonce || crypto.randomUUID();
 
-    if (insertErr || !newMsg) {
-      // Xoá các file vừa upload nếu chèn tin nhắn thất bại để tránh orphan files
+    // 3. Ghi DB nguyên tử qua RPC create_conversation_message
+    const { data: rpcData, error: rpcErr } = await this.supabase.client.rpc(
+      'create_conversation_message',
+      {
+        p_conversation_id: conversationId,
+        p_author_id: userId,
+        p_content: text,
+        p_client_nonce: nonce,
+        p_reply_to_id: dto.replyToId ? BigInt(dto.replyToId) : null,
+        p_attachments: attachmentsToRpc,
+        p_is_forwarded: Boolean(isForwarded),
+        p_external_media: sanitizedMedia,
+      },
+    );
+
+    if (rpcErr) {
+      this.logger.error(
+        `RPC create_conversation_message thất bại: ${rpcErr.message} (code: ${rpcErr.code})`,
+      );
+
       if (uploadedPaths.length > 0) {
         await this.supabase.client.storage
           .from('message-attachments')
           .remove(uploadedPaths);
       }
 
-      if (
-        insertErr &&
-        (insertErr.code === '23505' || insertErr.message?.includes('23505')) &&
-        dto.clientNonce
-      ) {
-        const { data: duplicate } = await this.supabase.client
-          .from('messages')
-          .select(
-            'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-          )
-          .eq('author_id', userId)
-          .eq('client_nonce', dto.clientNonce)
-          .maybeSingle();
+      if (rpcErr.code === '23505') {
+        if (nonce) {
+          const { data: canonical } = await this.supabase.client
+            .from('messages')
+            .select(
+              'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+            )
+            .eq('author_id', userId)
+            .eq('client_nonce', nonce)
+            .maybeSingle();
 
-        if (duplicate) {
-          const rawDup = duplicate as RawMessageRow;
-          if (rawDup.conversation_id !== conversationId) {
-            throw new ConflictException(
-              'Client nonce đã được sử dụng cho cuộc trò chuyện khác.',
-            );
+          if (canonical) {
+            const rawCanonical = canonical as RawMessageRow;
+            if (rawCanonical.conversation_id === conversationId) {
+              const author = await this.getAuthorProfile(userId);
+              const [attMap, extMediaMap] = await Promise.all([
+                this.loadAttachmentsForMessages([rawCanonical.id]),
+                this.loadExternalMediaForMessages([rawCanonical.id]),
+              ]);
+              const existingAtts = attMap.get(rawCanonical.id.toString()) || [];
+              const existingMedia = extMediaMap.get(rawCanonical.id.toString()) || null;
+
+              return {
+                id: rawCanonical.id.toString(),
+                channelId: null,
+                conversationId: rawCanonical.conversation_id,
+                authorId: rawCanonical.author_id,
+                author,
+                type: rawCanonical.type,
+                content: rawCanonical.deleted_at ? null : rawCanonical.content,
+                isForwarded: Boolean(rawCanonical.is_forwarded),
+                externalMedia: existingMedia,
+                replyToId: rawCanonical.reply_to_id
+                  ? rawCanonical.reply_to_id.toString()
+                  : null,
+                clientNonce: rawCanonical.client_nonce,
+                editedAt: rawCanonical.edited_at,
+                deletedAt: rawCanonical.deleted_at,
+                ...(existingAtts.length > 0 ? { attachments: existingAtts } : {}),
+                reactions: [],
+                createdAt: rawCanonical.created_at,
+              };
+            }
           }
-          const author = await this.getAuthorProfile(userId);
-          const attMap = await this.loadAttachmentsForMessages([rawDup.id]);
-          const dupAtts = attMap.get(rawDup.id.toString());
-
-          return {
-            id: rawDup.id.toString(),
-            channelId: rawDup.channel_id,
-            conversationId: rawDup.conversation_id,
-            authorId: rawDup.author_id,
-            author,
-            type: rawDup.type,
-            content: rawDup.deleted_at ? null : rawDup.content,
-            isForwarded: Boolean(rawDup.is_forwarded),
-            replyToId: rawDup.reply_to_id
-              ? rawDup.reply_to_id.toString()
-              : null,
-            clientNonce: rawDup.client_nonce,
-            editedAt: rawDup.edited_at,
-            deletedAt: rawDup.deleted_at,
-            ...(dupAtts && dupAtts.length > 0 ? { attachments: dupAtts } : {}),
-            createdAt: rawDup.created_at,
-          };
         }
-      }
 
-      this.logger.error('Lỗi lưu tin nhắn:', insertErr);
-      throw new InternalServerErrorException('Lỗi lưu tin nhắn vào cơ sở dữ liệu.');
-    }
-
-    const raw = newMsg as RawMessageRow;
-
-    // 5. Chèn attachments vào bảng public.attachments
-    if (processedMetadata.length > 0) {
-      const rowsToInsert = processedMetadata.map((item, idx) => ({
-        message_id: raw.id,
-        storage_path: uploadedPaths[idx],
-        filename: item.normalizedFilename,
-        mime_type: item.file.mimetype,
-        size_bytes: item.file.size,
-        width: item.width,
-        height: item.height,
-      }));
-
-      const { data: createdAttachments, error: attInsertErr } =
-        await this.supabase.client
-          .from('attachments')
-          .insert(rowsToInsert)
-          .select(
-            'id, message_id, storage_path, filename, mime_type, size_bytes, width, height, created_at',
-          );
-
-      if (attInsertErr || !createdAttachments) {
-        this.logger.error('Lỗi lưu bản ghi attachments:', attInsertErr);
-        // Rollback: xoá tin nhắn và xoá storage files
-        await this.supabase.client.from('messages').delete().eq('id', raw.id);
-        await this.supabase.client.storage
-          .from('message-attachments')
-          .remove(uploadedPaths);
-        throw new InternalServerErrorException(
-          'Lỗi lưu thông tin tập tin đính kèm.',
+        throw new ConflictException(
+          'Client nonce đã được sử dụng cho cuộc trò chuyện khác.',
         );
       }
+      if (rpcErr.code === '42501') {
+        throw new ForbiddenException(rpcErr.message);
+      }
+      if (rpcErr.code === 'P0002') {
+        throw new NotFoundException(rpcErr.message);
+      }
+      if (rpcErr.code === '22023') {
+        throw new BadRequestException(rpcErr.message);
+      }
+
+      throw new InternalServerErrorException('Lỗi gửi tin nhắn vào cuộc trò chuyện.');
     }
 
-    // Tải attachments kèm signed URLs qua helper chung
-    const attMap = await this.loadAttachmentsForMessages([raw.id]);
-    const attachmentDtos = attMap.get(raw.id.toString()) || [];
-
+    // 4. Sinh signed URLs cho attachments
+    const msgId = rpcData?.id ? String(rpcData.id) : '';
+    const attMap = await this.loadAttachmentsForMessages([msgId]);
+    const attachmentDtos = attMap.get(msgId) || [];
     const author = await this.getAuthorProfile(userId);
 
     const result: MessageResponseDto = {
-      id: raw.id.toString(),
-      channelId: raw.channel_id,
-      conversationId: raw.conversation_id,
-      authorId: raw.author_id,
+      id: msgId,
+      channelId: null,
+      conversationId: rpcData?.conversationId || rpcData?.conversation_id || conversationId,
+      authorId: rpcData?.authorId || rpcData?.author_id || userId,
       author,
-      type: raw.type,
-      content: raw.deleted_at ? null : raw.content,
-      isForwarded: Boolean(raw.is_forwarded),
-      replyToId: raw.reply_to_id ? raw.reply_to_id.toString() : null,
-      clientNonce: raw.client_nonce,
-      editedAt: raw.edited_at,
-      deletedAt: raw.deleted_at,
+      type: rpcData?.type || 'default',
+      content: rpcData?.content !== undefined ? rpcData.content : text,
+      isForwarded: Boolean(rpcData?.isForwarded ?? rpcData?.is_forwarded ?? isForwarded),
+      externalMedia: (rpcData?.externalMedia as GiphyMediaDto) || (rpcData?.external_media as GiphyMediaDto) || sanitizedMedia || null,
+      replyToId: rpcData?.replyToId ? String(rpcData.replyToId) : rpcData?.reply_to_id ? String(rpcData.reply_to_id) : (dto.replyToId || null),
+      clientNonce: rpcData?.clientNonce || rpcData?.client_nonce || nonce,
+      editedAt: null,
+      deletedAt: null,
       ...(attachmentDtos.length > 0 ? { attachments: attachmentDtos } : {}),
-      createdAt: raw.created_at,
+      reactions: [],
+      createdAt: rpcData?.createdAt || rpcData?.created_at || new Date().toISOString(),
     };
 
-    this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
-      conversationId,
-      channelId: null,
-      message: result,
-    });
+    // 5. Phát sự kiện realtime (chỉ phát khi tin nhắn mới được tạo, không phát lại khi idempotent replay)
+    if (!rpcData?.isDuplicate && !rpcData?.is_duplicate) {
+      this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
+        conversationId,
+        channelId: null,
+        message: result,
+      });
+    }
 
     return result;
   }
@@ -1049,9 +1183,14 @@ export class MessagesService {
     const text = dto.content?.trim() || null;
     const uploadFiles = files || [];
 
-    if (!text && uploadFiles.length === 0) {
+    let sanitizedMedia: GiphyMediaDto | null = null;
+    if (dto.externalMedia) {
+      sanitizedMedia = validateAndSanitizeGiphyMedia(dto.externalMedia);
+    }
+
+    if (!text && uploadFiles.length === 0 && !sanitizedMedia) {
       throw new BadRequestException(
-        'Tin nhắn phải có nội dung văn bản hoặc ít nhất một file đính kèm.',
+        'Tin nhắn phải có nội dung văn bản, tệp đính kèm hoặc ảnh GIF.',
       );
     }
 
@@ -1106,34 +1245,59 @@ export class MessagesService {
 
       if (f.mimetype.startsWith('image/')) {
         try {
+          const isAnimated =
+            f.mimetype === 'image/gif' || f.mimetype === 'image/webp';
           const image = sharp(f.buffer, {
-            pages: -1,
-            animated: true,
             limitInputPixels: 100_000_000,
+            animated: isAnimated,
           });
-          const metadata = await image.metadata();
+          const meta = await image.metadata();
 
-          const frameWidth = metadata.width ?? 0;
-          const frameHeight = metadata.pageHeight ?? metadata.height ?? 0;
-          const framePages = metadata.pages ?? 1;
+          const frameWidth = meta.width ?? null;
+          const framePages =
+            isAnimated && meta.pages && meta.pages > 0 ? meta.pages : 1;
+          const frameHeight =
+            isAnimated && meta.pageHeight
+              ? meta.pageHeight
+              : meta.height
+                ? Math.floor(meta.height / framePages)
+                : null;
 
-          if (frameWidth <= 0 || frameHeight <= 0) {
+          if (!frameWidth || !frameHeight) {
             throw new BadRequestException(
-              `Kích thước hình ảnh "${normalizedFilename}" không hợp lệ.`,
+              `Không thể đọc kích thước của hình ảnh "${normalizedFilename}".`,
             );
           }
 
-          const MAX_IMAGE_DIMENSION = 8192;
-          if (frameWidth > MAX_IMAGE_DIMENSION || frameHeight > MAX_IMAGE_DIMENSION) {
+          const MAX_FRAME_DIMENSION = 4096;
+          if (
+            frameWidth > MAX_FRAME_DIMENSION ||
+            frameHeight > MAX_FRAME_DIMENSION
+          ) {
             throw new BadRequestException(
-              `Kích thước ảnh "${normalizedFilename}" (${frameWidth}x${frameHeight}) vượt quá giới hạn 8192x8192.`,
+              `Kích thước khung hình "${normalizedFilename}" (${frameWidth}x${frameHeight}px) vượt quá giới hạn tối đa ${MAX_FRAME_DIMENSION}x${MAX_FRAME_DIMENSION}px.`,
             );
           }
 
           const MAX_FRAME_COUNT = 300;
           if (framePages > MAX_FRAME_COUNT) {
             throw new BadRequestException(
-              `Ảnh động "${normalizedFilename}" có ${framePages} khung hình, vượt quá giới hạn 300 frames.`,
+              `Ảnh động "${normalizedFilename}" có ${framePages} khung hình, vượt quá giới hạn cho phép (tối đa ${MAX_FRAME_COUNT} frames).`,
+            );
+          }
+
+          const MAX_PER_FRAME_PIXELS = 25_000_000;
+          if (frameWidth * frameHeight > MAX_PER_FRAME_PIXELS) {
+            throw new BadRequestException(
+              `Kích thước giải nén của khung hình "${normalizedFilename}" vượt quá giới hạn cho phép (tối đa 25 Megapixels/frame).`,
+            );
+          }
+
+          const MAX_TOTAL_DECODED_PIXELS = 100_000_000;
+          const totalDecodedPixels = frameWidth * frameHeight * framePages;
+          if (totalDecodedPixels > MAX_TOTAL_DECODED_PIXELS) {
+            throw new BadRequestException(
+              `Tổng kích thước giải nén của ảnh động "${normalizedFilename}" vượt quá ngân sách tài nguyên cho phép (tối đa 100 Megapixels).`,
             );
           }
 
@@ -1144,7 +1308,7 @@ export class MessagesService {
             throw err;
           }
           throw new BadRequestException(
-            `Hình ảnh "${normalizedFilename}" bị lỗi hoặc không thể xử lý.`,
+            `Hình ảnh "${normalizedFilename}" bị lỗi, hỏng hoặc không thể xử lý.`,
           );
         }
       }
@@ -1159,7 +1323,7 @@ export class MessagesService {
       });
     }
 
-    // 1. Kiểm tra idempotency qua clientNonce (nếu có)
+    // 1. Kiểm tra idempotency trước khi upload
     if (dto.clientNonce) {
       const { data: existing } = await this.supabase.client
         .from('messages')
@@ -1174,13 +1338,16 @@ export class MessagesService {
         const raw = existing as RawMessageRow;
         if (raw.channel_id !== channelId) {
           throw new ConflictException(
-            'Client nonce đã được sử dụng cho cuộc trò chuyện hoặc kênh khác.',
+            'Client nonce đã được sử dụng cho kênh khác.',
           );
         }
-
         const author = await this.getAuthorProfile(userId);
-        const attMap = await this.loadAttachmentsForMessages([raw.id]);
+        const [attMap, extMediaMap] = await Promise.all([
+          this.loadAttachmentsForMessages([raw.id]),
+          this.loadExternalMediaForMessages([raw.id]),
+        ]);
         const existingAtts = attMap.get(raw.id.toString()) || [];
+        const existingMedia = extMediaMap.get(raw.id.toString()) || null;
 
         return {
           id: raw.id.toString(),
@@ -1191,6 +1358,7 @@ export class MessagesService {
           type: raw.type,
           content: raw.deleted_at ? null : raw.content,
           isForwarded: Boolean(raw.is_forwarded),
+          externalMedia: existingMedia,
           replyToId: raw.reply_to_id ? raw.reply_to_id.toString() : null,
           clientNonce: raw.client_nonce,
           editedAt: raw.edited_at,
@@ -1202,21 +1370,13 @@ export class MessagesService {
       }
     }
 
-    // 2. Upload storage objects
+    // 2. Upload file lên Storage
     const uploadedPaths: string[] = [];
-    const attachmentsToRpc: Array<{
-      storage_path: string;
-      filename: string;
-      mime_type: string;
-      size_bytes: number;
-      width: number | null;
-      height: number | null;
-    }> = [];
-
+    const attachmentsToRpc: any[] = [];
     try {
       for (const item of processedMetadata) {
-        const fileUuid = crypto.randomUUID();
-        const storagePath = `channels/${channelId}/${fileUuid}${item.ext}`;
+        const uniqueId = crypto.randomUUID();
+        const storagePath = `channels/${channelId}/${uniqueId}${item.ext}`;
 
         const { error: uploadErr } = await this.supabase.client.storage
           .from('message-attachments')
@@ -1226,8 +1386,8 @@ export class MessagesService {
           });
 
         if (uploadErr) {
-          this.logger.error(`Lỗi upload storage cho channel: ${uploadErr.message}`);
-          throw new Error(`Upload storage failed: ${uploadErr.message}`);
+          this.logger.error('Lỗi upload file lên Storage:', uploadErr);
+          throw uploadErr;
         }
 
         uploadedPaths.push(storagePath);
@@ -1251,6 +1411,8 @@ export class MessagesService {
       );
     }
 
+    const nonce = dto.clientNonce || crypto.randomUUID();
+
     // 3. Ghi DB nguyên tử qua RPC create_channel_message
     const { data: rpcData, error: rpcErr } = await this.supabase.client.rpc(
       'create_channel_message',
@@ -1258,10 +1420,11 @@ export class MessagesService {
         p_channel_id: channelId,
         p_author_id: userId,
         p_content: text,
-        p_client_nonce: dto.clientNonce ?? null,
+        p_client_nonce: nonce,
         p_reply_to_id: dto.replyToId ? BigInt(dto.replyToId) : null,
         p_attachments: attachmentsToRpc,
         p_is_forwarded: Boolean(isForwarded),
+        p_external_media: sanitizedMedia,
       },
     );
 
@@ -1279,22 +1442,26 @@ export class MessagesService {
 
       if (rpcErr.code === '23505') {
         // Kiểm tra canonical message khi có race condition concurrent duplicate nonce
-        if (dto.clientNonce) {
+        if (nonce) {
           const { data: canonical } = await this.supabase.client
             .from('messages')
             .select(
               'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
             )
             .eq('author_id', userId)
-            .eq('client_nonce', dto.clientNonce)
+            .eq('client_nonce', nonce)
             .maybeSingle();
 
           if (canonical) {
             const rawCanonical = canonical as RawMessageRow;
             if (rawCanonical.channel_id === channelId) {
               const author = await this.getAuthorProfile(userId);
-              const attMap = await this.loadAttachmentsForMessages([rawCanonical.id]);
+              const [attMap, extMediaMap] = await Promise.all([
+                this.loadAttachmentsForMessages([rawCanonical.id]),
+                this.loadExternalMediaForMessages([rawCanonical.id]),
+              ]);
               const existingAtts = attMap.get(rawCanonical.id.toString()) || [];
+              const existingMedia = extMediaMap.get(rawCanonical.id.toString()) || null;
 
               return {
                 id: rawCanonical.id.toString(),
@@ -1305,6 +1472,7 @@ export class MessagesService {
                 type: rawCanonical.type,
                 content: rawCanonical.deleted_at ? null : rawCanonical.content,
                 isForwarded: Boolean(rawCanonical.is_forwarded),
+                externalMedia: existingMedia,
                 replyToId: rawCanonical.reply_to_id ? rawCanonical.reply_to_id.toString() : null,
                 clientNonce: rawCanonical.client_nonce,
                 editedAt: rawCanonical.edited_at,
@@ -1335,7 +1503,7 @@ export class MessagesService {
     }
 
     // 4. Sinh signed URLs cho attachments
-    const msgId = rpcData.id;
+    const msgId = rpcData?.id ? String(rpcData.id) : '';
     const attMap = await this.loadAttachmentsForMessages([msgId]);
     const attachmentDtos = attMap.get(msgId) || [];
 
@@ -1343,28 +1511,31 @@ export class MessagesService {
 
     const result: MessageResponseDto = {
       id: msgId,
-      channelId: rpcData.channelId,
+      channelId: rpcData?.channelId || rpcData?.channel_id || channelId,
       conversationId: null,
-      authorId: rpcData.authorId,
+      authorId: rpcData?.authorId || rpcData?.author_id || userId,
       author,
-      type: rpcData.type,
-      content: rpcData.content,
-      isForwarded: Boolean(rpcData.isForwarded),
-      replyToId: rpcData.replyToId,
-      clientNonce: rpcData.clientNonce,
+      type: rpcData?.type || 'default',
+      content: rpcData?.content !== undefined ? rpcData.content : text,
+      isForwarded: Boolean(rpcData?.isForwarded ?? rpcData?.is_forwarded ?? isForwarded),
+      externalMedia: (rpcData?.externalMedia as GiphyMediaDto) || (rpcData?.external_media as GiphyMediaDto) || sanitizedMedia || null,
+      replyToId: rpcData?.replyToId ? String(rpcData.replyToId) : rpcData?.reply_to_id ? String(rpcData.reply_to_id) : (dto.replyToId || null),
+      clientNonce: rpcData?.clientNonce || rpcData?.client_nonce || nonce,
       editedAt: null,
       deletedAt: null,
       ...(attachmentDtos.length > 0 ? { attachments: attachmentDtos } : {}),
       reactions: [],
-      createdAt: rpcData.createdAt,
+      createdAt: rpcData?.createdAt || rpcData?.created_at || new Date().toISOString(),
     };
 
-    // 5. Phát sự kiện realtime
-    this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
-      conversationId: null,
-      channelId,
-      message: result,
-    });
+    // 5. Phát sự kiện realtime (chỉ phát khi tin nhắn mới được tạo, không phát lại khi idempotent replay)
+    if (!rpcData?.isDuplicate && !rpcData?.is_duplicate) {
+      this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
+        conversationId: null,
+        channelId,
+        message: result,
+      });
+    }
 
     return result;
   }
@@ -1425,6 +1596,12 @@ export class MessagesService {
 
     const rawUpdated = updated as RawMessageRow;
     const author = await this.getAuthorProfile(userId);
+    const [attMap, extMediaMap] = await Promise.all([
+      this.loadAttachmentsForMessages([rawUpdated.id]),
+      this.loadExternalMediaForMessages([rawUpdated.id]),
+    ]);
+    const attachmentDtos = attMap.get(rawUpdated.id.toString()) || [];
+    const extMedia = extMediaMap.get(rawUpdated.id.toString()) || null;
 
     const result: MessageResponseDto = {
       id: rawUpdated.id.toString(),
@@ -1435,12 +1612,14 @@ export class MessagesService {
       type: rawUpdated.type,
       content: rawUpdated.content,
       isForwarded: Boolean(rawUpdated.is_forwarded),
+      externalMedia: extMedia,
       replyToId: rawUpdated.reply_to_id
         ? rawUpdated.reply_to_id.toString()
         : null,
       clientNonce: rawUpdated.client_nonce,
       editedAt: rawUpdated.edited_at,
       deletedAt: rawUpdated.deleted_at,
+      ...(attachmentDtos.length > 0 ? { attachments: attachmentDtos } : {}),
       createdAt: rawUpdated.created_at,
     };
 
@@ -1454,132 +1633,205 @@ export class MessagesService {
   }
 
   /**
-   * Xoá tin nhắn (soft delete: set deleted_at = now()).
+   * Ẩn tin nhắn ở phía người dùng (chỉ riêng user này không thấy tin nhắn nữa).
+   * Ghi vào bảng message_hidden_users và phát event user-scoped message:hidden-for-user.
    */
-  async deleteMessage(
+  async hideMessageForUser(
     userId: string,
     messageId: string,
-  ): Promise<{ id: string; deleted: boolean; conversationId: string | null; channelId: string | null }> {
-    const { data: existing, error: findErr } = await this.supabase.client
-      .from('messages')
-      .select('id, conversation_id, channel_id, author_id, deleted_at')
-      .eq('id', messageId)
-      .maybeSingle();
+  ): Promise<{ id: string; hidden: boolean; scope: 'for_me'; conversationId: string | null; channelId: string | null }> {
+    let rpcRes: any = null;
+    try {
+      const { data, error: rpcErr } = await this.supabase.client.rpc(
+        'hide_message_for_user',
+        {
+          p_user_id: userId,
+          p_message_id: Number(messageId),
+        },
+      );
 
-    if (findErr || !existing) {
-      throw new NotFoundException('Không tìm thấy tin nhắn.');
-    }
-
-    const raw = existing as RawMessageRow;
-    if (raw.channel_id) {
-      if (raw.author_id !== userId) {
-        const perms = await this.serverPermissionsService.getChannelPermissions(userId, raw.channel_id);
-        if ((perms & Permission.MANAGE_MESSAGES) === 0n) {
-          throw new ForbiddenException('Bạn không có quyền xoá tin nhắn này.');
+      if (!rpcErr && data) {
+        rpcRes = data;
+      } else if (rpcErr) {
+        if (rpcErr.code === 'P0002') {
+          throw new NotFoundException('Không tìm thấy tin nhắn.');
+        }
+        if (rpcErr.code === '42501') {
+          throw new ForbiddenException('Bạn không có quyền thực hiện thao tác này.');
+        }
+        if (rpcErr.code !== 'PGRST202' && rpcErr.code !== '42883') {
+          this.logger.error(`Lỗi RPC hide_message_for_user (msg: ${messageId}):`, rpcErr);
+          throw new InternalServerErrorException('Lỗi khi ẩn tin nhắn.');
         }
       }
-    } else {
-      if (raw.author_id !== userId) {
-        throw new ForbiddenException('Bạn chỉ có thể xoá tin nhắn của chính mình.');
+    } catch (e) {
+      if (e instanceof NotFoundException || e instanceof ForbiddenException || e instanceof InternalServerErrorException) {
+        throw e;
       }
     }
 
-    // 1. Tìm các attachments đính kèm (nếu có) để dọn dẹp Storage & DB metadata
-    const { data: attRecords, error: attFindErr } = await this.supabase.client
-      .from('attachments')
-      .select('id, storage_path')
-      .eq('message_id', messageId);
+    let conversationId = rpcRes?.conversationId ?? null;
+    let channelId = rpcRes?.channelId ?? null;
 
-    if (attFindErr) {
-      this.logger.error(
-        `Lỗi truy vấn attachments khi xoá message ${messageId}:`,
-        attFindErr,
-      );
-      throw new InternalServerErrorException(
-        'Lỗi kiểm tra tệp đính kèm khi xoá tin nhắn.',
-      );
-    }
+    if (!rpcRes) {
+      const { data: msg } = await this.supabase.client
+        .from('messages')
+        .select('id, conversation_id, channel_id')
+        .eq('id', messageId)
+        .maybeSingle();
 
-    if (attRecords && attRecords.length > 0) {
-      const paths = attRecords.map((a) => a.storage_path);
-      const { error: storageDelErr } = await this.supabase.client.storage
-        .from('message-attachments')
-        .remove(paths);
-
-      if (storageDelErr) {
-        this.logger.error(
-          `Lỗi dọn dẹp storage objects của message ${messageId}:`,
-          storageDelErr,
-        );
-        throw new InternalServerErrorException(
-          'Lỗi dọn dẹp tập tin đính kèm khi xoá tin nhắn.',
-        );
+      if (!msg) {
+        throw new NotFoundException('Không tìm thấy tin nhắn.');
       }
 
-      const { error: attDelErr } = await this.supabase.client
-        .from('attachments')
-        .delete()
-        .eq('message_id', messageId);
+      conversationId = msg.conversation_id;
+      channelId = msg.channel_id;
 
-      if (attDelErr) {
-        this.logger.error(
-          `Lỗi xoá metadata attachments của message ${messageId}:`,
-          attDelErr,
-        );
-        throw new InternalServerErrorException(
-          'Lỗi xoá dữ liệu tệp đính kèm trong cơ sở dữ liệu.',
-        );
+      try {
+        await this.supabase.client.from('message_hidden_users').upsert({
+          user_id: userId,
+          message_id: Number(messageId),
+          hidden_at: new Date().toISOString(),
+        });
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
       }
     }
 
-    // 2. Cập nhật soft delete trên bảng messages
-    const now = new Date().toISOString();
-    const { error: delErr } = await this.supabase.client
-      .from('messages')
-      .update({
-        content: null,
-        deleted_at: now,
-      })
-      .eq('id', messageId);
+    // Phát event user-scoped tới Room riêng của user
+    this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER, {
+      userId,
+      messageId,
+      conversationId,
+      channelId,
+    });
 
-    if (delErr) {
-      this.logger.error('Lỗi soft-delete tin nhắn:', delErr);
-      throw new InternalServerErrorException('Lỗi xoá tin nhắn.');
-    }
+    return {
+      id: messageId,
+      hidden: true,
+      scope: 'for_me',
+      conversationId,
+      channelId,
+    };
+  }
 
-    // 3. Dọn dẹp toàn bộ reactions của tin nhắn sau khi soft-delete thành công
+  /**
+   * Thu hồi tin nhắn cho mọi người (xóa hoàn toàn đối với tất cả thành viên).
+   * Thực hiện giao dịch nguyên tử trong RPC PostgreSQL, enqueue attachments vào storage outbox,
+   * dọn dẹp reactions/GIPHY media, redact content = null và phát realtime CHAT_EVENTS.MESSAGE_DELETED.
+   */
+  async recallMessageForEveryone(
+    userId: string,
+    messageId: string,
+  ): Promise<{ id: string; deleted: boolean; scope: 'everyone'; conversationId: string | null; channelId: string | null }> {
+    let rpcRes: any = null;
     try {
-      const { error: reactCleanupErr } = await this.supabase.client
-        .from('message_reactions')
-        .delete()
-        .eq('message_id', messageId);
-
-      if (reactCleanupErr) {
-        this.logger.error(
-          `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
-          reactCleanupErr,
-        );
-      }
-    } catch (cleanupEx) {
-      this.logger.error(
-        `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
-        cleanupEx,
+      const { data, error: rpcErr } = await this.supabase.client.rpc(
+        'recall_message_for_everyone',
+        {
+          p_user_id: userId,
+          p_message_id: Number(messageId),
+        },
       );
+
+      if (!rpcErr && data) {
+        rpcRes = data;
+      } else if (rpcErr) {
+        if (rpcErr.code === 'P0002') {
+          throw new NotFoundException('Không tìm thấy tin nhắn.');
+        }
+        if (rpcErr.code === '42501') {
+          throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+        }
+        if (rpcErr.code !== 'PGRST202' && rpcErr.code !== '42883') {
+          this.logger.error(`Lỗi RPC recall_message_for_everyone (msg: ${messageId}):`, rpcErr);
+          throw new InternalServerErrorException('Lỗi khi thu hồi tin nhắn.');
+        }
+      }
+    } catch (e) {
+      if (e instanceof NotFoundException || e instanceof ForbiddenException || e instanceof InternalServerErrorException) {
+        throw e;
+      }
     }
 
-    // 4. Phát sự kiện realtime thông báo tin nhắn đã bị xoá
+    let conversationId = rpcRes?.conversationId ?? null;
+    let channelId = rpcRes?.channelId ?? null;
+
+    if (!rpcRes) {
+      const { data: msg } = await this.supabase.client
+        .from('messages')
+        .select('id, conversation_id, channel_id, author_id, deleted_at')
+        .eq('id', messageId)
+        .maybeSingle();
+
+      if (!msg) {
+        throw new NotFoundException('Không tìm thấy tin nhắn.');
+      }
+
+      conversationId = msg.conversation_id;
+      channelId = msg.channel_id;
+
+      if (msg.author_id !== userId) {
+        if (channelId) {
+          const perms = await this.serverPermissionsService.getChannelPermissions(
+            userId,
+            channelId,
+          );
+          const canManage =
+            (perms & Permission.MANAGE_MESSAGES) !== 0n ||
+            (perms & Permission.ADMINISTRATOR) !== 0n;
+          if (!canManage) {
+            throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+          }
+        } else {
+          throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+        }
+      }
+
+      if (!msg.deleted_at) {
+        await this.supabase.client
+          .from('messages')
+          .update({ content: null, deleted_at: new Date().toISOString() })
+          .eq('id', messageId);
+
+        await Promise.all([
+          this.supabase.client.from('message_reactions').delete().eq('message_id', messageId),
+          this.supabase.client.from('message_external_media').delete().eq('message_id', messageId),
+        ]);
+      }
+    }
+
+    // Phát event realtime thông báo tin nhắn đã bị xóa tới toàn bộ phòng chat
     this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_DELETED, {
-      conversationId: raw.conversation_id,
-      channelId: raw.channel_id ?? null,
+      conversationId,
+      channelId,
       messageId,
     });
 
     return {
       id: messageId,
       deleted: true,
-      conversationId: raw.conversation_id,
-      channelId: raw.channel_id ?? null,
+      scope: 'everyone',
+      conversationId,
+      channelId,
     };
+  }
+
+  /**
+   * Xoá / Thu hồi tin nhắn (hỗ trợ 2 chế độ: 'for_me' và 'everyone').
+   */
+  async deleteMessage(
+    userId: string,
+    messageId: string,
+    scope: 'for_me' | 'everyone' = 'for_me',
+  ): Promise<{ id: string; deleted?: boolean; hidden?: boolean; scope: 'for_me' | 'everyone'; conversationId: string | null; channelId: string | null }> {
+    if (scope === 'for_me') {
+      return this.hideMessageForUser(userId, messageId);
+    }
+    if (scope === 'everyone') {
+      return this.recallMessageForEveryone(userId, messageId);
+    }
+    throw new BadRequestException('Giá trị scope không hợp lệ. Phải là "for_me" hoặc "everyone".');
   }
 
   /**
@@ -2087,7 +2339,7 @@ export class MessagesService {
             channel_id: channelId,
             conversation_id: null,
             last_read_message_id: messageId,
-            last_read_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           },
           { onConflict: 'user_id,channel_id' },
         );
@@ -2189,22 +2441,26 @@ export class MessagesService {
       throw new NotFoundException('Tin nhắn nguồn không tồn tại hoặc đã bị xóa.');
     }
 
-    // 3. Load source attachments
-    const { data: rawSrcAtts, error: srcAttErr } = await this.supabase.client
-      .from('attachments')
-      .select('id, storage_path, filename, mime_type, size_bytes, width, height')
-      .eq('message_id', sourceMsg.id);
+    // 3. Load source attachments & externalMedia
+    const [rawSrcAtts, rawSrcMedia] = await Promise.all([
+      this.supabase.client
+        .from('attachments')
+        .select('id, storage_path, filename, mime_type, size_bytes, width, height')
+        .eq('message_id', sourceMsg.id),
+      this.loadExternalMediaForMessages([sourceMsg.id]),
+    ]);
 
-    if (srcAttErr) {
-      this.logger.error('Lỗi tải metadata attachments nguồn:', srcAttErr);
+    if (rawSrcAtts.error) {
+      this.logger.error('Lỗi tải metadata attachments nguồn:', rawSrcAtts.error);
       throw new InternalServerErrorException('Không thể đọc thông tin tệp đính kèm của tin nhắn nguồn.');
     }
 
-    const sourceAttachments = (rawSrcAtts ?? []) as RawAttachmentRow[];
+    const sourceAttachments = (rawSrcAtts.data ?? []) as RawAttachmentRow[];
+    const sourceExternalMedia = rawSrcMedia.get(sourceMsg.id.toString()) || null;
     const textContent = sourceMsg.content?.trim() || null;
 
-    if (!textContent && sourceAttachments.length === 0) {
-      throw new BadRequestException('Tin nhắn nguồn không có nội dung hoặc tệp đính kèm để chuyển tiếp.');
+    if (!textContent && sourceAttachments.length === 0 && !sourceExternalMedia) {
+      throw new BadRequestException('Tin nhắn nguồn không có nội dung, tệp đính kèm hoặc ảnh GIF để chuyển tiếp.');
     }
 
     // Kiểm tra thêm quyền upload file nếu forward vào channel có attachments
@@ -2228,8 +2484,12 @@ export class MessagesService {
         throw new ConflictException('Client nonce đã được sử dụng cho cuộc trò chuyện hoặc kênh khác.');
       }
       const author = await this.getAuthorProfile(userId);
-      const attMap = await this.loadAttachmentsForMessages([raw.id]);
+      const [attMap, extMediaMap] = await Promise.all([
+        this.loadAttachmentsForMessages([raw.id]),
+        this.loadExternalMediaForMessages([raw.id]),
+      ]);
       const existingAtts = attMap.get(raw.id.toString());
+      const existingMedia = extMediaMap.get(raw.id.toString()) || null;
 
       return {
         id: raw.id.toString(),
@@ -2240,6 +2500,7 @@ export class MessagesService {
         type: raw.type,
         content: raw.deleted_at ? null : raw.content,
         isForwarded: true,
+        externalMedia: existingMedia,
         replyToId: null,
         clientNonce: raw.client_nonce,
         editedAt: raw.edited_at,
@@ -2312,16 +2573,19 @@ export class MessagesService {
       throw new InternalServerErrorException('Không thể sao chép tệp đính kèm khi chuyển tiếp.');
     }
 
-    // 7. Atomic Write: Ghi message + attachments
+    // 7. Atomic Write: Ghi message + attachments + externalMedia
     if (dto.targetConversationId) {
       const { data: rpcResult, error: rpcErr } = await this.supabase.client.rpc(
-        'create_forwarded_message',
+        'create_conversation_message',
         {
-          p_author_id: userId,
           p_conversation_id: dto.targetConversationId,
+          p_author_id: userId,
           p_content: textContent,
           p_client_nonce: dto.clientNonce,
+          p_reply_to_id: null,
           p_attachments: newAttachmentsData,
+          p_is_forwarded: true,
+          p_external_media: sourceExternalMedia,
         },
       );
 
@@ -2329,8 +2593,7 @@ export class MessagesService {
         if (
           rpcErr.code === '23505' ||
           rpcErr.message?.includes('23505') ||
-          rpcErr.message?.includes('duplicate key') ||
-          rpcErr.message?.includes('idx_messages_nonce')
+          rpcErr.message?.includes('duplicate key')
         ) {
           await this.cleanupStorageObjects(copiedPaths, correlationId);
           const { data: canonical, error: canonErr } = await this.supabase.client
@@ -2355,8 +2618,12 @@ export class MessagesService {
           }
 
           const author = await this.getAuthorProfile(userId);
-          const attMap = await this.loadAttachmentsForMessages([raw.id]);
+          const [attMap, extMediaMap] = await Promise.all([
+            this.loadAttachmentsForMessages([raw.id]),
+            this.loadExternalMediaForMessages([raw.id]),
+          ]);
           const existingAtts = attMap.get(raw.id.toString());
+          const existingMedia = extMediaMap.get(raw.id.toString()) || null;
 
           return {
             id: raw.id.toString(),
@@ -2367,6 +2634,7 @@ export class MessagesService {
             type: raw.type,
             content: raw.deleted_at ? null : raw.content,
             isForwarded: true,
+            externalMedia: existingMedia,
             replyToId: null,
             clientNonce: raw.client_nonce,
             editedAt: raw.edited_at,
@@ -2378,7 +2646,6 @@ export class MessagesService {
         }
 
         await this.cleanupStorageObjects(copiedPaths, correlationId);
-
         if (
           rpcErr.code === '42883' ||
           rpcErr.message?.includes('PGRST202') ||
@@ -2388,36 +2655,13 @@ export class MessagesService {
             'Chức năng chuyển tiếp tin nhắn chưa sẵn sàng (migration database chưa được triển khai).',
           );
         }
-
-        throw new InternalServerErrorException('Lỗi tạo tin nhắn chuyển tiếp.');
+        throw new InternalServerErrorException('Lỗi tạo tin nhắn chuyển tiếp vào cuộc trò chuyện.');
       }
 
-      const row = Array.isArray(rpcResult) ? rpcResult[0] : rpcResult;
-      const msgId = String(row.message_id || row.id);
+      const msgId = rpcResult.id;
       const author = await this.getAuthorProfile(userId);
-      const createdAttachmentRows: RawAttachmentRow[] = (row.attachments as RawAttachmentRow[]) ?? [];
-
-      let finalAttachments: AttachmentResponseDto[] = [];
-      if (createdAttachmentRows.length > 0) {
-        const signedUrlPromises = createdAttachmentRows.map(async (att) => {
-          const { data: urlData } = await this.supabase.client.storage
-            .from('message-attachments')
-            .createSignedUrl(att.storage_path, 3600);
-
-          return {
-            id: att.id,
-            filename: att.filename,
-            mimeType: att.mime_type,
-            sizeBytes: Number(att.size_bytes),
-            width: att.width,
-            height: att.height,
-            signedUrl: urlData?.signedUrl ?? null,
-            isAvailable: Boolean(urlData?.signedUrl),
-          };
-        });
-
-        finalAttachments = await Promise.all(signedUrlPromises);
-      }
+      const attMap = await this.loadAttachmentsForMessages([msgId]);
+      const finalAttachments = attMap.get(msgId) || [];
 
       const responseDto: MessageResponseDto = {
         id: msgId,
@@ -2428,13 +2672,14 @@ export class MessagesService {
         type: 'default',
         content: textContent,
         isForwarded: true,
+        externalMedia: (rpcResult.externalMedia as GiphyMediaDto) || sourceExternalMedia || null,
         replyToId: null,
         clientNonce: dto.clientNonce,
         editedAt: null,
         deletedAt: null,
         ...(finalAttachments.length > 0 ? { attachments: finalAttachments } : {}),
         reactions: [],
-        createdAt: row.created_at || new Date().toISOString(),
+        createdAt: rpcResult.createdAt || new Date().toISOString(),
       };
 
       this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
@@ -2456,6 +2701,7 @@ export class MessagesService {
           p_reply_to_id: null,
           p_attachments: newAttachmentsData,
           p_is_forwarded: true,
+          p_external_media: sourceExternalMedia,
         },
       );
 
@@ -2481,6 +2727,7 @@ export class MessagesService {
         type: 'default',
         content: textContent,
         isForwarded: true,
+        externalMedia: (rpcResult.externalMedia as GiphyMediaDto) || sourceExternalMedia || null,
         replyToId: null,
         clientNonce: dto.clientNonce,
         editedAt: null,

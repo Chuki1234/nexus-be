@@ -22,7 +22,10 @@ import {
 function defaultTableHandler(table: string) {
   if (table === 'attachments') {
     return {
-      select: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnValue({
+        eq: jest.fn().mockResolvedValue({ data: [], error: null }),
+        in: jest.fn().mockResolvedValue({ data: [], error: null }),
+      }),
       in: jest.fn().mockResolvedValue({ data: [], error: null }),
       insert: jest.fn().mockReturnValue({
         select: jest.fn().mockResolvedValue({ data: [], error: null }),
@@ -30,6 +33,14 @@ function defaultTableHandler(table: string) {
       delete: jest.fn().mockReturnValue({
         eq: jest.fn().mockResolvedValue({ error: null }),
       }),
+    };
+  }
+  if (table === 'message_external_media') {
+    return {
+      select: jest.fn().mockReturnThis(),
+      in: jest.fn().mockResolvedValue({ data: [], error: null }),
+      eq: jest.fn().mockReturnThis(),
+      maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
     };
   }
   if (table === 'message_reactions') {
@@ -52,7 +63,7 @@ function defaultTableHandler(table: string) {
     update: jest.fn().mockReturnThis(),
     delete: jest.fn().mockReturnThis(),
     eq: jest.fn().mockReturnThis(),
-    in: jest.fn().mockReturnThis(),
+    in: jest.fn().mockResolvedValue({ data: [], error: null }),
     order: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
@@ -80,6 +91,56 @@ describe('MessagesService', () => {
       client: {
         from: jest.fn().mockImplementation((table: string) => defaultTableHandler(table)),
         rpc: jest.fn().mockImplementation((name: string, params: any) => {
+          if (name === 'create_conversation_message') {
+            const returnedId =
+              params.p_client_nonce === 'nonce-gif' ? '201'
+              : (params.p_client_nonce === 'nonce-456' ? '9007199254740999999'
+              : (params.p_client_nonce === 'nonce-1' ? '200'
+              : (params.p_client_nonce === 'nonce-att' ? '200'
+              : (params.p_client_nonce === 'nonce-sec' ? '200'
+              : (params.p_client_nonce === 'nonce-docx' ? '1002'
+              : (params.p_content === 'Check ảnh này nhé' ? '12345'
+              : (params.p_attachments?.length && !params.p_content ? '12346'
+              : (params.p_content?.includes('GIF') ? '2001'
+              : '1001'))))))));
+
+            return Promise.resolve({
+              data: {
+                id: returnedId,
+                conversationId: params.p_conversation_id,
+                authorId: params.p_author_id,
+                content: params.p_content,
+                type: 'default',
+                isForwarded: params.p_is_forwarded || false,
+                replyToId: params.p_reply_to_id ? params.p_reply_to_id.toString() : null,
+                clientNonce: params.p_client_nonce,
+                externalMedia: params.p_external_media || null,
+                attachments: params.p_attachments || [],
+                reactions: [],
+                createdAt: '2026-08-25T12:00:00.000Z',
+              },
+              error: null,
+            });
+          }
+          if (name === 'create_channel_message') {
+            return Promise.resolve({
+              data: {
+                id: '2001',
+                channelId: params.p_channel_id,
+                authorId: params.p_author_id,
+                content: params.p_content,
+                type: 'default',
+                isForwarded: params.p_is_forwarded || false,
+                replyToId: params.p_reply_to_id ? params.p_reply_to_id.toString() : null,
+                clientNonce: params.p_client_nonce,
+                externalMedia: params.p_external_media || null,
+                attachments: params.p_attachments || [],
+                reactions: [],
+                createdAt: '2026-08-25T12:00:00.000Z',
+              },
+              error: null,
+            });
+          }
           if (name === 'create_forwarded_message') {
             return Promise.resolve({
               data: [
@@ -108,6 +169,69 @@ describe('MessagesService', () => {
                   })),
                 },
               ],
+              error: null,
+            });
+          }
+          if (name === 'get_conversation_messages_paged') {
+            return Promise.resolve({
+              data: [
+                {
+                  id: '9007199254740999999',
+                  channel_id: null,
+                  conversation_id: params.p_conversation_id,
+                  author_id: 'user-1',
+                  type: 'default',
+                  content: 'Hello Huge BigInt',
+                  reply_to_id: null,
+                  client_nonce: 'nonce-huge',
+                  edited_at: null,
+                  deleted_at: null,
+                  created_at: '2026-08-22T10:00:00Z',
+                },
+              ],
+              error: null,
+            });
+          }
+          if (name === 'get_channel_messages_paged') {
+            return Promise.resolve({
+              data: [
+                {
+                  id: '6001',
+                  channel_id: params.p_channel_id,
+                  conversation_id: null,
+                  author_id: 'user-1',
+                  type: 'default',
+                  content: null,
+                  reply_to_id: null,
+                  client_nonce: 'nonce-gif-msg',
+                  edited_at: null,
+                  deleted_at: null,
+                  created_at: '2026-08-25T12:00:00Z',
+                },
+              ],
+              error: null,
+            });
+          }
+          if (name === 'hide_message_for_user') {
+            return Promise.resolve({
+              data: {
+                id: params.p_message_id?.toString() || '101',
+                conversationId: 'conv-1',
+                channelId: null,
+                hidden: true,
+              },
+              error: null,
+            });
+          }
+          if (name === 'recall_message_for_everyone') {
+            return Promise.resolve({
+              data: {
+                id: params.p_message_id?.toString() || '101',
+                conversationId: 'conv-1',
+                channelId: null,
+                recalled: true,
+                storagePaths: ['conversations/conv-1/file.png'],
+              },
               error: null,
             });
           }
@@ -275,7 +399,7 @@ describe('MessagesService', () => {
             maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
           };
         }
-        return {};
+        return defaultTableHandler(table);
       });
 
       await expect(
@@ -298,7 +422,7 @@ describe('MessagesService', () => {
             }),
           };
         }
-        return {};
+        return defaultTableHandler(table);
       });
 
       await expect(
@@ -449,6 +573,11 @@ describe('MessagesService', () => {
         return defaultTableHandler(table);
       });
 
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: '23505', message: 'duplicate key' },
+      });
+
       const res = await service.createConversationMessage('user-1', 'conv-1', {
         content: 'Race condition text',
         clientNonce: 'nonce-race',
@@ -491,14 +620,14 @@ describe('MessagesService', () => {
             maybeSingle: jest.fn().mockImplementation(() => {
               selectCount++;
               if (selectCount === 1) {
-                // Pre-check clientNonce: không có tin nhắn trùng
-                return Promise.resolve({ data: null, error: null });
+                // Kiểm tra tin nhắn reply tồn tại
+                return Promise.resolve({
+                  data: { id: '9007199254740999888', conversation_id: 'conv-1' },
+                  error: null,
+                });
               }
-              // Kiểm tra tin nhắn reply tồn tại
-              return Promise.resolve({
-                data: { id: '9007199254740999888', conversation_id: 'conv-1' },
-                error: null,
-              });
+              // Pre-check clientNonce: không có tin nhắn trùng
+              return Promise.resolve({ data: null, error: null });
             }),
             insert: insertMock,
           };
@@ -529,9 +658,10 @@ describe('MessagesService', () => {
 
       expect(res.id).toBe('9007199254740999999');
       expect(res.replyToId).toBe('9007199254740999888');
-      expect(insertMock).toHaveBeenCalledWith(
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'create_conversation_message',
         expect.objectContaining({
-          reply_to_id: '9007199254740999888',
+          p_reply_to_id: BigInt('9007199254740999888'),
         }),
       );
       expect(mockEventEmitter.emit).toHaveBeenCalledWith(
@@ -878,43 +1008,14 @@ describe('MessagesService', () => {
         conversation_id: 'conv-1',
       };
 
-      const deleteMessageMock = jest.fn().mockReturnValue({
-        eq: jest.fn().mockResolvedValue({ error: null }),
-      });
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            insert: jest.fn().mockReturnValue({
-              select: jest.fn().mockReturnValue({
-                single: jest.fn().mockResolvedValue({
-                  data: mockCreatedMsg,
-                  error: null,
-                }),
-              }),
-            }),
-            delete: deleteMessageMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            insert: jest.fn().mockReturnValue({
-              select: jest.fn().mockResolvedValue({
-                data: null,
-                error: { message: 'Database constraint error' },
-              }),
-            }),
-          };
-        }
-        return {};
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'Lỗi lưu thông tin tập tin đính kèm.', code: '22023' },
       });
 
       await expect(
         service.createConversationMessage('user-1', 'conv-1', {}, [mockFile]),
       ).rejects.toThrow('Lỗi lưu thông tin tập tin đính kèm.');
-
-      // Kiểm tra xem message đã được rollback xóa chưa
-      expect(deleteMessageMock).toHaveBeenCalled();
     });
 
     it('từ chối membership trước khi upload tệp (không gọi storage.upload)', async () => {
@@ -1046,26 +1147,19 @@ describe('MessagesService', () => {
         }),
       });
 
-      let insertCallCount = 0;
+      let selectNonceCount = 0;
       mockSupabase.client.from.mockImplementation((table: string) => {
         if (table === 'messages') {
           return {
             select: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
+            maybeSingle: jest.fn().mockImplementation(() => {
+              selectNonceCount++;
               // Lần 1: check trước insert không thấy; Lần 2: sau 23505 thấy dupMsg
-              data: insertCallCount === 0 ? null : dupMsg,
-              error: null,
-            }),
-            insert: jest.fn().mockImplementation(() => {
-              insertCallCount++;
-              return {
-                select: jest.fn().mockReturnThis(),
-                single: jest.fn().mockResolvedValue({
-                  data: null,
-                  error: { code: '23505', message: 'duplicate key value violates unique constraint' },
-                }),
-              };
+              return Promise.resolve({
+                data: selectNonceCount === 1 ? null : dupMsg,
+                error: null,
+              });
             }),
           };
         }
@@ -1089,6 +1183,11 @@ describe('MessagesService', () => {
           };
         }
         return defaultTableHandler(table);
+      });
+
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: '23505', message: 'duplicate key value violates unique constraint' },
       });
 
       const res = await service.createConversationMessage(
@@ -1216,6 +1315,29 @@ describe('MessagesService', () => {
         mimetype: 'image/gif',
         size: validGifBuffer.length,
       } as Express.Multer.File;
+
+      mockSupabase.client.rpc.mockImplementationOnce((name: string, params: any) => {
+        if (params.p_attachments) {
+          insertedAttachmentRows.push(...params.p_attachments);
+        }
+        return Promise.resolve({
+          data: {
+            id: '2001',
+            conversationId: params.p_conversation_id,
+            authorId: params.p_author_id,
+            content: params.p_content,
+            type: 'default',
+            isForwarded: false,
+            replyToId: null,
+            clientNonce: null,
+            externalMedia: null,
+            attachments: params.p_attachments || [],
+            reactions: [],
+            createdAt: '2026-08-25T12:00:00.000Z',
+          },
+          error: null,
+        });
+      });
 
       const res = await service.createConversationMessage(
         'user-1',
@@ -1427,80 +1549,39 @@ describe('MessagesService', () => {
   });
 
   describe('deleteMessage', () => {
-    it('chặn xoá tin nhắn của người khác (403)', async () => {
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                author_id: 'user-other',
-              },
-              error: null,
-            }),
-          };
-        }
-        return {};
-      });
-
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        ForbiddenException,
+    it('hideMessageForUser: gọi RPC hide_message_for_user và emit user-scoped CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER', async () => {
+      const res = await service.hideMessageForUser('user-1', '101');
+      expect(res.hidden).toBe(true);
+      expect(res.scope).toBe('for_me');
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'hide_message_for_user',
+        {
+          p_user_id: 'user-1',
+          p_message_id: 101,
+        },
+      );
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER,
+        {
+          userId: 'user-1',
+          messageId: '101',
+          conversationId: 'conv-1',
+          channelId: null,
+        },
       );
     });
 
-    it('soft delete tin nhắn thành công, dọn dẹp Storage objects và emit domain event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({ error: null });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-
-      const deleteAttMock = jest.fn().mockReturnValue({
-        eq: jest.fn().mockResolvedValue({ error: null }),
-      });
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: jest.fn().mockReturnValue({
-              eq: jest.fn().mockResolvedValue({ error: null }),
-            }),
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-            delete: deleteAttMock,
-          };
-        }
-        return {};
-      });
-
-      const res = await service.deleteMessage('user-1', '101');
+    it('recallMessageForEveryone: gọi RPC recall_message_for_everyone và emit CHAT_EVENTS.MESSAGE_DELETED', async () => {
+      const res = await service.recallMessageForEveryone('user-1', '101');
       expect(res.deleted).toBe(true);
-      expect(res.id).toBe('101');
-      expect(removeStorageMock).toHaveBeenCalledWith(['conversations/conv-1/file.png']);
-      expect(deleteAttMock).toHaveBeenCalled();
+      expect(res.scope).toBe('everyone');
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'recall_message_for_everyone',
+        {
+          p_user_id: 'user-1',
+          p_message_id: 101,
+        },
+      );
       expect(mockEventEmitter.emit).toHaveBeenCalledWith(
         CHAT_EVENTS.MESSAGE_DELETED,
         {
@@ -1511,148 +1592,71 @@ describe('MessagesService', () => {
       );
     });
 
-    it('xử lý khi query attachments trả lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const updateMsgMock = jest.fn();
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: null,
-              error: { message: 'Database connection failed' },
-            }),
-          };
-        }
-        return {};
+    it('deleteMessage with scope="for_me" delegates to hideMessageForUser', async () => {
+      const spy = jest.spyOn(service, 'hideMessageForUser').mockResolvedValueOnce({
+        id: '101',
+        hidden: true,
+        scope: 'for_me',
+        conversationId: 'conv-1',
+        channelId: null,
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        InternalServerErrorException,
-      );
-
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
+      const res = await service.deleteMessage('user-1', '101', 'for_me');
+      expect(spy).toHaveBeenCalledWith('user-1', '101');
+      expect(res.hidden).toBe(true);
     });
 
-    it('xử lý khi storage remove trả lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({
-        error: { message: 'Storage connection timeout' },
-      });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-      const updateMsgMock = jest.fn();
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-          };
-        }
-        return {};
+    it('deleteMessage with scope="everyone" delegates to recallMessageForEveryone', async () => {
+      const spy = jest.spyOn(service, 'recallMessageForEveryone').mockResolvedValueOnce({
+        id: '101',
+        deleted: true,
+        scope: 'everyone',
+        conversationId: 'conv-1',
+        channelId: null,
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        InternalServerErrorException,
-      );
-
-      expect(removeStorageMock).toHaveBeenCalled();
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
+      const res = await service.deleteMessage('user-1', '101', 'everyone');
+      expect(spy).toHaveBeenCalledWith('user-1', '101');
+      expect(res.deleted).toBe(true);
     });
 
-    it('xử lý khi delete metadata attachments lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({ error: null });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-      const updateMsgMock = jest.fn();
+    it('deleteMessage ném BadRequestException khi scope không hợp lệ', async () => {
+      await expect(
+        service.deleteMessage('user-1', '101', 'invalid_scope' as any),
+      ).rejects.toThrow(BadRequestException);
+    });
 
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-            delete: jest.fn().mockReturnValue({
-              eq: jest.fn().mockResolvedValue({
-                error: { message: 'Foreign key constraint error' },
-              }),
-            }),
-          };
-        }
-        return {};
+    it('xử lý khi RPC trả lỗi P0002 -> NotFoundException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: 'P0002', message: 'Not found' },
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
+      await expect(service.hideMessageForUser('user-1', '999')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('xử lý khi RPC trả lỗi 42501 -> ForbiddenException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: '42501', message: 'Permission denied' },
+      });
+
+      await expect(service.recallMessageForEveryone('user-2', '101')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('xử lý khi RPC trả lỗi database khác -> 500 InternalServerErrorException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: 'XX000', message: 'Internal DB crash' },
+      });
+
+      await expect(service.hideMessageForUser('user-1', '101')).rejects.toThrow(
         InternalServerErrorException,
       );
-
-      expect(removeStorageMock).toHaveBeenCalled();
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
     });
   });
 
@@ -2177,6 +2181,10 @@ describe('MessagesService', () => {
                 data: [],
                 error: null,
               }),
+              in: jest.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
             }),
           };
         }
@@ -2279,6 +2287,15 @@ describe('MessagesService', () => {
           data: { signedUrl: 'https://storage.target.signed/new-uuid.gif' },
           error: null,
         }),
+        createSignedUrls: jest.fn().mockImplementation((paths: string[]) => {
+          return Promise.resolve({
+            data: (paths || []).map((p) => ({
+              path: p,
+              signedUrl: 'https://storage.target.signed/new-uuid.gif',
+            })),
+            error: null,
+          });
+        }),
       });
 
       mockSupabase.client.from.mockImplementation((table: string) => {
@@ -2293,6 +2310,10 @@ describe('MessagesService', () => {
             select: jest.fn().mockReturnValue({
               eq: jest.fn().mockResolvedValue({
                 data: [mockSourceAttachment],
+                error: null,
+              }),
+              in: jest.fn().mockResolvedValue({
+                data: [mockCreatedTargetAttachment],
                 error: null,
               }),
             }),
@@ -2860,6 +2881,10 @@ describe('MessagesService', () => {
           return {
             select: jest.fn().mockReturnValue({
               eq: jest.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
+              in: jest.fn().mockResolvedValue({
                 data: [],
                 error: null,
               }),
@@ -3845,6 +3870,229 @@ describe('MessagesService', () => {
       ).rejects.toThrow(BadRequestException);
 
       expect(removeMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('Permission: Người dùng thiếu quyền SEND_MESSAGES khi gửi GIF nhận 403 Forbidden', async () => {
+      mockServerPermissionsService.assertChannelSend.mockRejectedValueOnce(
+        new ForbiddenException('Bạn không có quyền gửi tin nhắn trong kênh này.'),
+      );
+
+      const gifDto = {
+        provider: 'giphy' as const,
+        externalId: 'abc12345',
+        mediaType: 'gif' as const,
+        title: 'Dancing Dog',
+        creatorUsername: 'giphyartist',
+        pageUrl: 'https://giphy.com/gifs/dog-abc12345',
+        previewUrl: 'https://media.giphy.com/media/abc12345/200w.webp',
+        displayUrl: 'https://media.giphy.com/media/abc12345/giphy.gif',
+        mp4Url: 'https://media.giphy.com/media/abc12345/giphy.mp4',
+        width: 480,
+        height: 360,
+      };
+
+      await expect(
+        service.createChannelMessage(userId, channelId, {
+          content: '',
+          externalMedia: gifDto,
+        }),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(mockServerPermissionsService.assertChannelSend).toHaveBeenCalledWith(userId, channelId);
+      expect(mockServerPermissionsService.assertChannelAttach).not.toHaveBeenCalled();
+    });
+
+    it('Permission: Gửi GIF chỉ yêu cầu SEND_MESSAGES và KHÔNG gọi assertChannelAttach', async () => {
+      mockServerPermissionsService.assertChannelSend.mockResolvedValueOnce(undefined);
+
+      const gifDto = {
+        provider: 'giphy' as const,
+        externalId: 'abc12345',
+        mediaType: 'gif' as const,
+        title: 'Dancing Dog',
+        creatorUsername: 'giphyartist',
+        pageUrl: 'https://giphy.com/gifs/dog-abc12345',
+        previewUrl: 'https://media.giphy.com/media/abc12345/200w.webp',
+        displayUrl: 'https://media.giphy.com/media/abc12345/giphy.gif',
+        mp4Url: 'https://media.giphy.com/media/abc12345/giphy.mp4',
+        width: 480,
+        height: 360,
+      };
+
+      mockSupabase.client.rpc = jest.fn().mockResolvedValue({
+        data: {
+          id: '5001',
+          channelId,
+          authorId: userId,
+          type: 'default',
+          content: null,
+          isForwarded: false,
+          replyToId: null,
+          clientNonce: 'nonce-gif-perm',
+          createdAt: new Date().toISOString(),
+          attachments: [],
+          externalMedia: gifDto,
+        },
+        error: null,
+      });
+
+      const res = await service.createChannelMessage(userId, channelId, {
+        content: '',
+        clientNonce: 'nonce-gif-perm',
+        externalMedia: gifDto,
+      });
+
+      expect(res.id).toBe('5001');
+      expect(res.externalMedia?.externalId).toBe('abc12345');
+      expect(mockServerPermissionsService.assertChannelSend).toHaveBeenCalledWith(userId, channelId);
+      expect(mockServerPermissionsService.assertChannelAttach).not.toHaveBeenCalled();
+    });
+
+    it('Canonical: getChannelMessages load đúng externalMedia từ bảng message_external_media', async () => {
+      const mockMsg = {
+        id: '6001',
+        channel_id: channelId,
+        conversation_id: null,
+        author_id: userId,
+        type: 'default',
+        content: null,
+        is_forwarded: false,
+        reply_to_id: null,
+        client_nonce: 'nonce-ext-1',
+        edited_at: null,
+        deleted_at: null,
+        created_at: '2026-08-25T10:00:00Z',
+      };
+
+      mockSupabase.client.from = jest.fn().mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                order: jest.fn().mockReturnValue({
+                  limit: jest.fn().mockResolvedValue({
+                    data: [mockMsg],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === 'message_external_media') {
+          return {
+            select: jest.fn().mockReturnValue({
+              in: jest.fn().mockResolvedValue({
+                data: [
+                  {
+                    message_id: '6001',
+                    provider: 'giphy',
+                    external_id: 'gif-6001',
+                    media_type: 'gif',
+                    title: 'Trending GIF',
+                    creator_username: 'giphy',
+                    page_url: 'https://giphy.com/gifs/gif-6001',
+                    preview_url: 'https://media.giphy.com/media/gif-6001/200w.webp',
+                    display_url: 'https://media.giphy.com/media/gif-6001/giphy.gif',
+                    mp4_url: 'https://media.giphy.com/media/gif-6001/giphy.mp4',
+                    width: 400,
+                    height: 300,
+                  },
+                ],
+                error: null,
+              }),
+            }),
+          };
+        }
+        return defaultTableHandler(table);
+      });
+
+      const res = await service.getChannelMessages(userId, channelId, { limit: 50 });
+      expect(res.messages).toHaveLength(1);
+      expect(res.messages[0].externalMedia).toBeDefined();
+      expect(res.messages[0].externalMedia?.externalId).toBe('gif-6001');
+      expect(res.messages[0].externalMedia?.width).toBe(400);
+    });
+
+    it('Idempotency: Hai cuộc gọi concurrent cùng clientNonce đều thành công, trả về cùng canonical ID và chỉ emit đúng 1 realtime message:created', async () => {
+      mockServerPermissionsService.assertChannelSend.mockResolvedValue(undefined);
+      const emitSpy = jest.spyOn((service as any).eventEmitter, 'emit');
+
+      const gifDto = {
+        provider: 'giphy' as const,
+        externalId: 'conc-gif-1',
+        mediaType: 'gif' as const,
+        title: 'Concurrent GIF',
+        creatorUsername: 'artist',
+        pageUrl: 'https://giphy.com/gifs/conc-gif-1',
+        previewUrl: 'https://media.giphy.com/media/conc-gif-1/200w.webp',
+        displayUrl: 'https://media.giphy.com/media/conc-gif-1/giphy.gif',
+        mp4Url: 'https://media.giphy.com/media/conc-gif-1/giphy.mp4',
+        width: 480,
+        height: 360,
+      };
+
+      // Giả lập Winner (call 1: isDuplicate = false) và Loser (call 2: isDuplicate = true)
+      mockSupabase.client.rpc
+        .mockResolvedValueOnce({
+          data: {
+            id: '7001',
+            channelId,
+            authorId: userId,
+            type: 'default',
+            content: '',
+            isForwarded: false,
+            replyToId: null,
+            clientNonce: 'conc-nonce-99',
+            createdAt: '2026-08-25T12:00:00Z',
+            attachments: [],
+            externalMedia: gifDto,
+            isDuplicate: false,
+          },
+          error: null,
+        })
+        .mockResolvedValueOnce({
+          data: {
+            id: '7001',
+            channelId,
+            authorId: userId,
+            type: 'default',
+            content: '',
+            isForwarded: false,
+            replyToId: null,
+            clientNonce: 'conc-nonce-99',
+            createdAt: '2026-08-25T12:00:00Z',
+            attachments: [],
+            externalMedia: gifDto,
+            isDuplicate: true,
+          },
+          error: null,
+        });
+
+      const [call1, call2] = await Promise.all([
+        service.createChannelMessage(userId, channelId, {
+          content: '',
+          clientNonce: 'conc-nonce-99',
+          externalMedia: gifDto,
+        }),
+        service.createChannelMessage(userId, channelId, {
+          content: '',
+          clientNonce: 'conc-nonce-99',
+          externalMedia: gifDto,
+        }),
+      ]);
+
+      // Cả hai HTTP call đều thành công
+      expect(call1.id).toBe('7001');
+      expect(call2.id).toBe('7001');
+      expect(call1.externalMedia?.externalId).toBe('conc-gif-1');
+      expect(call2.externalMedia?.externalId).toBe('conc-gif-1');
+
+      // CHỈ emit đúng 1 sự kiện realtime message:created (cho winner, bỏ qua duplicate loser)
+      const messageCreatedCalls = emitSpy.mock.calls.filter(
+        (c: any[]) => c[0] === CHAT_EVENTS.MESSAGE_CREATED,
+      );
+      expect(messageCreatedCalls).toHaveLength(1);
     });
   });
 });

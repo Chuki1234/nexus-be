@@ -14,6 +14,8 @@
  * File này được nhân bản y hệt ở `nexus-fe/src/shared/`.
  */
 
+import type { DirectCallDto } from './dto/direct-calls.dto';
+
 /** `messages.id` là bigint — truyền dạng chuỗi để không mất chính xác trong JS. */
 export type MessageId = string;
 
@@ -45,6 +47,8 @@ export interface ReactionSummaryPayload {
   reactedByMe?: boolean;
 }
 
+import type { GiphyMediaDto } from './dto/messages.dto';
+
 export interface MessagePayload {
   id: MessageId;
   channelId: string | null;
@@ -58,6 +62,7 @@ export interface MessagePayload {
   editedAt: string | null;
   deletedAt: string | null;
   isForwarded: boolean;
+  externalMedia: GiphyMediaDto | null;
   attachments?: AttachmentPayload[];
   reactions?: ReactionSummaryPayload[];
   createdAt: string;
@@ -95,6 +100,33 @@ export interface PresenceUpdatedPayload {
 
 export interface PresenceSyncPayload {
   presences: Record<string, { status: PresenceStatus; lastSeenAt: string | null }>;
+}
+
+export interface VoiceMemberState {
+  userId: string;
+  channelId: string;
+  serverId: string;
+  name: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  isMuted: boolean;
+  isDeafened?: boolean;
+  isCameraOn: boolean;
+  isScreenSharing: boolean;
+  joinedAt: string;
+}
+
+export interface VoiceStateUpdatePayload {
+  serverId: string;
+  channelId: string | null;
+  userId: string;
+  state: VoiceMemberState | null;
+}
+
+export interface VoiceServerStatesSyncPayload {
+  serverId: string;
+  states: VoiceMemberState[];
 }
 
 export interface JoinConversationResponse {
@@ -144,6 +176,42 @@ export interface ClientToServerEvents {
     payload: { serverId: string },
     callback?: (res: { success: boolean }) => void,
   ) => void;
+
+  /** Cập nhật trạng thái voice (mic, cam, screenshare) của local user lên server room */
+  'voice:state-update': (payload: {
+    serverId: string;
+    channelId: string | null;
+    isMuted?: boolean;
+    isDeafened?: boolean;
+    isCameraOn?: boolean;
+    isScreenSharing?: boolean;
+  }) => void;
+
+  /** Lấy snapshot voice states của server khi mở sidebar */
+  'voice:get-server-states': (
+    payload: { serverId: string },
+    callback?: (response: VoiceServerStatesSyncPayload) => void,
+  ) => void;
+
+  /** Chủ server chuyển thành viên sang kênh voice khác */
+  'voice:move-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+    targetChannelId: string;
+  }) => void;
+
+  /** Chủ server ngắt kết nối / kick thành viên khỏi phòng thoại */
+  'voice:kick-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+  }) => void;
+
+  /** Chủ server tắt/bật mic của thành viên trên máy chủ */
+  'voice:server-mute-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+    isMuted: boolean;
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +222,13 @@ export interface ServerToClientEvents {
   'message:created': (payload: { message: MessagePayload }) => void;
   'message:updated': (payload: { message: MessagePayload }) => void;
   'message:deleted': (payload: { messageId: MessageId; channelId?: string | null; conversationId?: string | null }) => void;
+  'message:hidden-for-user': (payload: {
+    messageId: MessageId;
+    userId: string;
+    conversationId?: string | null;
+    channelId?: string | null;
+    hiddenAt: string;
+  }) => void;
   'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
 
   'message:read': (payload: {
@@ -291,10 +366,42 @@ export interface ServerToClientEvents {
    */
   'voice:participants': (payload: { channelId: string; userIds: string[] }) => void;
 
-  'call:incoming': (payload: { conversationId: string; fromUserId: string }) => void;
-  'call:answered': (payload: { conversationId: string }) => void;
-  'call:declined': (payload: { conversationId: string }) => void;
-  'call:ended': (payload: { conversationId: string }) => void;
+  /** Broadcast voice state của một member trong server (tham gia, rời, mute, cam, stream) */
+  'voice:state-updated': (payload: VoiceStateUpdatePayload) => void;
+
+  /** Snapshot toàn bộ voice states của server */
+  'voice:server-states-sync': (payload: VoiceServerStatesSyncPayload) => void;
+
+  /** Lệnh điều hướng ép buộc thành viên chuyển kênh thoại */
+  'voice:force-move': (payload: {
+    serverId: string;
+    channelId: string;
+    channelName: string;
+  }) => void;
+
+  /** Lệnh ép buộc thành viên ngắt kết nối khỏi phòng thoại */
+  'voice:force-disconnect': (payload: {
+    serverId: string;
+    channelId?: string;
+  }) => void;
+
+  /** Lệnh ép buộc tắt mic trên máy chủ */
+  'voice:force-mute': (payload: {
+    serverId: string;
+    isMuted: boolean;
+  }) => void;
+
+  // Direct Call Signaling (DM 1-1 giữa bạn bè)
+  'direct-call:incoming': (payload: DirectCallDto) => void;
+  'direct-call:ringing': (payload: DirectCallDto) => void;
+  'direct-call:accepted': (payload: DirectCallDto) => void;
+  'direct-call:connected': (payload: { callId: string; connectedAt: string }) => void;
+  'direct-call:declined': (payload: DirectCallDto) => void;
+  'direct-call:cancelled': (payload: DirectCallDto) => void;
+  'direct-call:ended': (payload: DirectCallDto) => void;
+  'direct-call:missed': (payload: DirectCallDto) => void;
+  'direct-call:busy': (payload: { conversationId: string; calleeId: string }) => void;
+  'direct-call:state-sync': (payload: DirectCallDto | null) => void;
 }
 
 /** Tên room trên server. Đặt tập trung để hai bên không tự ghép chuỗi lệch nhau. */
@@ -309,5 +416,5 @@ export const Room = {
 /** Tên phòng LiveKit. Xem NEXUS_CONTEXT §3.5. */
 export const LiveKitRoom = {
   voiceChannel: (channelId: string) => `voice:${channelId}`,
-  directCall: (conversationId: string) => `dm:${conversationId}`,
+  directCall: (callId: string) => `nexus:dm-call:${callId}`,
 } as const;

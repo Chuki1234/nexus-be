@@ -18,3 +18,4 @@ export * from './dto/profile';
 export * from './dto/server-capabilities.dto';
 export * from './dto/server-invitations.dto';
 export * from './dto/server-members.dto';
+export * from './dto/messages.dto';

@@ -3,6 +3,7 @@ import type { User } from '@supabase/supabase-js';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { MessagesController } from './messages.controller';
 import { MessagesService } from './messages.service';
+import { DeleteMessageScope } from './dto/delete-message.dto';
 
 describe('MessagesController', () => {
   let controller: MessagesController;
@@ -34,7 +35,13 @@ describe('MessagesController', () => {
               .mockResolvedValue({ id: 'msg-1', content: 'edited' }),
             deleteMessage: jest
               .fn()
-              .mockResolvedValue({ id: 'msg-1', deleted: true }),
+              .mockResolvedValue({ id: 'msg-1', deleted: true, scope: 'for_me' }),
+            hideMessageForUser: jest
+              .fn()
+              .mockResolvedValue({ id: 'msg-1', hidden: true, scope: 'for_me' }),
+            recallMessageForEveryone: jest
+              .fn()
+              .mockResolvedValue({ id: 'msg-1', deleted: true, scope: 'everyone' }),
             markAsRead: jest.fn().mockResolvedValue({ success: true }),
           },
         },
@@ -53,12 +60,12 @@ describe('MessagesController', () => {
     const res = await controller.getConversationMessages(
       mockUser,
       'a0000000-0000-0000-0000-000000000001',
-      { limit: 20 },
+      {},
     );
     expect(service.getConversationMessages).toHaveBeenCalledWith(
       'user-123',
       'a0000000-0000-0000-0000-000000000001',
-      { limit: 20 },
+      {},
     );
     expect(res.messages).toEqual([]);
   });
@@ -88,9 +95,21 @@ describe('MessagesController', () => {
     expect(res.content).toBe('edited');
   });
 
+  it('gọi service.hideMessageForUser khi POST /api/messages/:id/hide', async () => {
+    const res = await controller.hideMessage(mockUser, '101');
+    expect(service.hideMessageForUser).toHaveBeenCalledWith('user-123', '101');
+    expect(res.hidden).toBe(true);
+  });
+
+  it('gọi service.recallMessageForEveryone khi POST /api/messages/:id/recall', async () => {
+    const res = await controller.recallMessage(mockUser, '101');
+    expect(service.recallMessageForEveryone).toHaveBeenCalledWith('user-123', '101');
+    expect(res.deleted).toBe(true);
+  });
+
   it('gọi service.deleteMessage khi DELETE /api/messages/:id', async () => {
-    const res = await controller.deleteMessage(mockUser, '101');
-    expect(service.deleteMessage).toHaveBeenCalledWith('user-123', '101');
+    const res = await controller.deleteMessage(mockUser, '101', { scope: DeleteMessageScope.EVERYONE });
+    expect(service.deleteMessage).toHaveBeenCalledWith('user-123', '101', 'everyone');
     expect(res.deleted).toBe(true);
   });
 

@@ -380,7 +380,7 @@ async function runMultiInstanceRealtimeTest() {
       client2.once('message:created', (payload) => resolve(payload));
     });
 
-    const sendChanRes = await fetch(`http://localhost:${portA}/channels/${channelId}/messages`, {
+    const sendChanRes = await fetch(`http://localhost:${portA}/api/channels/${channelId}/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -404,6 +404,7 @@ async function runMultiInstanceRealtimeTest() {
     if (!receivedPayload || receivedPayload.message?.content !== 'Hello from Instance A across Redis!') {
       throw new Error('User 2 trên Instance B KHÔNG nhận được message phát tán từ Instance A!');
     }
+    const createdChanMsgId = receivedPayload.message?.id;
     console.log('✔ [Assertion 2] Cross-Instance channel message broadcast qua Redis Socket.IO adapter hoạt động hoàn hảo');
 
     // -------------------------------------------------------------------------
@@ -428,7 +429,7 @@ async function runMultiInstanceRealtimeTest() {
       client2.once('message:created', (payload) => resolve(payload));
     });
 
-    const sendDmRes = await fetch(`http://localhost:${portA}/conversations/${convId}/messages`, {
+    const sendDmRes = await fetch(`http://localhost:${portA}/api/conversations/${convId}/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -452,7 +453,95 @@ async function runMultiInstanceRealtimeTest() {
     if (!dmPayload || dmPayload.message?.content !== 'Cross-instance DM message!') {
       throw new Error('User 2 trên Instance B KHÔNG nhận được DM từ Instance A!');
     }
+    const createdDmMsgId = dmPayload.message?.id;
     console.log('✔ [Assertion 2b] Cross-Instance DM broadcast hoạt động hoàn hảo');
+
+    // -------------------------------------------------------------------------
+    // 5b2. TEST: User-Scoped Multi-Device Hide Sync vs. Other User Isolation
+    // -------------------------------------------------------------------------
+    console.log('--- TEST 1b2: Multi-Device User-Scoped Hide Sync across Cluster ---');
+
+    // User 1 mở Socket thứ 2 (Laptop) trên Instance B
+    const client1Laptop: Socket = socketClient(urlB, {
+      auth: { token: 'token-user-1' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    await new Promise<void>((resolve) => client1Laptop.on('connect', () => resolve()));
+    await waitMs(300);
+
+    let user1LaptopHiddenReceived = false;
+    let user2HiddenLeakReceived = false;
+
+    client1Laptop.on('message:hidden-for-user', (payload) => {
+      if (payload.messageId === createdDmMsgId) {
+        user1LaptopHiddenReceived = true;
+      }
+    });
+
+    client2.on('message:hidden-for-user', () => {
+      user2HiddenLeakReceived = true;
+    });
+
+    // User 1 trên Instance A gọi Hide message
+    const hideRes = await fetch(`http://localhost:${portA}/api/messages/${createdDmMsgId}/hide`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-1',
+      },
+    });
+
+    if (!hideRes.ok) {
+      throw new Error(`REST Hide Message thất bại: HTTP ${hideRes.status}`);
+    }
+
+    await waitMs(1000);
+
+    if (!user1LaptopHiddenReceived) {
+      throw new Error('User 1 Laptop trên Instance B KHÔNG nhận được message:hidden-for-user từ Instance A!');
+    }
+    if (user2HiddenLeakReceived) {
+      throw new Error('User 2 bị rò rỉ sự kiện message:hidden-for-user của User 1! Vi phạm privacy user room.');
+    }
+    console.log('✔ [Assertion 2b2] User-scoped message:hidden-for-user đồng bộ đa thiết bị qua Redis room Room.user(userId) và bảo mật tuyệt đối không leak sang user khác.');
+
+    // -------------------------------------------------------------------------
+    // 5b3. TEST: Cross-Instance Recall Broadcast
+    // -------------------------------------------------------------------------
+    console.log('--- TEST 1b3: Cross-Instance Recall for Everyone Broadcast ---');
+
+    let user1DeletedReceived = false;
+    let user2DeletedReceived = false;
+
+    client1.once('message:deleted', (payload) => {
+      if ((payload.messageId || payload.id) === createdChanMsgId) user1DeletedReceived = true;
+    });
+    client2.once('message:deleted', (payload) => {
+      if ((payload.messageId || payload.id) === createdChanMsgId) user2DeletedReceived = true;
+    });
+
+    // User 1 trên Instance A gọi Recall channel message
+    const recallRes = await fetch(`http://localhost:${portA}/api/messages/${createdChanMsgId}/recall`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-1',
+      },
+    });
+
+    if (!recallRes.ok) {
+      throw new Error(`REST Recall Message thất bại: HTTP ${recallRes.status}`);
+    }
+
+    await waitMs(1000);
+
+    if (!user1DeletedReceived || !user2DeletedReceived) {
+      throw new Error(`Cross-instance recall broadcast thất bại: user1=${user1DeletedReceived}, user2=${user2DeletedReceived}`);
+    }
+    console.log('✔ [Assertion 2b3] Cross-instance message:deleted broadcast nhận đúng 1 event trên tất cả instances và clients.');
+
+    client1Laptop.disconnect();
 
     // -------------------------------------------------------------------------
     // 5c. TEST: Voice Channel Chat Persistence & REST Reload
@@ -512,7 +601,7 @@ async function runMultiInstanceRealtimeTest() {
     client2.on('server:channel-updated', () => { channelDtoLeaked = true; });
 
     // Tạo kênh mới trên Instance A qua REST -> Kích hoạt emitChannelsInvalidated
-    await fetch(`http://localhost:${portA}/servers/${serverId}/channels`, {
+    await fetch(`http://localhost:${portA}/api/servers/${serverId}/channels`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
