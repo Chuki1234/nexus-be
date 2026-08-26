@@ -8,10 +8,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OnEvent } from '@nestjs/event-emitter';
 import { WebhookReceiver } from 'livekit-server-sdk';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ChatGateway } from '../realtime/chat.gateway';
 import { Room } from '../../shared/socket-events';
+import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import {
   AnswerDirectCallRequestDto,
   AnswerDirectCallResponseDto,
@@ -86,7 +88,7 @@ export class DirectCallsService {
   /**
    * Helper: Điền thông tin profile của Caller và Callee vào Call Record
    */
-  private async populateProfiles(rawCall: RawCallRow): Promise<DirectCallDto> {
+  async populateProfiles(rawCall: RawCallRow): Promise<DirectCallDto> {
     const { data: profiles, error } = await this.supabase.client
       .from('profiles')
       .select('id, username, display_name, avatar_url')
@@ -335,6 +337,33 @@ export class DirectCallsService {
   }
 
   /**
+   * Helper phát event direct-call:ended cho call đã kết thúc (dùng khi block/unfriend teardown)
+   */
+  async emitTerminatedCall(callId: string): Promise<DirectCallDto | null> {
+    const { data: rawCall, error } = await this.supabase.client
+      .from('direct_calls')
+      .select('*')
+      .eq('id', callId)
+      .maybeSingle();
+
+    if (error || !rawCall) {
+      this.logger.warn(`Không tìm thấy call ${callId} để emit kết thúc: ${error?.message}`);
+      return null;
+    }
+
+    const callDto = await this.populateProfiles(rawCall as RawCallRow);
+
+    this.chatGateway.server
+      .to(Room.user(callDto.caller.id))
+      .emit('direct-call:ended', callDto);
+    this.chatGateway.server
+      .to(Room.user(callDto.callee.id))
+      .emit('direct-call:ended', callDto);
+
+    return callDto;
+  }
+
+  /**
    * Lấy cuộc gọi active của user (phục vụ F5 / Reconnect)
    */
   async getActiveCall(
@@ -519,5 +548,14 @@ export class DirectCallsService {
       results.push(await this.populateProfiles(row));
     }
     return results;
+  }
+
+  @OnEvent(CHAT_EVENTS.DIRECT_CALL_TERMINATED)
+  async handleDirectCallTerminated(payload: { callId: string }): Promise<void> {
+    try {
+      await this.emitTerminatedCall(payload.callId);
+    } catch (err) {
+      this.logger.error(`Lỗi handleDirectCallTerminated cho call ${payload.callId}:`, err);
+    }
   }
 }

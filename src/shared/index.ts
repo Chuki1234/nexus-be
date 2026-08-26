@@ -19,3 +19,4 @@ export * from './dto/server-capabilities.dto';
 export * from './dto/server-invitations.dto';
 export * from './dto/server-members.dto';
 export * from './dto/messages.dto';
+export * from './dto/blocked-user.dto';

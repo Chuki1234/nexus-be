@@ -15,6 +15,17 @@
  */
 
 import type { DirectCallDto } from './dto/direct-calls.dto';
+import type { BlockedUserDto } from './dto/blocked-user.dto';
+
+export type UserBlockCreatedPayload = BlockedUserDto;
+
+export interface UserBlockRemovedPayload {
+  userId: string;
+}
+
+export interface RelationshipInvalidatedPayload {
+  userId: string;
+}
 
 /** `messages.id` là bigint — truyền dạng chuỗi để không mất chính xác trong JS. */
 export type MessageId = string;
@@ -412,6 +423,11 @@ export interface ServerToClientEvents {
   'direct-call:missed': (payload: DirectCallDto) => void;
   'direct-call:busy': (payload: { conversationId: string; calleeId: string }) => void;
   'direct-call:state-sync': (payload: DirectCallDto | null) => void;
+
+  // Block & Relationship Invalidation
+  'user:block-created': (payload: UserBlockCreatedPayload) => void;
+  'user:block-removed': (payload: UserBlockRemovedPayload) => void;
+  'relationship:invalidated': (payload: RelationshipInvalidatedPayload) => void;
 }
 
 /** Tên room trên server. Đặt tập trung để hai bên không tự ghép chuỗi lệch nhau. */

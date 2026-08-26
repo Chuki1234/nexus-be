@@ -46,9 +46,9 @@ export class ConversationsService {
   constructor(private readonly supabase: SupabaseService) {}
 
   /**
-   * Tạo hoặc lấy cuộc trò chuyện trực tiếp 1-1 duy nhất giữa hai người.
-   * Yêu cầu: Hai người phải đã kết bạn (friendship status = 'accepted').
-   * Đảm bảo idempotent, chống race condition và tự động chữa lành conversation thiếu participants.
+   * Tìm hoặc tạo cuộc trò chuyện trực tiếp (DM) giữa 2 người dùng.
+   * Sử dụng RPC canonical `get_or_create_dm_conversation` với transaction advisory lock,
+   * kiểm tra quan hệ chặn 2 chiều và đảm bảo đủ 2 participants một cách nguyên tử.
    */
   async getOrCreateDm(
     userId: string,
@@ -60,118 +60,44 @@ export class ConversationsService {
       );
     }
 
-    // 1. Kiểm tra quan hệ bạn bè trong bảng `friendships`
-    const [userA, userB] =
-      userId < recipientId ? [userId, recipientId] : [recipientId, userId];
+    const { data: convData, error: rpcErr } = await this.supabase.client.rpc(
+      'get_or_create_dm_conversation',
+      {
+        p_user_id: userId,
+        p_recipient_id: recipientId,
+      },
+    );
 
-    const { data: friendship, error: friendErr } = await this.supabase.client
-      .from('friendships')
-      .select('status')
-      .eq('user_a_id', userA)
-      .eq('user_b_id', userB)
-      .maybeSingle();
-
-    if (friendErr) {
-      this.logger.error('Lỗi kiểm tra bạn bè:', friendErr);
-      throw new InternalServerErrorException('Lỗi kiểm tra quan hệ bạn bè.');
-    }
-
-    if (friendship && friendship.status === 'blocked') {
-      throw new ForbiddenException(
-        'Không thể nhắn tin trực tiếp với người dùng này do đã bị chặn.',
-      );
-    }
-
-    // 2. Tìm hoặc tạo conversation theo unique `dm_key`
-    const dmKey = `${userA}:${userB}`;
-
-    const { data: existingConv, error: convErr } = await this.supabase.client
-      .from('conversations')
-      .select('id, type, name, icon_url, owner_id, dm_key, created_at')
-      .eq('dm_key', dmKey)
-      .maybeSingle();
-
-    if (convErr) {
-      this.logger.error('Lỗi tìm conversation:', convErr);
-      throw new InternalServerErrorException('Lỗi tìm cuộc trò chuyện.');
-    }
-
-    let conversation: RawConversationRow;
-
-    if (existingConv) {
-      conversation = existingConv as RawConversationRow;
-    } else {
-      // Tạo mới conversation
-      const { data: newConv, error: createErr } = await this.supabase.client
-        .from('conversations')
-        .insert({
-          type: 'dm',
-          dm_key: dmKey,
-          owner_id: userId,
-        })
-        .select('id, type, name, icon_url, owner_id, dm_key, created_at')
-        .single();
-
-      if (createErr) {
-        // Xử lý race condition khi cả 2 user tạo đồng thời cùng một lúc (dm_key duplicate constraint)
-        const isDuplicate =
-          createErr.code === '23505' ||
-          createErr.message?.includes('duplicate key') ||
-          createErr.message?.includes('idx_conversations_dm_key');
-
-        if (isDuplicate) {
-          const { data: racedConv, error: raceErr } = await this.supabase.client
-            .from('conversations')
-            .select('id, type, name, icon_url, owner_id, dm_key, created_at')
-            .eq('dm_key', dmKey)
-            .single();
-
-          if (raceErr || !racedConv) {
-            this.logger.error('Lỗi lấy conversation sau race condition:', raceErr);
-            throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
-          }
-          conversation = racedConv as RawConversationRow;
-        } else {
-          this.logger.error('Lỗi tạo conversation:', createErr);
-          throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
-        }
-      } else if (!newConv) {
-        throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
-      } else {
-        conversation = newConv as RawConversationRow;
+    if (rpcErr) {
+      if (rpcErr.code === '42501' || rpcErr.message?.includes('chặn')) {
+        throw new ForbiddenException(
+          'Không thể nhắn tin trực tiếp với người dùng này do đã bị chặn.',
+        );
       }
+      if (rpcErr.code === 'P0002') {
+        throw new NotFoundException('Không tìm thấy người dùng nhận.');
+      }
+      if (rpcErr.code === '22023') {
+        throw new BadRequestException(rpcErr.message || 'Yêu cầu không hợp lệ.');
+      }
+      this.logger.error('Lỗi gọi RPC get_or_create_dm_conversation:', rpcErr);
+      throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
     }
 
-    // 3. Đảm bảo cả 2 participant luôn tồn tại trong conversation_participants
-    // (kể cả conversation đã tồn tại trước đó nhưng bị thiếu participant mồ côi)
-    const { error: partErr } = await this.supabase.client
-      .from('conversation_participants')
-      .upsert(
-        [
-          { conversation_id: conversation.id, user_id: userA },
-          { conversation_id: conversation.id, user_id: userB },
-        ],
-        { onConflict: 'conversation_id,user_id', ignoreDuplicates: true },
-      );
-
-    if (partErr) {
-      this.logger.error('Lỗi đảm bảo participants vào conversation:', partErr);
-      throw new InternalServerErrorException(
-        'Lỗi liên kết người tham gia cuộc trò chuyện.',
-      );
+    if (!convData) {
+      throw new InternalServerErrorException('Lỗi tạo cuộc trò chuyện.');
     }
 
-    // 4. Lấy thông tin profile người nhận
     const recipient = await this.getParticipantProfile(recipientId);
 
     return {
-      id: conversation.id,
-      type: conversation.type,
-      name: conversation.name,
-      iconUrl: conversation.icon_url,
+      id: convData.id,
+      type: convData.type,
+      name: convData.name,
+      iconUrl: convData.icon_url,
       recipient,
       unreadCount: 0,
-      createdAt: conversation.created_at,
+      createdAt: convData.created_at,
     };
   }
 

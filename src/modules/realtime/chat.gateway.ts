@@ -34,6 +34,9 @@ import {
   type MessageReadEvent,
   type MessageUpdatedEvent,
   type ReactionUpdatedEvent,
+  type UserBlockCreatedEvent,
+  type UserBlockRemovedEvent,
+  type RelationshipInvalidatedEvent,
 } from './constants/chat-events.constant';
 
 interface SocketData {
@@ -917,6 +920,26 @@ export class ChatGateway
         ?.to(Room.channel(channelId))
         .emit('message:reaction-updated', payload);
     }
+  }
+
+  @OnEvent(CHAT_EVENTS.USER_BLOCK_CREATED)
+  handleUserBlockCreated(event: UserBlockCreatedEvent): void {
+    const { blockerId, blockedUser } = event;
+    this.server?.to(Room.user(blockerId)).emit('user:block-created', blockedUser);
+  }
+
+  @OnEvent(CHAT_EVENTS.USER_BLOCK_REMOVED)
+  handleUserBlockRemoved(event: UserBlockRemovedEvent): void {
+    const { blockerId, blockedUserId } = event;
+    this.server?.to(Room.user(blockerId)).emit('user:block-removed', { userId: blockedUserId });
+  }
+
+  @OnEvent(CHAT_EVENTS.RELATIONSHIP_INVALIDATED)
+  handleRelationshipInvalidated(event: RelationshipInvalidatedEvent): void {
+    const { targetUserId, invalidatedWithUserId } = event;
+    this.server?.to(Room.user(targetUserId)).emit('relationship:invalidated', {
+      userId: invalidatedWithUserId,
+    });
   }
 
   // ---------------------------------------------------------------------------
