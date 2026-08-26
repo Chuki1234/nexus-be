@@ -41,7 +41,7 @@ describe('VoiceService', () => {
     });
 
     expect(res.serverUrl).toBe('wss://livekit.example.com');
-    expect(res.roomName).toBe('nexus:srv-1:voice:chn-voice-1');
+    expect(res.roomName).toBe('nexus:voice:chn-voice-1');
     expect(res.participantIdentity).toBe('user-123');
     expect(res.participantName).toBe('MinhTai');
     expect(res.participantToken).toBeDefined();

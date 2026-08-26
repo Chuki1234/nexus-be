@@ -24,7 +24,7 @@ describe('VoiceController', () => {
       generateToken: jest.fn().mockResolvedValue({
         serverUrl: 'wss://livekit.example.com',
         participantToken: 'mock.jwt.token',
-        roomName: 'nexus:srv-1:voice:chn-1',
+        roomName: 'nexus:voice:chn-1',
         participantIdentity: 'usr-tai-1',
         participantName: 'Minh Tài',
       }),
@@ -76,6 +76,6 @@ describe('VoiceController', () => {
       channelId: 'chn-2',
       displayName: 'Tài',
     });
-    expect(res.roomName).toBe('nexus:srv-1:voice:chn-1');
+    expect(res.roomName).toBe('nexus:voice:chn-1');
   });
 });

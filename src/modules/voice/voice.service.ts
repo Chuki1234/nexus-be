@@ -15,7 +15,15 @@ export class VoiceService {
 
   /**
    * Cấp token LiveKit cho người dùng kết nối vào Voice Channel.
-   * Format tên phòng: nexus:{serverId}:voice:{channelId}
+   *
+   * Format tên phòng: nexus:voice:{channelId}
+   *
+   * KHÔNG nhét serverId vào tên phòng: channelId đã là UUID duy nhất toàn cục.
+   * Trước đây dùng `nexus:{serverId}:voice:{channelId}` — nếu một client gửi
+   * serverId lệch/thiếu, nó rơi vào phòng LiveKit khác dù cùng channel, gây ra
+   * hiện tượng "màn hình gọi không thấy đủ người" trong khi sidebar (voice-state
+   * socket) vẫn hiện đủ. Chỉ khoá theo channelId để mọi người cùng kênh chắc
+   * chắn vào chung một phòng.
    */
   async generateToken(
     userId: string,
@@ -35,7 +43,7 @@ export class VoiceService {
       );
     }
 
-    const roomName = `nexus:${dto.serverId}:voice:${dto.channelId}`;
+    const roomName = `nexus:voice:${dto.channelId}`;
     const participantName = dto.displayName || userEmail?.split('@')[0] || `User_${userId.slice(0, 5)}`;
 
     const at = new AccessToken(apiKey, apiSecret, {
