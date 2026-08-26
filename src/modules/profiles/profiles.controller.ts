@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UploadedFile,
   UseGuards,
@@ -17,6 +18,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { MAX_UPLOAD_BYTES } from '../../infra/storage/media.service';
 import { SearchProfilesDto } from './dto/search-profiles.dto';
+import { SetBirthdateDto } from './dto/set-birthdate.dto';
+import { SetProfileNoteDto } from './dto/set-profile-note.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
   OwnProfile,
@@ -53,6 +56,18 @@ export class ProfilesController {
     @Body() dto: UpdateProfileDto,
   ): Promise<OwnProfile> {
     return this.profiles.update(user.id, dto);
+  }
+
+  /**
+   * PUT /api/profiles/me/birthdate — đổi ngày sinh. Đường riêng, không nằm
+   * trong PATCH /me (xem ghi chú ở `UpdateProfileDto`).
+   */
+  @Put('me/birthdate')
+  setBirthdate(
+    @CurrentUser() user: User,
+    @Body() dto: SetBirthdateDto,
+  ): Promise<OwnProfile> {
+    return this.profiles.setBirthdate(user.id, dto.birthdate);
   }
 
   /** POST /api/profiles/me/avatar — multipart, field `file`. */
@@ -104,5 +119,29 @@ export class ProfilesController {
     @Param('username') username: string,
   ): Promise<PublicProfile> {
     return this.profiles.getByUsername(username, user.id);
+  }
+
+  /**
+   * GET /api/profiles/:username/note — ghi chú RIÊNG của người xem về người
+   * này. Không lẫn vào response của `:username` vì đây là dữ liệu của người
+   * xem, không phải của chủ hồ sơ — hai người cùng xem một hồ sơ sẽ thấy hai
+   * ghi chú khác nhau.
+   */
+  @Get(':username/note')
+  getNote(
+    @CurrentUser() user: User,
+    @Param('username') username: string,
+  ): Promise<{ text: string }> {
+    return this.profiles.getNote(username, user.id);
+  }
+
+  /** PUT /api/profiles/:username/note — lưu ghi chú, gửi chuỗi rỗng để xoá. */
+  @Put(':username/note')
+  setNote(
+    @CurrentUser() user: User,
+    @Param('username') username: string,
+    @Body() dto: SetProfileNoteDto,
+  ): Promise<{ text: string }> {
+    return this.profiles.setNote(username, user.id, dto.text);
   }
 }

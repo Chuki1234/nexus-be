@@ -8,8 +8,16 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import {
+  GAME_COVER_URL_MAX,
+  GAME_TAG_MAX,
+  GAME_TITLE_MAX,
+  MAX_GAME_TAGS,
+  MAX_PROFILE_GAMES,
+} from '../../../shared';
 
 export const MAX_PROFILE_LINKS = 5;
 export const DISPLAY_NAME_MAX = 32;
@@ -85,6 +93,66 @@ export class ProfileLinkDto {
   url: string;
 }
 
+/** Bốn widget trò chơi — phải khớp `ProfileGameKind` bên shared và CHECK dưới DB. */
+const GAME_KINDS = ['rotation', 'favorite', 'like', 'wishlist'] as const;
+
+/**
+ * Một trò chơi khoe trên hồ sơ.
+ *
+ * Ràng buộc ở đây phải CHẶT BẰNG HOẶC CHẶT HƠN `profile_games_valid()` dưới
+ * database. Lỏng hơn thì request lọt qua validate rồi chết ở CHECK, mà vi phạm
+ * CHECK chỉ trả về mã `23514` — người dùng nhận "Thông tin không hợp lệ." và
+ * không biết sai ở đâu.
+ */
+export class ProfileGameDto {
+  @Transform(trim)
+  @IsString({ message: 'Mã trò chơi không hợp lệ.' })
+  @MinLength(1, { message: 'Mã trò chơi không được để trống.' })
+  @MaxLength(128, { message: 'Mã trò chơi quá dài.' })
+  id: string;
+
+  @IsIn(GAME_KINDS, { message: 'Loại widget trò chơi không hợp lệ.' })
+  kind: (typeof GAME_KINDS)[number];
+
+  @Transform(trim)
+  @IsString({ message: 'Tên trò chơi không hợp lệ.' })
+  @MinLength(1, { message: 'Tên trò chơi không được để trống.' })
+  @MaxLength(GAME_TITLE_MAX, {
+    message: `Tên trò chơi tối đa ${GAME_TITLE_MAX} ký tự.`,
+  })
+  title: string;
+
+  /**
+   * Ảnh bìa. `null` nghĩa là chưa đặt — frontend tự sinh ảnh theo tên.
+   *
+   * `@ValidateIf` để `null` đi thẳng qua: `@IsOptional` không dùng được vì nó
+   * bỏ qua cả khi client CỐ Ý gửi null để xoá ảnh, còn ở đây null là giá trị
+   * hợp lệ có ý nghĩa riêng.
+   */
+  @Transform(normalizeUrl)
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsString({ message: 'Ảnh bìa không hợp lệ.' })
+  @MaxLength(GAME_COVER_URL_MAX, { message: 'Địa chỉ ảnh bìa quá dài.' })
+  @Matches(/^https:\/\/[^\s]+$/, {
+    message: 'Ảnh bìa phải bắt đầu bằng https:// và không chứa khoảng trắng.',
+  })
+  cover?: string | null;
+
+  /** Nhãn tự do, chỉ widget `rotation` dùng tới. Không gửi = mảng rỗng. */
+  @IsOptional()
+  @IsArray({ message: 'Danh sách nhãn không hợp lệ.' })
+  @ArrayMaxSize(MAX_GAME_TAGS, {
+    message: `Mỗi trò chơi tối đa ${MAX_GAME_TAGS} nhãn.`,
+  })
+  @IsString({ each: true, message: 'Nhãn không hợp lệ.' })
+  @MinLength(1, { each: true, message: 'Nhãn không được để trống.' })
+  @MaxLength(GAME_TAG_MAX, {
+    each: true,
+    message: `Nhãn tối đa ${GAME_TAG_MAX} ký tự.`,
+  })
+  tags?: string[];
+}
+
 /**
  * Thân request của PATCH /api/profiles/me.
  *
@@ -145,4 +213,20 @@ export class UpdateProfileDto {
   @ValidateNested({ each: true })
   @Type(() => ProfileLinkDto)
   links?: ProfileLinkDto[];
+
+  /**
+   * Trò chơi khoe trên hồ sơ. Gửi lên là thay CẢ danh sách như `links`.
+   *
+   * Hạn mức từng widget (rotation 5 / favorite 1 / like 20 / wishlist 20) được
+   * kiểm ở service, không kiểm được ở đây: decorator chỉ thấy cả mảng chứ không
+   * đếm được theo `kind`.
+   */
+  @IsOptional()
+  @IsArray({ message: 'Danh sách trò chơi không hợp lệ.' })
+  @ArrayMaxSize(MAX_PROFILE_GAMES, {
+    message: `Tối đa ${MAX_PROFILE_GAMES} trò chơi.`,
+  })
+  @ValidateNested({ each: true })
+  @Type(() => ProfileGameDto)
+  games?: ProfileGameDto[];
 }
