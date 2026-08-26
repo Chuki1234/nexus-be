@@ -428,7 +428,26 @@ describe('ConversationsService', () => {
             }),
           };
         }
-        return {};
+        if (table === 'friendships') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            or: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [
+                {
+                  user_a_id: 'user-1',
+                  user_b_id: 'user-2',
+                  status: 'accepted',
+                },
+              ],
+              error: null,
+            }),
+          };
+        }
+        return {
+          delete: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ error: null }),
+        };
       });
 
       const res = await service.listConversations('user-1');
@@ -437,6 +456,94 @@ describe('ConversationsService', () => {
       expect(res[0].recipient?.username).toBe('alice');
       expect(res[0].recipient?.displayName).toBe('Alice Wonder');
       expect(res[0].unreadCount).toBe(2);
+    });
+
+    it('lọc bỏ các cuộc trò chuyện DM với người không còn là bạn bè', async () => {
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'conversation_participants') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [{ conversation_id: 'conv-orphan' }],
+              error: null,
+            }),
+            in: jest.fn().mockResolvedValue({
+              data: [
+                { conversation_id: 'conv-orphan', user_id: 'user-1' },
+                { conversation_id: 'conv-orphan', user_id: 'stranger-99' },
+              ],
+              error: null,
+            }),
+          };
+        }
+        if (table === 'conversations') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            in: jest.fn().mockReturnThis(),
+            order: jest.fn().mockResolvedValue({
+              data: [
+                {
+                  id: 'conv-orphan',
+                  type: 'dm',
+                  name: null,
+                  icon_url: null,
+                  owner_id: 'user-1',
+                  created_at: '2026-08-01T00:00:00Z',
+                },
+              ],
+              error: null,
+            }),
+            delete: jest.fn().mockReturnValue({
+              in: jest.fn().mockResolvedValue({ error: null }),
+            }),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            in: jest.fn().mockResolvedValue({
+              data: [
+                {
+                  id: 'stranger-99',
+                  username: 'stranger',
+                  display_name: 'Stranger',
+                  avatar_url: null,
+                  status_message: null,
+                  manual_presence: 'offline',
+                },
+              ],
+              error: null,
+            }),
+          };
+        }
+        if (table === 'read_states') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            in: jest.fn().mockResolvedValue({
+              data: [],
+              error: null,
+            }),
+          };
+        }
+        if (table === 'friendships') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            or: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockResolvedValue({
+              data: [], // Không có ai trong danh sách bạn bè
+              error: null,
+            }),
+          };
+        }
+        return {
+          delete: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ error: null }),
+        };
+      });
+
+      const res = await service.listConversations('user-1');
+      expect(res).toHaveLength(0);
     });
   });
 

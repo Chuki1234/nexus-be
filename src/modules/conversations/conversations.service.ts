@@ -257,11 +257,35 @@ export class ConversationsService {
       unreadMap.set(rs.conversation_id as string, rs.mention_count ?? 0);
     }
 
-    return (convs as RawConversationRow[]).map((conv) => {
-      const otherId = convToOtherUser.get(conv.id);
-      const recipient = otherId ? profileMap.get(otherId) : undefined;
+    // 6. Lấy danh sách bạn bè đã chấp nhận (status = 'accepted') để đảm bảo chỉ trả về DM với bạn bè hiện tại
+    const { data: friendships } = await this.supabase.client
+      .from('friendships')
+      .select('user_a_id, user_b_id, status')
+      .or(`user_a_id.eq.${userId},user_b_id.eq.${userId}`)
+      .eq('status', 'accepted');
 
-      return {
+    const acceptedFriendIds = new Set<string>();
+    for (const f of friendships ?? []) {
+      const friendId = f.user_a_id === userId ? f.user_b_id : f.user_a_id;
+      acceptedFriendIds.add(friendId as string);
+    }
+
+    const orphanConvIds: string[] = [];
+    const result: ConversationResponseDto[] = [];
+
+    for (const conv of convs as RawConversationRow[]) {
+      const otherId = convToOtherUser.get(conv.id);
+
+      // Nếu là cuộc trò chuyện DM trực tiếp mà không còn quan hệ bạn bè accepted -> loại bỏ
+      if (conv.type === 'dm') {
+        if (!otherId || !acceptedFriendIds.has(otherId)) {
+          orphanConvIds.push(conv.id);
+          continue;
+        }
+      }
+
+      const recipient = otherId ? profileMap.get(otherId) : undefined;
+      result.push({
         id: conv.id,
         type: conv.type,
         name: conv.name,
@@ -269,8 +293,18 @@ export class ConversationsService {
         recipient,
         unreadCount: unreadMap.get(conv.id) ?? 0,
         createdAt: conv.created_at,
-      };
-    });
+      });
+    }
+
+    // Tự động dọn dẹp các DM mồ côi trong background nếu có
+    if (orphanConvIds.length > 0) {
+      void this.supabase.client
+        .from('conversations')
+        .delete()
+        .in('id', orphanConvIds);
+    }
+
+    return result;
   }
 
   /**
