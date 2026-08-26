@@ -15,6 +15,7 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
 import { MessagesModule } from './modules/messages/messages.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { DirectCallsModule } from './modules/direct-calls/direct-calls.module';
+import { GiphyModule } from './modules/giphy/giphy.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { DirectCallsModule } from './modules/direct-calls/direct-calls.module';
     MessagesModule,
     RealtimeModule,
     DirectCallsModule,
+    GiphyModule,
   ],
   controllers: [AppController],
   providers: [
