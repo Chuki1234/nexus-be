@@ -211,4 +211,39 @@ describe('GiphyMediaValidator', () => {
       ).not.toThrow();
     });
   });
+
+  describe('Stipop Stickers Validation', () => {
+    const validStipopPayload = {
+      provider: 'stipop',
+      externalId: '45268',
+      mediaType: 'sticker',
+      title: 'Happy Sticker',
+      creatorUsername: 'amam',
+      pageUrl: 'https://stipop.io/package/2199',
+      previewUrl: 'https://img.stipop.io/sticker/2199/200t5ZzVZ9Ebx.png',
+      displayUrl: 'https://img.stipop.io/2019/9/6/1567827398490_7.png',
+      mp4Url: null,
+      width: 300,
+      height: 300,
+    };
+
+    it('chấp nhận Stipop sticker hợp lệ', () => {
+      const sanitized = validateAndSanitizeGiphyMedia(validStipopPayload);
+      expect(sanitized.provider).toBe('stipop');
+      expect(sanitized.mediaType).toBe('sticker');
+      expect(sanitized.externalId).toBe('45268');
+      expect(sanitized.title).toBe('Happy Sticker');
+      expect(sanitized.creatorUsername).toBe('amam');
+      expect(sanitized.displayUrl).toBe('https://img.stipop.io/2019/9/6/1567827398490_7.png');
+    });
+
+    it('từ chối Stipop sticker có host lạ không nằm trong allowlist', () => {
+      expect(() =>
+        validateAndSanitizeGiphyMedia({
+          ...validStipopPayload,
+          displayUrl: 'https://evil-stipop.com/sticker.png',
+        }),
+      ).toThrow(BadRequestException);
+    });
+  });
 });

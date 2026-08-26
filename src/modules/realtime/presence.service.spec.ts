@@ -11,10 +11,15 @@ describe('PresenceService', () => {
   let mockFriendsService: any;
   let mockConversationsService: any;
   let mockRedisState: any;
+  let mockProfileUpdate: jest.Mock;
 
   beforeEach(async () => {
+    mockProfileUpdate = jest.fn().mockReturnValue({
+      eq: jest.fn().mockResolvedValue({ error: null }),
+    });
     mockSupabase = {
       client: {
+        rpc: jest.fn().mockResolvedValue({ error: null }),
         from: jest.fn().mockReturnValue({
           select: jest.fn().mockReturnValue({
             eq: jest.fn().mockReturnValue({
@@ -23,9 +28,7 @@ describe('PresenceService', () => {
               }),
             }),
           }),
-          update: jest.fn().mockReturnValue({
-            eq: jest.fn().mockResolvedValue({ error: null }),
-          }),
+          update: mockProfileUpdate,
         }),
       },
     };
@@ -76,6 +79,24 @@ describe('PresenceService', () => {
     expect(res.peers.sort()).toEqual(['user-bob', 'user-charlie', 'user-david'].sort());
     expect(service.isUserConnected('user-alice')).toBe(true);
     expect(service.getEffectiveStatus('user-alice')).toBe('online');
+  });
+
+  it('không fallback sang UPDATE trực tiếp khi RPC last_seen monotonic lỗi', async () => {
+    mockSupabase.client.rpc.mockResolvedValueOnce({
+      error: new Error('RPC unavailable'),
+    });
+    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+
+    await (service as any).persistLastSeenAt(
+      'user-alice',
+      '2026-08-26T07:00:00.000Z',
+    );
+
+    expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+      'update_profile_last_seen',
+      expect.objectContaining({ p_user_id: 'user-alice' }),
+    );
+    expect(mockProfileUpdate).not.toHaveBeenCalled();
   });
 
   it('mở 2 tab cùng user -> tab 2 isFirstConnection: false; đóng 1 tab vẫn giữ online', async () => {
@@ -167,14 +188,17 @@ describe('PresenceService', () => {
     const snapshot = await service.getPeersSnapshot('user-alice');
 
     expect(snapshot['user-bob']).toEqual({
+      userId: 'user-bob',
       status: 'online',
       lastSeenAt: null,
     });
     expect(snapshot['user-david']).toEqual({
+      userId: 'user-david',
       status: 'dnd',
       lastSeenAt: null,
     });
     expect(snapshot['user-charlie']).toEqual({
+      userId: 'user-charlie',
       status: 'offline',
       lastSeenAt: null,
     });
@@ -189,5 +213,83 @@ describe('PresenceService', () => {
 
     // Không còn timers nào sót lại
     expect(service.isUserConnected('user-alice')).toBe(false);
+  });
+
+  describe('Activity & Idle Precedence Tests', () => {
+    it('sau 15 phút không có activity -> kích hoạt clusterIdleHandler', async () => {
+      jest.useFakeTimers();
+      const onIdle = jest.fn();
+      service.setClusterIdleHandler(onIdle);
+
+      await service.handleUserConnect('user-alice', 'socket-1');
+
+      // Chưa đủ 15 phút
+      await jest.advanceTimersByTimeAsync(14 * 60 * 1000);
+      expect(onIdle).not.toHaveBeenCalled();
+
+      // Đủ 15 phút (900000ms)
+      await jest.advanceTimersByTimeAsync(1 * 60 * 1000);
+      expect(onIdle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-alice',
+          status: 'idle',
+          peers: expect.arrayContaining(['user-bob', 'user-charlie', 'user-david']),
+        }),
+      );
+    });
+
+    it('khi user đang idle -> có activity mới chuyển ngay về online và phát broadcast', async () => {
+      jest.useFakeTimers();
+      const onIdle = jest.fn();
+      service.setClusterIdleHandler(onIdle);
+
+      await service.handleUserConnect('user-alice', 'socket-1');
+      await jest.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(onIdle).toHaveBeenCalledTimes(1);
+
+      // User tương tác (click/phím)
+      const actRes = await service.handleUserActivity('socket-1');
+      expect(actRes).toEqual({
+        userId: 'user-alice',
+        status: 'online',
+        peers: expect.arrayContaining(['user-bob', 'user-charlie', 'user-david']),
+      });
+    });
+
+    it('manual dnd có độ ưu tiên cao nhất: activity mới KHÔNG tự đổi về online', async () => {
+      jest.useFakeTimers();
+      service.setManualPresence('user-alice', 'dnd');
+      await service.handleUserConnect('user-alice', 'socket-1');
+
+      expect(service.getEffectiveStatus('user-alice')).toBe('dnd');
+
+      // Tương tác mới không được đổi dnd về online
+      const actRes = await service.handleUserActivity('socket-1');
+      expect(actRes).toBeNull();
+      expect(service.getEffectiveStatus('user-alice')).toBe('dnd');
+    });
+
+    it('manual idle có độ ưu tiên cao nhất: activity mới KHÔNG tự đổi về online', async () => {
+      jest.useFakeTimers();
+      service.setManualPresence('user-alice', 'idle');
+      await service.handleUserConnect('user-alice', 'socket-1');
+
+      expect(service.getEffectiveStatus('user-alice')).toBe('idle');
+
+      // Tương tác mới không được đổi manual idle về online
+      const actRes = await service.handleUserActivity('socket-1');
+      expect(actRes).toBeNull();
+      expect(service.getEffectiveStatus('user-alice')).toBe('idle');
+    });
+
+    it('khi xóa manual override -> trạng thái được tính lại từ live activity', async () => {
+      service.setManualPresence('user-alice', 'dnd');
+      await service.handleUserConnect('user-alice', 'socket-1');
+      expect(service.getEffectiveStatus('user-alice')).toBe('dnd');
+
+      // Xóa manual override
+      service.setManualPresence('user-alice', null);
+      expect(service.getEffectiveStatus('user-alice')).toBe('online');
+    });
   });
 });

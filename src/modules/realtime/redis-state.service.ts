@@ -8,6 +8,7 @@ import {
 import * as crypto from 'crypto';
 import Redis from 'ioredis';
 import * as os from 'os';
+import { PRESENCE_IDLE_AFTER_MS } from '../../shared/dto/common';
 import type { VoiceMemberState } from '../../shared/socket-events';
 
 export interface PresenceSnapshotItem {
@@ -32,6 +33,7 @@ export class RedisStateService
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private deadInstanceSweeperTimer: NodeJS.Timeout | null = null;
   private offlineProcessorTimer: NodeJS.Timeout | null = null;
+  private idleProcessorTimer: NodeJS.Timeout | null = null;
   private typingSweeperTimer: NodeJS.Timeout | null = null;
 
   /** In-memory fallback lưu trữ voice states khi không có Redis */
@@ -42,6 +44,7 @@ export class RedisStateService
     userId: string;
     lastSeenAt: string;
   }) => void;
+  private onIdleCallback?: (payload: { userId: string }) => void;
   private onTypingUpdateCallback?: (payload: {
     targetId: string;
     isChannel: boolean;
@@ -88,6 +91,7 @@ export class RedisStateService
       this.startHeartbeat();
       this.startDeadInstanceSweeper();
       this.startOfflineProcessor();
+      this.startIdleProcessor();
       this.startTypingSweeper();
     } catch (err: any) {
       this.logger.error(`Lỗi khởi tạo RedisStateService: ${err.message}`, err.stack);
@@ -101,10 +105,22 @@ export class RedisStateService
     return this.isConnected && this.client !== null;
   }
 
+  private async getRedisTimeMs(): Promise<number> {
+    if (!this.client || !this.isConnected) {
+      return Date.now();
+    }
+    const [seconds, microseconds] = await this.client.time();
+    return Number(seconds) * 1000 + Math.floor(Number(microseconds) / 1000);
+  }
+
   setOfflineCallback(
     cb: (payload: { userId: string; lastSeenAt: string }) => void,
   ): void {
     this.onOfflineCallback = cb;
+  }
+
+  setIdleCallback(cb: (payload: { userId: string }) => void): void {
+    this.onIdleCallback = cb;
   }
 
   setTypingUpdateCallback(
@@ -155,81 +171,177 @@ export class RedisStateService
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Atomic Connect / Disconnect (Lua Scripts)
+  // 2. Atomic Connect / Disconnect / Activity (Lua Scripts)
   // ---------------------------------------------------------------------------
   async handleSocketConnect(
     userId: string,
     socketId: string,
     manualStatus?: string | null,
-  ): Promise<{ isFirstConnection: boolean; activeSocketCount: number }> {
+  ): Promise<{ isFirstConnection: boolean; activeSocketCount: number; status: string }> {
     if (!this.client || !this.isConnected) {
-      return { isFirstConnection: true, activeSocketCount: 1 };
+      const status = manualStatus && manualStatus !== 'offline' ? manualStatus : 'online';
+      return { isFirstConnection: true, activeSocketCount: 1, status };
     }
 
     const sockKey = this.k(`presence:sockets:${userId}`);
+    const actKey = this.k(`presence:activity:${userId}`);
     const instUsersKey = this.k(`presence:instance:${this.instanceId}:users`);
     const activeUsersKey = this.k('presence:active_users');
-    const deadlineKey = this.k('presence:offline_deadlines');
+    const offlineDeadlineKey = this.k('presence:offline_deadlines');
+    const idleDeadlineKey = this.k('presence:idle_deadlines');
     const userKey = this.k(`presence:user:${userId}`);
 
     const nowIso = new Date().toISOString();
     const defaultStatus = manualStatus && manualStatus !== 'offline' ? manualStatus : 'online';
 
     // Lua script atomic connect:
-    // Thêm socket, user vào reverse index và active_users, xóa khỏi offline_deadlines,
-    // cập nhật activeSocketCount, trả về previous count.
+    // Thêm socket (ISO) vào presence:sockets và epoch ms vào presence:activity
+    // Xóa khỏi offline_deadlines, gán status theo precedence và lên lịch idle nếu online.
     const luaScript = `
       local sockKey = KEYS[1]
-      local instUsersKey = KEYS[2]
-      local activeUsersKey = KEYS[3]
-      local deadlineKey = KEYS[4]
-      local userKey = KEYS[5]
+      local actKey = KEYS[2]
+      local instUsersKey = KEYS[3]
+      local activeUsersKey = KEYS[4]
+      local offlineDeadlineKey = KEYS[5]
+      local idleDeadlineKey = KEYS[6]
+      local userKey = KEYS[7]
 
       local instanceId = ARGV[1]
       local socketId = ARGV[2]
       local nowIso = ARGV[3]
       local userId = ARGV[4]
       local defaultStatus = ARGV[5]
+      local idleAfterMs = tonumber(ARGV[6])
+
+      local redisTime = redis.call('TIME')
+      local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 
       local socketField = instanceId .. ':' .. socketId
       local prevCount = redis.call('HLEN', sockKey)
 
       redis.call('HSET', sockKey, socketField, nowIso)
+      redis.call('HSET', actKey, socketField, tostring(nowMs))
       redis.call('SADD', instUsersKey, userId)
       redis.call('SADD', activeUsersKey, userId)
-      redis.call('ZREM', deadlineKey, userId)
+      redis.call('ZREM', offlineDeadlineKey, userId)
 
       local currentCount = redis.call('HLEN', sockKey)
       redis.call('HSET', userKey, 'activeSocketCount', currentCount)
 
       local existingManual = redis.call('HGET', userKey, 'manualStatus')
+      local effectiveStatus = defaultStatus
       if existingManual and existingManual ~= '' and existingManual ~= 'offline' then
+        effectiveStatus = existingManual
         redis.call('HSET', userKey, 'status', existingManual)
       else
         redis.call('HSET', userKey, 'status', defaultStatus)
       end
 
-      return prevCount
+      if effectiveStatus == 'online' then
+        redis.call('ZADD', idleDeadlineKey, nowMs + idleAfterMs, userId)
+      else
+        redis.call('ZREM', idleDeadlineKey, userId)
+      end
+
+      return { prevCount, effectiveStatus }
     `;
 
-    const prevCount = (await this.client.eval(
+    const res = (await this.client.eval(
       luaScript,
-      5,
+      7,
       sockKey,
+      actKey,
       instUsersKey,
       activeUsersKey,
-      deadlineKey,
+      offlineDeadlineKey,
+      idleDeadlineKey,
       userKey,
       this.instanceId,
       socketId,
       nowIso,
       userId,
       defaultStatus,
-    )) as number;
+      PRESENCE_IDLE_AFTER_MS.toString(),
+    )) as [number, string];
 
     return {
-      isFirstConnection: prevCount === 0,
-      activeSocketCount: prevCount + 1,
+      isFirstConnection: res[0] === 0,
+      activeSocketCount: res[0] + 1,
+      status: res[1],
+    };
+  }
+
+  async handleUserActivity(
+    userId: string,
+    socketId: string,
+  ): Promise<{ changedToOnline: boolean; status: string }> {
+    if (!this.client || !this.isConnected) {
+      return { changedToOnline: false, status: 'online' };
+    }
+
+    const sockKey = this.k(`presence:sockets:${userId}`);
+    const actKey = this.k(`presence:activity:${userId}`);
+    const idleDeadlineKey = this.k('presence:idle_deadlines');
+    const userKey = this.k(`presence:user:${userId}`);
+
+    const luaScript = `
+      local sockKey = KEYS[1]
+      local actKey = KEYS[2]
+      local idleDeadlineKey = KEYS[3]
+      local userKey = KEYS[4]
+
+      local instanceId = ARGV[1]
+      local socketId = ARGV[2]
+      local userId = ARGV[3]
+      local idleAfterMs = tonumber(ARGV[4])
+
+      local redisTime = redis.call('TIME')
+      local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+      local socketField = instanceId .. ':' .. socketId
+
+      -- Chỉ cập nhật activity nếu socket còn đang kết nối
+      local exists = redis.call('HEXISTS', sockKey, socketField)
+      if exists == 0 then
+        return { 0, 'offline' }
+      end
+
+      redis.call('HSET', actKey, socketField, tostring(nowMs))
+
+      local manualStatus = redis.call('HGET', userKey, 'manualStatus')
+      if manualStatus and manualStatus ~= '' and manualStatus ~= 'offline' then
+        if manualStatus == 'dnd' or manualStatus == 'idle' then
+          redis.call('ZREM', idleDeadlineKey, userId)
+          return { 0, manualStatus }
+        end
+      end
+
+      redis.call('ZADD', idleDeadlineKey, nowMs + idleAfterMs, userId)
+
+      local curStatus = redis.call('HGET', userKey, 'status')
+      if curStatus == 'idle' then
+        redis.call('HSET', userKey, 'status', 'online')
+        return { 1, 'online' }
+      end
+
+      return { 0, curStatus or 'online' }
+    `;
+
+    const res = (await this.client.eval(
+      luaScript,
+      4,
+      sockKey,
+      actKey,
+      idleDeadlineKey,
+      userKey,
+      this.instanceId,
+      socketId,
+      userId,
+      PRESENCE_IDLE_AFTER_MS.toString(),
+    )) as [number, string];
+
+    return {
+      changedToOnline: res[0] === 1,
+      status: res[1],
     };
   }
 
@@ -242,29 +354,36 @@ export class RedisStateService
     }
 
     const sockKey = this.k(`presence:sockets:${userId}`);
+    const actKey = this.k(`presence:activity:${userId}`);
     const instUsersKey = this.k(`presence:instance:${this.instanceId}:users`);
     const deadlineKey = this.k('presence:offline_deadlines');
+    const idleDeadlineKey = this.k('presence:idle_deadlines');
     const userKey = this.k(`presence:user:${userId}`);
 
-    const nowMs = Date.now();
-    const deadlineMs = nowMs + 15000;
-
     // Lua script atomic disconnect:
-    // Xóa socket, dọn reverse index nếu hết socket trên instance này,
-    // đếm remaining. Nếu remaining == 0 -> đẩy vào offline_deadlines.
+    // Xóa socket khỏi presence:sockets và presence:activity,
+    // dọn reverse index nếu hết socket trên instance này.
+    // Nếu remaining == 0 -> ZADD offline_deadlines, ZREM idle_deadlines.
     const luaScript = `
       local sockKey = KEYS[1]
-      local instUsersKey = KEYS[2]
-      local deadlineKey = KEYS[3]
-      local userKey = KEYS[4]
+      local actKey = KEYS[2]
+      local instUsersKey = KEYS[3]
+      local deadlineKey = KEYS[4]
+      local idleDeadlineKey = KEYS[5]
+      local userKey = KEYS[6]
 
       local instanceId = ARGV[1]
       local socketId = ARGV[2]
       local userId = ARGV[3]
-      local deadlineMs = tonumber(ARGV[4])
+      local gracePeriodMs = tonumber(ARGV[4])
+
+      local redisTime = redis.call('TIME')
+      local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+      local deadlineMs = nowMs + gracePeriodMs
 
       local socketField = instanceId .. ':' .. socketId
       redis.call('HDEL', sockKey, socketField)
+      redis.call('HDEL', actKey, socketField)
 
       local allFields = redis.call('HKEYS', sockKey)
       local hasInstanceSocket = false
@@ -283,21 +402,24 @@ export class RedisStateService
       redis.call('HSET', userKey, 'activeSocketCount', remaining)
       if remaining == 0 then
         redis.call('ZADD', deadlineKey, deadlineMs, userId)
+        redis.call('ZREM', idleDeadlineKey, userId)
       end
       return remaining
     `;
 
     const remaining = (await this.client.eval(
       luaScript,
-      4,
+      6,
       sockKey,
+      actKey,
       instUsersKey,
       deadlineKey,
+      idleDeadlineKey,
       userKey,
       this.instanceId,
       socketId,
       userId,
-      deadlineMs.toString(),
+      '15000',
     )) as number;
 
     return {
@@ -323,42 +445,114 @@ export class RedisStateService
     };
   }
 
-  async setManualStatus(userId: string, manualStatus: string): Promise<void> {
+  async setManualStatus(userId: string, manualStatus: string | null): Promise<void> {
     if (!this.client || !this.isConnected) return;
     const userKey = this.k(`presence:user:${userId}`);
-    await this.client.hset(userKey, 'manualStatus', manualStatus);
-    const sockCount = await this.client.hlen(this.k(`presence:sockets:${userId}`));
-    if (sockCount > 0) {
-      await this.client.hset(userKey, 'status', manualStatus);
-    }
+    const sockKey = this.k(`presence:sockets:${userId}`);
+    const actKey = this.k(`presence:activity:${userId}`);
+    const idleDeadlineKey = this.k('presence:idle_deadlines');
+
+    const luaScript = `
+      local userKey = KEYS[1]
+      local sockKey = KEYS[2]
+      local actKey = KEYS[3]
+      local idleDeadlineKey = KEYS[4]
+
+      local userId = ARGV[1]
+      local manualStatus = ARGV[2]
+      local idleAfterMs = tonumber(ARGV[3])
+
+      local redisTime = redis.call('TIME')
+      local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+
+      -- online/offline/null đều quay lại automatic presence.
+      if manualStatus == '' or manualStatus == 'online' or manualStatus == 'offline' then
+        redis.call('HDEL', userKey, 'manualStatus')
+      else
+        redis.call('HSET', userKey, 'manualStatus', manualStatus)
+      end
+
+      local sockCount = redis.call('HLEN', sockKey)
+      if sockCount == 0 then
+        redis.call('HSET', userKey, 'status', 'offline', 'activeSocketCount', 0)
+        redis.call('ZREM', idleDeadlineKey, userId)
+        return 'offline'
+      end
+
+      if manualStatus == 'dnd' or manualStatus == 'idle' then
+        redis.call('HSET', userKey, 'status', manualStatus, 'activeSocketCount', sockCount)
+        redis.call('ZREM', idleDeadlineKey, userId)
+        return manualStatus
+      end
+
+      local maxAct = 0
+      local actVals = redis.call('HVALS', actKey)
+      for _, v in ipairs(actVals) do
+        local ms = tonumber(v)
+        if ms and ms > maxAct then
+          maxAct = ms
+        end
+      end
+      if maxAct == 0 then
+        maxAct = nowMs
+      end
+
+      if maxAct + idleAfterMs <= nowMs then
+        redis.call('HSET', userKey, 'status', 'idle', 'activeSocketCount', sockCount)
+        redis.call('ZREM', idleDeadlineKey, userId)
+        return 'idle'
+      end
+
+      redis.call('HSET', userKey, 'status', 'online', 'activeSocketCount', sockCount)
+      redis.call('ZADD', idleDeadlineKey, maxAct + idleAfterMs, userId)
+      return 'online'
+    `;
+
+    await this.client.eval(
+      luaScript,
+      4,
+      userKey,
+      sockKey,
+      actKey,
+      idleDeadlineKey,
+      userId,
+      manualStatus ?? '',
+      PRESENCE_IDLE_AFTER_MS.toString(),
+    );
   }
 
   async setExplicitOffline(userId: string): Promise<string> {
-    const nowIso = new Date().toISOString();
-    if (!this.client || !this.isConnected) return nowIso;
+    if (!this.client || !this.isConnected) return new Date().toISOString();
+    const nowIso = new Date(await this.getRedisTimeMs()).toISOString();
 
     const sockKey = this.k(`presence:sockets:${userId}`);
+    const actKey = this.k(`presence:activity:${userId}`);
     const instUsersKey = this.k(`presence:instance:${this.instanceId}:users`);
     const activeUsersKey = this.k('presence:active_users');
     const deadlineKey = this.k('presence:offline_deadlines');
+    const idleDeadlineKey = this.k('presence:idle_deadlines');
     const userKey = this.k(`presence:user:${userId}`);
 
     const luaScript = `
       redis.call('DEL', KEYS[1])
-      redis.call('SREM', KEYS[2], ARGV[1])
+      redis.call('DEL', KEYS[2])
       redis.call('SREM', KEYS[3], ARGV[1])
-      redis.call('ZREM', KEYS[4], ARGV[1])
-      redis.call('HSET', KEYS[5], 'status', 'offline', 'lastSeenAt', ARGV[2], 'activeSocketCount', 0)
+      redis.call('SREM', KEYS[4], ARGV[1])
+      redis.call('ZREM', KEYS[5], ARGV[1])
+      redis.call('ZREM', KEYS[6], ARGV[1])
+      redis.call('HSET', KEYS[7], 'status', 'offline', 'lastSeenAt', ARGV[2], 'activeSocketCount', 0)
       return 1
     `;
 
     await this.client.eval(
       luaScript,
-      5,
+      7,
       sockKey,
+      actKey,
       instUsersKey,
       activeUsersKey,
       deadlineKey,
+      idleDeadlineKey,
       userKey,
       userId,
       nowIso,
@@ -384,8 +578,6 @@ export class RedisStateService
   async sweepDeadInstances(): Promise<{ deadInstances: number; cleanedSockets: number }> {
     if (!this.client || !this.isConnected) return { deadInstances: 0, cleanedSockets: 0 };
     const instances = await this.client.smembers(this.k('presence:instances'));
-    const nowMs = Date.now();
-    const deadlineMs = nowMs + 15000;
     let deadCount = 0;
     let socketsCount = 0;
 
@@ -403,12 +595,18 @@ export class RedisStateService
 
         const luaCleanupScript = `
           local sockKey = KEYS[1]
-          local deadlineKey = KEYS[2]
-          local userKey = KEYS[3]
+          local actKey = KEYS[2]
+          local deadlineKey = KEYS[3]
+          local idleDeadlineKey = KEYS[4]
+          local userKey = KEYS[5]
 
           local deadInst = ARGV[1]
           local userId = ARGV[2]
-          local deadlineMs = tonumber(ARGV[3])
+          local gracePeriodMs = tonumber(ARGV[3])
+
+          local redisTime = redis.call('TIME')
+          local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+          local deadlineMs = nowMs + gracePeriodMs
 
           local deadPrefix = deadInst .. ':'
           local allFields = redis.call('HKEYS', sockKey)
@@ -416,6 +614,7 @@ export class RedisStateService
           for i, field in ipairs(allFields) do
             if string.sub(field, 1, string.len(deadPrefix)) == deadPrefix then
               redis.call('HDEL', sockKey, field)
+              redis.call('HDEL', actKey, field)
               cleaned = cleaned + 1
             end
           end
@@ -424,6 +623,7 @@ export class RedisStateService
           redis.call('HSET', userKey, 'activeSocketCount', remaining)
           if remaining == 0 then
             redis.call('ZADD', deadlineKey, deadlineMs, userId)
+            redis.call('ZREM', idleDeadlineKey, userId)
           end
           return cleaned
         `;
@@ -432,13 +632,15 @@ export class RedisStateService
           try {
             const cleaned = (await this.client.eval(
               luaCleanupScript,
-              3,
+              5,
               this.k(`presence:sockets:${uId}`),
+              this.k(`presence:activity:${uId}`),
               this.k('presence:offline_deadlines'),
+              this.k('presence:idle_deadlines'),
               this.k(`presence:user:${uId}`),
               instId,
               uId,
-              deadlineMs.toString(),
+              '15000',
             )) as number;
             socketsCount += cleaned;
           } catch (err: any) {
@@ -455,7 +657,117 @@ export class RedisStateService
   }
 
   // ---------------------------------------------------------------------------
-  // 5. Offline Deadline Processor & Token-Safe Distributed Lock (Mỗi 3s)
+  // 5. Idle Deadline Processor (Mỗi 3s)
+  // ---------------------------------------------------------------------------
+  private startIdleProcessor(): void {
+    this.idleProcessorTimer = setInterval(async () => {
+      try {
+        if (!this.client || !this.isConnected) return;
+        await this.processIdleDeadlines();
+      } catch (err: any) {
+        this.logger.warn(`Lỗi processIdleDeadlines: ${err.message}`);
+      }
+    }, 3000);
+  }
+
+  async processIdleDeadlines(): Promise<void> {
+    if (!this.client || !this.isConnected) return;
+    const nowMs = await this.getRedisTimeMs();
+    const expiredUsers = await this.client.zrangebyscore(
+      this.k('presence:idle_deadlines'),
+      0,
+      nowMs,
+      'LIMIT',
+      0,
+      50,
+    );
+
+    if (!expiredUsers || expiredUsers.length === 0) return;
+
+    for (const userId of expiredUsers) {
+      const sockKey = this.k(`presence:sockets:${userId}`);
+      const actKey = this.k(`presence:activity:${userId}`);
+      const idleDeadlineKey = this.k('presence:idle_deadlines');
+      const userKey = this.k(`presence:user:${userId}`);
+
+      const luaScript = `
+        local sockKey = KEYS[1]
+        local actKey = KEYS[2]
+        local idleDeadlineKey = KEYS[3]
+        local userKey = KEYS[4]
+
+        local userId = ARGV[1]
+        local idleAfterMs = tonumber(ARGV[2])
+
+        local redisTime = redis.call('TIME')
+        local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
+
+        local curScore = redis.call('ZSCORE', idleDeadlineKey, userId)
+        if not curScore or tonumber(curScore) > nowMs then
+          return 0
+        end
+
+        local sockCount = redis.call('HLEN', sockKey)
+        if sockCount == 0 then
+          redis.call('ZREM', idleDeadlineKey, userId)
+          return 0
+        end
+
+        local manualStatus = redis.call('HGET', userKey, 'manualStatus')
+        if manualStatus and (manualStatus == 'dnd' or manualStatus == 'idle') then
+          redis.call('ZREM', idleDeadlineKey, userId)
+          return 0
+        end
+
+        -- Quét toàn bộ activity timestamps của các live sockets
+        local actVals = redis.call('HVALS', actKey)
+        local maxAct = 0
+        for _, v in ipairs(actVals) do
+          local ms = tonumber(v)
+          if ms and ms > maxAct then
+            maxAct = ms
+          end
+        end
+
+        if maxAct > 0 and (maxAct + idleAfterMs) > nowMs then
+          redis.call('ZADD', idleDeadlineKey, maxAct + idleAfterMs, userId)
+          return 0
+        end
+
+        local curStatus = redis.call('HGET', userKey, 'status')
+        if curStatus == 'online' then
+          redis.call('HSET', userKey, 'status', 'idle')
+          redis.call('ZREM', idleDeadlineKey, userId)
+          return 1
+        end
+
+        redis.call('ZREM', idleDeadlineKey, userId)
+        return 0
+      `;
+
+      try {
+        const transitioned = (await this.client.eval(
+          luaScript,
+          4,
+          sockKey,
+          actKey,
+          idleDeadlineKey,
+          userKey,
+          userId,
+          PRESENCE_IDLE_AFTER_MS.toString(),
+        )) as number;
+
+        if (transitioned === 1 && this.onIdleCallback) {
+          this.onIdleCallback({ userId });
+        }
+      } catch (err: any) {
+        this.logger.error(`Lỗi xử lý idle deadline cho user ${userId}: ${err.message}`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Offline Deadline Processor & Token-Safe Distributed Lock (Mỗi 3s)
   // ---------------------------------------------------------------------------
   private startOfflineProcessor(): void {
     this.offlineProcessorTimer = setInterval(async () => {
@@ -470,7 +782,7 @@ export class RedisStateService
 
   async processOfflineDeadlines(): Promise<void> {
     if (!this.client || !this.isConnected) return;
-    const nowMs = Date.now();
+    const nowMs = await this.getRedisTimeMs();
     const expiredUsers = await this.client.zrangebyscore(
       this.k('presence:offline_deadlines'),
       0,
@@ -483,7 +795,7 @@ export class RedisStateService
     if (!expiredUsers || expiredUsers.length === 0) return;
 
     const workerToken = `${this.instanceId}-${crypto.randomUUID()}`;
-    const nowIso = new Date().toISOString();
+    const nowIso = new Date(nowMs).toISOString();
 
     for (const userId of expiredUsers) {
       const lockKey = this.k(`lock:presence:offline:${userId}`);
@@ -493,9 +805,11 @@ export class RedisStateService
       try {
         const luaConfirmScript = `
           local sockKey = KEYS[1]
-          local deadlineKey = KEYS[2]
-          local activeUsersKey = KEYS[3]
-          local userKey = KEYS[4]
+          local actKey = KEYS[2]
+          local deadlineKey = KEYS[3]
+          local idleDeadlineKey = KEYS[4]
+          local activeUsersKey = KEYS[5]
+          local userKey = KEYS[6]
 
           local userId = ARGV[1]
           local nowIso = ARGV[2]
@@ -504,7 +818,9 @@ export class RedisStateService
           if remaining == 0 then
             local removed = redis.call('ZREM', deadlineKey, userId)
             if removed == 1 then
+              redis.call('ZREM', idleDeadlineKey, userId)
               redis.call('SREM', activeUsersKey, userId)
+              redis.call('DEL', actKey)
               redis.call('HSET', userKey, 'status', 'offline', 'lastSeenAt', nowIso, 'activeSocketCount', 0)
               return 1
             end
@@ -517,9 +833,11 @@ export class RedisStateService
 
         const result = (await this.client.eval(
           luaConfirmScript,
-          4,
+          6,
           this.k(`presence:sockets:${userId}`),
+          this.k(`presence:activity:${userId}`),
           this.k('presence:offline_deadlines'),
+          this.k('presence:idle_deadlines'),
           this.k('presence:active_users'),
           this.k(`presence:user:${userId}`),
           userId,
@@ -846,6 +1164,7 @@ export class RedisStateService
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.deadInstanceSweeperTimer) clearInterval(this.deadInstanceSweeperTimer);
     if (this.offlineProcessorTimer) clearInterval(this.offlineProcessorTimer);
+    if (this.idleProcessorTimer) clearInterval(this.idleProcessorTimer);
     if (this.typingSweeperTimer) clearInterval(this.typingSweeperTimer);
 
     if (this.client) {

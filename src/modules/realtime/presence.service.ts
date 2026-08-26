@@ -6,7 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
-import type { PresenceStatus } from '../../shared/socket-events';
+import type { PresenceStatus, UserPresenceDto } from '../../shared/socket-events';
 import { ConversationsService } from '../conversations/conversations.service';
 import { FriendsService } from '../friends/friends.service';
 import { RedisStateService } from './redis-state.service';
@@ -30,6 +30,18 @@ export interface OfflineBroadcastPayload {
   peers: string[];
 }
 
+export interface IdleBroadcastPayload {
+  userId: string;
+  status: 'idle';
+  peers: string[];
+}
+
+export interface ActivityBroadcastPayload {
+  userId: string;
+  status: PresenceStatus;
+  peers: string[];
+}
+
 @Injectable()
 export class PresenceService
   implements OnModuleInit, OnModuleDestroy, OnApplicationShutdown
@@ -38,6 +50,9 @@ export class PresenceService
 
   /** Thời gian ân hạn (ms) khi mất kết nối mạng / F5 trước khi phát tán offline */
   private readonly GRACE_PERIOD_MS = 15000;
+
+  /** Thời gian không hoạt động (ms) trước khi chuyển sang idle */
+  private readonly IDLE_AFTER_MS = 15 * 60 * 1000;
 
   /** Quản lý danh sách socket IDs đang hoạt động của từng userId (cho in-memory mode) */
   private readonly userSockets = new Map<string, Set<string>>();
@@ -48,6 +63,12 @@ export class PresenceService
   /** Timers đếm lùi offline theo userId (cho in-memory mode) */
   private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
 
+  /** Timers đếm lùi idle theo userId (cho in-memory mode) */
+  private readonly idleTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Trạng thái hiện diện in-memory của user */
+  private readonly inMemoryStatus = new Map<string, PresenceStatus>();
+
   /** Lưu timestamp ngắt kết nối gần nhất của user */
   private readonly lastSeenCache = new Map<string, string>();
 
@@ -56,6 +77,9 @@ export class PresenceService
 
   /** Callback phát offline ra toàn cluster khi deadline hết hạn */
   private clusterOfflineHandler?: (payload: OfflineBroadcastPayload) => void;
+
+  /** Callback phát idle ra toàn cluster khi idle deadline hết hạn */
+  private clusterIdleHandler?: (payload: IdleBroadcastPayload) => void;
 
   constructor(
     private readonly supabase: SupabaseService,
@@ -80,12 +104,30 @@ export class PresenceService
         });
       }
     });
+
+    this.redisState.setIdleCallback(async ({ userId }) => {
+      this.logger.log(`Cluster idle confirmed cho user ${userId}`);
+      if (this.clusterIdleHandler) {
+        const peers = await this.getUserPeers(userId);
+        this.clusterIdleHandler({
+          userId,
+          status: 'idle',
+          peers,
+        });
+      }
+    });
   }
 
   setClusterOfflineHandler(
     handler: (payload: OfflineBroadcastPayload) => void,
   ): void {
     this.clusterOfflineHandler = handler;
+  }
+
+  setClusterIdleHandler(
+    handler: (payload: IdleBroadcastPayload) => void,
+  ): void {
+    this.clusterIdleHandler = handler;
   }
 
   /**
@@ -103,20 +145,19 @@ export class PresenceService
     this.socketUser.set(socketId, userId);
 
     if (this.redisState.isDistributedActive()) {
-      const { isFirstConnection } =
+      const { isFirstConnection, status } =
         await this.redisState.handleSocketConnect(userId, socketId, manual);
-      const status: PresenceStatus =
-        manual === 'dnd' || manual === 'idle' ? manual : 'online';
+      const effectiveStatus: PresenceStatus = (status as PresenceStatus) || 'online';
       const peers = await this.getUserPeers(userId);
 
       this.logger.log(
-        `[Distributed] User ${userId} kết nối socket ${socketId} (isFirstConnection=${isFirstConnection}, status=${status})`,
+        `[Distributed] User ${userId} kết nối socket ${socketId} (isFirstConnection=${isFirstConnection}, status=${effectiveStatus})`,
       );
 
       return {
         userId,
         isFirstConnection,
-        status,
+        status: effectiveStatus,
         peers,
       };
     }
@@ -137,6 +178,9 @@ export class PresenceService
     sockets.add(socketId);
 
     const status = this.getEffectiveStatus(userId);
+    this.inMemoryStatus.set(userId, status);
+    this.resetInMemoryIdleTimer(userId);
+
     const peers = await this.getUserPeers(userId);
 
     return {
@@ -145,6 +189,51 @@ export class PresenceService
       status,
       peers,
     };
+  }
+
+  /**
+   * Xử lý hoạt động tương tác từ user socket (throttled 30s từ client)
+   */
+  async handleUserActivity(
+    socketId: string,
+  ): Promise<ActivityBroadcastPayload | null> {
+    const userId = this.socketUser.get(socketId);
+    if (!userId) {
+      return null;
+    }
+
+    if (this.redisState.isDistributedActive()) {
+      const res = await this.redisState.handleUserActivity(userId, socketId);
+      if (res.changedToOnline) {
+        const peers = await this.getUserPeers(userId);
+        return {
+          userId,
+          status: 'online',
+          peers,
+        };
+      }
+      return null;
+    }
+
+    // In-memory fallback
+    const manual = this.manualPresenceCache.get(userId);
+    if (manual === 'dnd' || manual === 'idle') {
+      return null;
+    }
+
+    this.resetInMemoryIdleTimer(userId);
+    const prevStatus = this.inMemoryStatus.get(userId) || 'online';
+    if (prevStatus === 'idle') {
+      this.inMemoryStatus.set(userId, 'online');
+      const peers = await this.getUserPeers(userId);
+      return {
+        userId,
+        status: 'online',
+        peers,
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -272,10 +361,19 @@ export class PresenceService
   /**
    * Cập nhật lựa chọn manual presence của user
    */
-  async setManualPresence(userId: string, status: PresenceStatus): Promise<void> {
-    this.manualPresenceCache.set(userId, status);
+  async setManualPresence(userId: string, status: PresenceStatus | null): Promise<void> {
+    if (status) {
+      this.manualPresenceCache.set(userId, status);
+    } else {
+      this.manualPresenceCache.delete(userId);
+    }
+
     if (this.redisState.isDistributedActive()) {
       await this.redisState.setManualStatus(userId, status);
+    } else {
+      const effective = this.getEffectiveStatus(userId);
+      this.inMemoryStatus.set(userId, effective);
+      this.resetInMemoryIdleTimer(userId);
     }
   }
 
@@ -284,6 +382,46 @@ export class PresenceService
    */
   getLastSeenAt(userId: string): string | null {
     return this.lastSeenCache.get(userId) ?? null;
+  }
+
+  /**
+   * Reset bộ đếm 15 phút idle cho user (in-memory mode)
+   */
+  private resetInMemoryIdleTimer(userId: string): void {
+    const existing = this.idleTimers.get(userId);
+    if (existing) {
+      clearTimeout(existing);
+      this.idleTimers.delete(userId);
+    }
+
+    const manual = this.manualPresenceCache.get(userId);
+    if (manual === 'dnd' || manual === 'idle') {
+      return;
+    }
+
+    const isConnected = (this.userSockets.get(userId)?.size ?? 0) > 0;
+    if (!isConnected) {
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      this.idleTimers.delete(userId);
+      const isStillConnected = (this.userSockets.get(userId)?.size ?? 0) > 0;
+      const currentManual = this.manualPresenceCache.get(userId);
+      if (isStillConnected && (!currentManual || currentManual === 'online')) {
+        this.inMemoryStatus.set(userId, 'idle');
+        if (this.clusterIdleHandler) {
+          const peers = await this.getUserPeers(userId);
+          this.clusterIdleHandler({
+            userId,
+            status: 'idle',
+            peers,
+          });
+        }
+      }
+    }, this.IDLE_AFTER_MS);
+
+    this.idleTimers.set(userId, timer);
   }
 
   /**
@@ -316,25 +454,23 @@ export class PresenceService
    */
   async getPeersSnapshot(
     userId: string,
-  ): Promise<
-    Record<string, { status: PresenceStatus; lastSeenAt: string | null }>
-  > {
+  ): Promise<Record<string, UserPresenceDto>> {
     const peers = await this.getUserPeers(userId);
-    const result: Record<
-      string,
-      { status: PresenceStatus; lastSeenAt: string | null }
-    > = {};
+    const result: Record<string, UserPresenceDto> = {};
 
     for (const peerId of peers) {
       if (this.redisState.isDistributedActive()) {
         const pres = await this.redisState.getUserPresence(peerId);
         result[peerId] = {
+          userId: peerId,
           status: ((pres?.status as PresenceStatus) || 'offline'),
           lastSeenAt: pres?.lastSeenAt ?? null,
         };
       } else {
+        const status = this.inMemoryStatus.get(peerId) || this.getEffectiveStatus(peerId);
         result[peerId] = {
-          status: this.getEffectiveStatus(peerId),
+          userId: peerId,
+          status,
           lastSeenAt: this.getLastSeenAt(peerId),
         };
       }
@@ -374,12 +510,20 @@ export class PresenceService
     lastSeenAt: string,
   ): Promise<void> {
     try {
-      await this.supabase.client
-        .from('profiles')
-        .update({ last_seen_at: lastSeenAt })
-        .eq('id', userId);
-    } catch {
-      // Gracefully ignored
+      // Ưu tiên monotonic update qua RPC nếu có
+      const { error } = await this.supabase.client.rpc('update_profile_last_seen', {
+        p_user_id: userId,
+        p_last_seen_at: lastSeenAt,
+      });
+      if (error) {
+        throw error;
+      }
+    } catch (error) {
+      // Không fallback sang UPDATE trực tiếp: stale worker có thể làm timestamp lùi.
+      this.logger.error(
+        `Không thể cập nhật last_seen_at đơn điệu cho user ${userId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
     }
   }
 
@@ -396,7 +540,14 @@ export class PresenceService
       clearTimeout(timer);
     }
     this.disconnectTimers.clear();
+
+    for (const timer of this.idleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.idleTimers.clear();
+
     this.userSockets.clear();
     this.socketUser.clear();
+    this.inMemoryStatus.clear();
   }
 }

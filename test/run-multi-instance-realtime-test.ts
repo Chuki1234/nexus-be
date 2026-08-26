@@ -669,6 +669,55 @@ async function runMultiInstanceRealtimeTest() {
     await new Promise<void>((resolve) => client1B.on('connect', () => resolve()));
     await waitMs(300);
 
+    // Ép activity của mọi socket User 1 quá hạn để kiểm tra idle sweeper thật.
+    let user1IdleEventsCount = 0;
+    const user1IdlePromise = new Promise<void>((resolve) => {
+      client2.on('presence:updated', (payload: any) => {
+        if (payload.userId === user1Id && payload.status === 'idle') {
+          user1IdleEventsCount++;
+          resolve();
+        }
+      });
+    });
+    const redisClock = await testRedis.time();
+    const redisNowMs = Number(redisClock[0]) * 1000 + Math.floor(Number(redisClock[1]) / 1000);
+    const user1ActivityKey = `nexus_test:presence:activity:${user1Id}`;
+    const user1ActivityFields = await testRedis.hkeys(user1ActivityKey);
+    for (const field of user1ActivityFields) {
+      await testRedis.hset(user1ActivityKey, field, String(redisNowMs - 15 * 60 * 1000 - 1000));
+    }
+    await testRedis.zadd('nexus_test:presence:idle_deadlines', redisNowMs - 1, user1Id);
+
+    await Promise.race([user1IdlePromise, waitMs(5000)]);
+    await waitMs(300);
+    const idlePresence = await testRedis.hgetall(`nexus_test:presence:user:${user1Id}`);
+    if (idlePresence.status !== 'idle' || user1IdleEventsCount !== 1) {
+      throw new Error(
+        `Idle transition multi-instance không chính xác: status=${idlePresence.status}, events=${user1IdleEventsCount}`,
+      );
+    }
+    console.log('✔ [Assertion 4a] Redis idle deadline chuyển online -> idle và phát đúng 1 cross-instance event');
+
+    let user1OnlineEventsCount = 0;
+    const user1OnlinePromise = new Promise<void>((resolve) => {
+      client2.on('presence:updated', (payload: any) => {
+        if (payload.userId === user1Id && payload.status === 'online') {
+          user1OnlineEventsCount++;
+          resolve();
+        }
+      });
+    });
+    client1B.emit('presence:activity');
+    await Promise.race([user1OnlinePromise, waitMs(4000)]);
+    await waitMs(300);
+    const onlinePresence = await testRedis.hgetall(`nexus_test:presence:user:${user1Id}`);
+    if (onlinePresence.status !== 'online' || user1OnlineEventsCount !== 1) {
+      throw new Error(
+        `Activity recovery multi-instance không chính xác: status=${onlinePresence.status}, events=${user1OnlineEventsCount}`,
+      );
+    }
+    console.log('✔ [Assertion 4b] presence:activity chuyển idle -> online và phát đúng 1 cross-instance event');
+
     // Ngắt kết nối socket 1A trên Instance A
     client1.disconnect();
     await waitMs(500);
@@ -731,22 +780,25 @@ async function runMultiInstanceRealtimeTest() {
     let deadSocketsCleaned = 0;
     for (const uId of deadUsers) {
       const sockKey = `nexus_test:presence:sockets:${uId}`;
+      const actKey = `nexus_test:presence:activity:${uId}`;
       const fields = await testRedis.hkeys(sockKey);
       for (const f of fields) {
         if (f.startsWith('instance-alpha-3301:')) {
           await testRedis.hdel(sockKey, f);
+          await testRedis.hdel(actKey, f);
           deadSocketsCleaned++;
         }
       }
       const remainingSockets = await testRedis.hlen(sockKey);
       if (remainingSockets === 0) {
         await testRedis.zadd('nexus_test:presence:offline_deadlines', (Date.now() - 1000).toString(), uId);
+        await testRedis.zrem('nexus_test:presence:idle_deadlines', uId);
       }
     }
     await testRedis.del(deadInstanceUsersKey);
     await testRedis.srem('nexus_test:presence:instances', 'instance-alpha-3301');
 
-    console.log(`✔ [Assertion 7a] Real SIGKILL child process A đã thoát, dead-instance sockets (${deadSocketsCleaned}) đã được dọn sạch khỏi cluster`);
+    console.log(`✔ [Assertion 7a] Real SIGKILL child process A đã thoát, dead-instance sockets & activity (${deadSocketsCleaned}) đã được dọn sạch khỏi cluster`);
 
     // Chờ Instance B offline processor (chu kỳ 3s) xử lý expired deadline
     await Promise.race([

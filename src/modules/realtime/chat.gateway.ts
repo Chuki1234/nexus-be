@@ -100,7 +100,18 @@ export class ChatGateway
       }
     });
 
-    // 2. Lắng nghe typing updates từ active typing sweeper
+    // 2. Lắng nghe cluster idle notifications từ PresenceService / RedisState
+    this.presenceService.setClusterIdleHandler((idlePayload) => {
+      for (const peerId of idlePayload.peers) {
+        this.server?.to(Room.user(peerId)).emit('presence:updated', {
+          userId: idlePayload.userId,
+          status: 'idle',
+          lastSeenAt: null,
+        });
+      }
+    });
+
+    // 3. Lắng nghe typing updates từ active typing sweeper
     this.redisState.setTypingUpdateCallback(({ targetId, isChannel, userIds }) => {
       if (isChannel) {
         this.server
@@ -224,6 +235,20 @@ export class ChatGateway
       }
 
       this.logger.log(`Socket ${client.id} (user ${userId}) đã ngắt kết nối`);
+    }
+  }
+
+  @SubscribeMessage('presence:activity')
+  async handlePresenceActivity(client: TypedSocket): Promise<void> {
+    const broadcastPayload = await this.presenceService.handleUserActivity(client.id);
+    if (broadcastPayload) {
+      for (const peerId of broadcastPayload.peers) {
+        this.server.to(Room.user(peerId)).emit('presence:updated', {
+          userId: broadcastPayload.userId,
+          status: broadcastPayload.status,
+          lastSeenAt: null,
+        });
+      }
     }
   }
 

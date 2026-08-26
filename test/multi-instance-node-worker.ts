@@ -384,6 +384,17 @@ async function bootstrap() {
             return { data: null, error: { message: err.message, code: err.code } };
           }
         }
+        if (fn === 'update_profile_last_seen') {
+          try {
+            await pgPool.query(
+              `SELECT public.update_profile_last_seen($1, $2)`,
+              [params.p_user_id, params.p_last_seen_at],
+            );
+            return { data: null, error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
         return { data: null, error: null };
       },
       storage: {
