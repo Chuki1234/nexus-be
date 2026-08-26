@@ -1,18 +1,16 @@
 import {
   BadRequestException,
   ConflictException,
-  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
   NotFoundException,
-  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { PresenceStatus } from '../../shared/dto/common';
-import { Room } from '../../shared/socket-events';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
-import { ChatGateway } from '../realtime/chat.gateway';
+import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import type {
   FriendRequestsResponseDto,
   FriendRequestSummaryDto,
@@ -59,7 +57,7 @@ export class FriendsService {
 
   constructor(
     private readonly supabase: SupabaseService,
-    @Optional() @Inject(ChatGateway) private readonly chatGateway?: ChatGateway,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async sendRequest(
@@ -243,18 +241,11 @@ export class FriendsService {
         }
 
         // Phát realtime sự kiện conversation:deleted tới user-room của cả 2 phía
-        try {
-          this.chatGateway?.server?.to(Room.user(userId)).emit('conversation:deleted', {
-            conversationId: convId,
-            friendId,
-          });
-          this.chatGateway?.server?.to(Room.user(friendId)).emit('conversation:deleted', {
-            conversationId: convId,
-            friendId: userId,
-          });
-        } catch (emitErr) {
-          this.logger.warn('Lỗi emit conversation:deleted realtime:', emitErr);
-        }
+        this.eventEmitter.emit(CHAT_EVENTS.CONVERSATION_DELETED, {
+          conversationId: convId,
+          userId,
+          friendId,
+        });
       }
     } catch (err) {
       this.logger.error('Lỗi dọn dẹp conversation khi removeFriend:', err);

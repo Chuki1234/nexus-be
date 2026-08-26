@@ -27,6 +27,7 @@ import { PresenceService } from './presence.service';
 import { RedisStateService } from './redis-state.service';
 import {
   CHAT_EVENTS,
+  type ConversationDeletedEvent,
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageHiddenForUserEvent,
@@ -868,6 +869,19 @@ export class ChatGateway
         lastReadMessageId,
       });
     }
+  }
+
+  @OnEvent(CHAT_EVENTS.CONVERSATION_DELETED)
+  handleConversationDeleted(event: ConversationDeletedEvent): void {
+    const { conversationId, userId, friendId } = event;
+    this.server?.to(Room.user(userId)).emit('conversation:deleted', {
+      conversationId,
+      friendId,
+    });
+    this.server?.to(Room.user(friendId)).emit('conversation:deleted', {
+      conversationId,
+      friendId: userId,
+    });
   }
 
   @OnEvent(CHAT_EVENTS.REACTION_UPDATED)

@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { FriendsService } from './friends.service';
 
@@ -131,6 +132,10 @@ describe('FriendsService', () => {
         {
           provide: SupabaseService,
           useValue: { client: { from } },
+        },
+        {
+          provide: EventEmitter2,
+          useValue: { emit: jest.fn() },
         },
       ],
     }).compile();
