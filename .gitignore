@@ -55,6 +55,8 @@ pids
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
+# Local agent session context (per-machine, not for git)
+.claude/student-context.json
+
 # Bài tập trường "Quầy Trà Sữa" — không liên quan Nexus, đang tắt trong app.module.ts.
 src/modules/drink/
-.claude/student-context.json

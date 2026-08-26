@@ -273,8 +273,8 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
     });
 
     await Promise.all([
-      new Promise((res) => socketA.on('connect', res)),
-      new Promise((res) => socketB.on('connect', res)),
+      new Promise<void>((res) => socketA.on('connect', () => res())),
+      new Promise<void>((res) => socketB.on('connect', () => res())),
     ]);
 
     expect(socketA.connected).toBe(true);
@@ -426,7 +426,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       transports: ['websocket'],
     });
 
-    await new Promise((res) => reconnectSocketB.on('connect', res));
+    await new Promise<void>((res) => reconnectSocketB.on('connect', () => res()));
     const joinRes = await new Promise<{ success: boolean }>((res) => {
       reconnectSocketB.emit('conversation:join', { conversationId: convId }, res);
     });
@@ -457,7 +457,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       auth: { token: 'token-user-a' },
       transports: ['websocket'],
     });
-    await new Promise((res) => socketTest.on('connect', res));
+    await new Promise<void>((res) => socketTest.on('connect', () => res()));
 
     const joinRes = await new Promise<{ success: boolean; status?: string }>((res) => {
       socketTest.emit('conversation:join', { conversationId: convId }, res);
@@ -475,7 +475,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       auth: { token: 'token-user-b' },
       transports: ['websocket'],
     });
-    await new Promise((res) => socketB.on('connect', res));
+    await new Promise<void>((res) => socketB.on('connect', () => res()));
 
     // B KHÔNG join conversation room, chỉ có user room (auto-join trong handleConnection)
     const updatedPromise = new Promise<any>((resolve) => {
@@ -504,7 +504,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       auth: { token: 'token-user-a' },
       transports: ['websocket'],
     });
-    await new Promise((res) => socketA.on('connect', res));
+    await new Promise<void>((res) => socketA.on('connect', () => res()));
 
     let senderReceivedUpdate = false;
     socketA.once('conversation:updated', () => {
@@ -747,7 +747,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
     });
 
     try {
-      await new Promise((res) => reconnectingSocket.on('connect', res));
+      await new Promise<void>((res) => reconnectingSocket.on('connect', () => res()));
 
       // Join room ban đầu
       await new Promise<any>((resolve) => {
@@ -759,7 +759,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       reconnectingSocket.disconnect();
       reconnectingSocket.connect();
 
-      await new Promise((res) => reconnectingSocket.on('connect', res));
+      await new Promise<void>((res) => reconnectingSocket.on('connect', () => res()));
 
       // Auto-rejoin room sau connect
       await new Promise<any>((resolve) => {
