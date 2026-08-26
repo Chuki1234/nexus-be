@@ -1,5 +1,6 @@
 import { IsOptional, IsString, MaxLength } from 'class-validator';
-import { DISPLAY_NAME_MAX_LENGTH, type UpdateProfileRequest } from '../../../shared/dto/auth';
+import { DISPLAY_NAME_MAX_LENGTH } from '../../../shared/dto/auth';
+import type { UpdateProfileRequest } from '../../../shared/dto/profile';
 
 export class UpdateProfileDto implements UpdateProfileRequest {
   @IsOptional()

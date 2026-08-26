@@ -110,13 +110,6 @@ export interface Profile {
   customStatus?: string | null;
 }
 
-export interface UpdateProfileRequest {
-  displayName?: string | null;
-  avatarUrl?: string | null;
-  bannerColor?: string | null;
-  customStatus?: string | null;
-}
-
 /** `profile` là null khi tài khoản chưa hoàn tất hồ sơ (đăng nhập Google lần đầu). */
 export interface MeResponse {
   profile: Profile | null;

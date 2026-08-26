@@ -18,6 +18,7 @@ import type { LoginMfaRequired, LoginResponse, LoginResult } from '../../shared/
 import { USERNAME_PATTERN } from '../../shared/dto/auth';
 import {
   AuthService,
+  LoginSession,
   ProfileView,
   RegisteredUser,
 } from './auth.service';
@@ -107,7 +108,7 @@ export class AuthController {
   @Post('2fa/fast-login')
   @HttpCode(HttpStatus.OK)
   @Throttle(STRICT_RATE_LIMIT)
-  fastLogin(@Body() dto: FastLoginDto): Promise<LoginResponse> {
+  fastLogin(@Body() dto: FastLoginDto): Promise<LoginSession> {
     return this.auth.fastLoginBackup(dto.identifier, dto.code);
   }
 
