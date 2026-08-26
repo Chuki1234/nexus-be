@@ -1,14 +1,17 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { PresenceStatus } from '../../shared/dto/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { ChatGateway, Room } from '../realtime/chat.gateway';
 import type {
   FriendRequestsResponseDto,
   FriendRequestSummaryDto,
@@ -53,7 +56,10 @@ const PRESENCE_VALUES = new Set<PresenceStatus>([
 export class FriendsService {
   private readonly logger = new Logger(FriendsService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    @Optional() @Inject(ChatGateway) private readonly chatGateway?: ChatGateway,
+  ) {}
 
   async sendRequest(
     requesterId: string,
@@ -212,6 +218,46 @@ export class FriendsService {
       'accepted',
       'Quan hệ bạn bè không tồn tại.',
     );
+
+    // Xóa hoàn toàn cuộc trò chuyện trực tiếp (DM) và tất cả tin nhắn giữa hai người
+    const [userAId, userBId] = this.orderedPair(userId, friendId);
+    const dmKey = `${userAId}:${userBId}`;
+
+    try {
+      const { data: conv } = await this.supabase.client
+        .from('conversations')
+        .select('id')
+        .eq('dm_key', dmKey)
+        .maybeSingle();
+
+      if (conv?.id) {
+        const convId = conv.id as string;
+        const { error: delConvErr } = await this.supabase.client
+          .from('conversations')
+          .delete()
+          .eq('id', convId);
+
+        if (delConvErr) {
+          this.logger.error('Lỗi xóa cuộc trò chuyện khi hủy kết bạn:', delConvErr);
+        }
+
+        // Phát realtime sự kiện conversation:deleted tới user-room của cả 2 phía
+        try {
+          this.chatGateway?.server?.to(Room.user(userId)).emit('conversation:deleted', {
+            conversationId: convId,
+            friendId,
+          });
+          this.chatGateway?.server?.to(Room.user(friendId)).emit('conversation:deleted', {
+            conversationId: convId,
+            friendId: userId,
+          });
+        } catch (emitErr) {
+          this.logger.warn('Lỗi emit conversation:deleted realtime:', emitErr);
+        }
+      }
+    } catch (err) {
+      this.logger.error('Lỗi dọn dẹp conversation khi removeFriend:', err);
+    }
   }
 
   private async deleteRelationship(

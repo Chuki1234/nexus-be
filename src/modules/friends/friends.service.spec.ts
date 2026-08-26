@@ -277,18 +277,24 @@ describe('FriendsService', () => {
     );
   });
 
-  it('deletes a pending request or accepted friendship by exact status', async () => {
-    queue('friendships', relationship(userA, userB, userA));
+  it('deletes a pending request or accepted friendship by exact status and cleans up conversation', async () => {
+    queue('friendships', { ...relationship(userA, userB, userA), status: 'accepted' });
     queue('friendships', null);
+    queue('conversations', { id: 'conv-123' });
+    queue('conversations', null);
 
-    await expect(service.deleteRequest(userA, userB)).resolves.toBeUndefined();
+    await expect(service.removeFriend(userA, userB)).resolves.toBeUndefined();
     expect(queries[1].calls).toContainEqual({
       method: 'delete',
       args: [],
     });
     expect(queries[1].calls).toContainEqual({
       method: 'eq',
-      args: ['status', 'pending'],
+      args: ['status', 'accepted'],
+    });
+    expect(queries[3].calls).toContainEqual({
+      method: 'delete',
+      args: [],
     });
   });
 
