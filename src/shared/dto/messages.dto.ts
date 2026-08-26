@@ -5,10 +5,10 @@
  * Kiểm tra tính nhất quán bằng `npm run check:shared`.
  */
 
-export type ExternalMediaProvider = 'giphy';
-export type ExternalMediaType = 'gif';
+export type ExternalMediaProvider = 'giphy' | 'stipop';
+export type ExternalMediaType = 'gif' | 'sticker';
 
-export interface GiphyMediaDto {
+export interface ExternalMediaDto {
   provider: ExternalMediaProvider;
   externalId: string;
   mediaType: ExternalMediaType;
@@ -21,6 +21,11 @@ export interface GiphyMediaDto {
   width: number;
   height: number;
 }
+
+/**
+ * Tương thích ngược (alias) cho GiphyMediaDto
+ */
+export type GiphyMediaDto = ExternalMediaDto;
 
 /**
  * Thời gian tối đa được phép chỉnh sửa tin nhắn: 5 phút (300.000 ms).

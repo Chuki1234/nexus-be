@@ -89,17 +89,13 @@ export interface NotificationPayload {
   createdAt: string;
 }
 
-import type { PresenceStatus } from './dto/common';
-export type { PresenceStatus };
+import type { PresenceStatus, UserPresenceDto } from './dto/common';
+export type { PresenceStatus, UserPresenceDto };
 
-export interface PresenceUpdatedPayload {
-  userId: string;
-  status: PresenceStatus;
-  lastSeenAt: string | null;
-}
+export type PresenceUpdatedPayload = UserPresenceDto;
 
 export interface PresenceSyncPayload {
-  presences: Record<string, { status: PresenceStatus; lastSeenAt: string | null }>;
+  presences: Record<string, UserPresenceDto>;
 }
 
 export interface VoiceMemberState {
@@ -159,6 +155,9 @@ export interface ClientToServerEvents {
 
   'typing:start': (payload: { conversationId?: string; channelId?: string }) => void;
   'typing:stop': (payload: { conversationId?: string; channelId?: string }) => void;
+
+  /** Tín hiệu ghi nhận hoạt động người dùng (throttled 30s) */
+  'presence:activity': () => void;
 
   /** Yêu cầu lấy snapshot trạng thái của bạn bè và DM peers */
   'presence:get-snapshot': (

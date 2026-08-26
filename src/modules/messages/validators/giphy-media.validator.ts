@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import type { GiphyMediaDto } from '../../../shared/dto/messages.dto';
+import type { ExternalMediaDto } from '../../../shared/dto/messages.dto';
 
 export const ALLOWED_GIPHY_MEDIA_HOSTS = new Set<string>([
   'media.giphy.com',
@@ -16,11 +16,24 @@ export const ALLOWED_GIPHY_PAGE_HOSTS = new Set<string>([
   'www.giphy.com',
 ]);
 
-const GIPHY_ID_REGEX = /^[a-zA-Z0-9_-]{3,64}$/;
+export const ALLOWED_STIPOP_MEDIA_HOSTS = new Set<string>([
+  'img.stipop.io',
+  'stipop.io',
+  'www.stipop.io',
+  'messenger.stipop.io',
+]);
+
+export const ALLOWED_STIPOP_PAGE_HOSTS = new Set<string>([
+  'stipop.io',
+  'www.stipop.io',
+  'img.stipop.io',
+]);
+
+const MEDIA_ID_REGEX = /^[a-zA-Z0-9_.-]{1,128}$/;
 
 /**
  * Chuẩn hoá và kiểm tra hostname nghiêm ngặt (exact / anchored matching).
- * Chống bypass domain: evilgiphy.com, giphy.com.attacker.com, punycode, credentials, IP, v.v.
+ * Chống bypass domain: evil.com, punycode, credentials, IP, v.v.
  */
 export function normalizeAndValidateUrl(
   rawUrl: string,
@@ -78,7 +91,7 @@ export function normalizeAndValidateUrl(
   // 5. Kiểm tra exact allowlist
   if (!allowedHosts.has(hostname)) {
     throw new BadRequestException(
-      `${fieldName} có tên miền "${hostname}" không thuộc danh sách GIPHY được phép.`,
+      `${fieldName} có tên miền "${hostname}" không thuộc danh sách được phép.`,
     );
   }
 
@@ -99,56 +112,64 @@ export function sanitizePlainText(
 }
 
 /**
- * Validate toàn bộ GiphyMediaDto trước khi persist vào database.
+ * Validate toàn bộ ExternalMediaDto (GIPHY / Stipop) trước khi persist vào database.
  */
-export function validateAndSanitizeGiphyMedia(
+export function validateAndSanitizeExternalMedia(
   media: unknown,
-): GiphyMediaDto {
+): ExternalMediaDto {
   if (!media || typeof media !== 'object') {
     throw new BadRequestException('Dữ liệu externalMedia không hợp lệ.');
   }
 
   const m = media as Record<string, unknown>;
+  const provider = m['provider'];
 
-  if (m['provider'] !== 'giphy') {
-    throw new BadRequestException('Provider của externalMedia chỉ có thể là "giphy".');
+  if (provider !== 'giphy' && provider !== 'stipop') {
+    throw new BadRequestException('Provider của externalMedia chỉ có thể là "giphy" hoặc "stipop".');
   }
 
-  if (m['mediaType'] !== 'gif') {
-    throw new BadRequestException('mediaType của externalMedia chỉ có thể là "gif".');
+  const mediaType = m['mediaType'];
+  if (provider === 'giphy' && mediaType !== 'gif') {
+    throw new BadRequestException('mediaType của GIPHY chỉ có thể là "gif".');
+  }
+  if (provider === 'stipop' && mediaType !== 'sticker' && mediaType !== 'gif') {
+    throw new BadRequestException('mediaType của Stipop chỉ có thể là "sticker" hoặc "gif".');
   }
 
   const externalId = String(m['externalId'] || '').trim();
-  if (!GIPHY_ID_REGEX.test(externalId)) {
-    throw new BadRequestException('externalId của GIPHY không đúng định dạng hợp lệ.');
+  if (!MEDIA_ID_REGEX.test(externalId)) {
+    throw new BadRequestException('externalId của media không đúng định dạng hợp lệ.');
   }
 
   const width = typeof m['width'] === 'number' ? m['width'] : parseInt(String(m['width']), 10);
   const height = typeof m['height'] === 'number' ? m['height'] : parseInt(String(m['height']), 10);
 
   if (isNaN(width) || width <= 0 || width > 4096) {
-    throw new BadRequestException('Chiều rộng (width) của GIF phải là số nguyên dương từ 1 đến 4096.');
+    throw new BadRequestException('Chiều rộng (width) của media phải là số nguyên dương từ 1 đến 4096.');
   }
 
   if (isNaN(height) || height <= 0 || height > 4096) {
-    throw new BadRequestException('Chiều cao (height) của GIF phải là số nguyên dương từ 1 đến 4096.');
+    throw new BadRequestException('Chiều cao (height) của media phải là số nguyên dương từ 1 đến 4096.');
   }
+
+  const pageAllowedHosts = provider === 'giphy' ? ALLOWED_GIPHY_PAGE_HOSTS : ALLOWED_STIPOP_PAGE_HOSTS;
+  const mediaAllowedHosts = provider === 'giphy' ? ALLOWED_GIPHY_MEDIA_HOSTS : ALLOWED_STIPOP_MEDIA_HOSTS;
 
   const pageUrl = normalizeAndValidateUrl(
     String(m['pageUrl'] || ''),
-    ALLOWED_GIPHY_PAGE_HOSTS,
+    pageAllowedHosts,
     'pageUrl',
   );
 
   const previewUrl = normalizeAndValidateUrl(
     String(m['previewUrl'] || ''),
-    ALLOWED_GIPHY_MEDIA_HOSTS,
+    mediaAllowedHosts,
     'previewUrl',
   );
 
   const displayUrl = normalizeAndValidateUrl(
     String(m['displayUrl'] || ''),
-    ALLOWED_GIPHY_MEDIA_HOSTS,
+    mediaAllowedHosts,
     'displayUrl',
   );
 
@@ -156,18 +177,18 @@ export function validateAndSanitizeGiphyMedia(
   if (m['mp4Url'] !== null && m['mp4Url'] !== undefined && String(m['mp4Url']).trim() !== '') {
     mp4Url = normalizeAndValidateUrl(
       String(m['mp4Url']),
-      ALLOWED_GIPHY_MEDIA_HOSTS,
+      mediaAllowedHosts,
       'mp4Url',
     );
   }
 
-  const title = sanitizePlainText(m['title'] as string, 255) || 'GIF';
+  const title = sanitizePlainText(m['title'] as string, 255) || (provider === 'stipop' ? 'Sticker' : 'GIF');
   const creatorUsername = sanitizePlainText(m['creatorUsername'] as string, 100);
 
   return {
-    provider: 'giphy',
+    provider,
     externalId,
-    mediaType: 'gif',
+    mediaType: mediaType as 'gif' | 'sticker',
     title,
     creatorUsername,
     pageUrl,
@@ -178,3 +199,8 @@ export function validateAndSanitizeGiphyMedia(
     height,
   };
 }
+
+/**
+ * Tương thích ngược với tên gọi cũ
+ */
+export const validateAndSanitizeGiphyMedia = validateAndSanitizeExternalMedia;

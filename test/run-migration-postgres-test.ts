@@ -2234,10 +2234,172 @@ async function runPostgresMigrationTests() {
   await pg.exec(messageHiddenAndRecallMigrationSql);
   console.log('✔ Bước 19.6: Migration 20260825210000_message_hidden_users_and_atomic_recall.sql idempotent 100%');
 
+  // =========================================================================
+  // BƯỚC 20: KIỂM THỬ MIGRATION STIPOP EXTERNAL MEDIA
+  // =========================================================================
+  const stipopMigrationPath = path.resolve(
+    __dirname,
+    '../supabase/migrations/20260826130000_add_stipop_stickers_external_media.sql',
+  );
+  const stipopMigrationSql = fs.readFileSync(stipopMigrationPath, 'utf-8');
+
+  await pg.exec(`RESET ROLE;`);
+  await pg.exec(stipopMigrationSql);
+  console.log('✔ Bước 20.1: Áp dụng migration Stipop external media thành công');
+
+  const validStipopMedia = {
+    provider: 'stipop',
+    externalId: 'stipop-test-45268',
+    mediaType: 'sticker',
+    title: 'Happy Stipop sticker',
+    creatorUsername: 'stipop-artist',
+    pageUrl: 'https://stipop.io/package/2199',
+    previewUrl: 'https://img.stipop.io/sticker/2199/preview.png',
+    displayUrl: 'https://img.stipop.io/sticker/2199/display.png',
+    mp4Url: null,
+    width: 300,
+    height: 300,
+  };
+
+  const stipopChannelResult = await pg.query<{ create_channel_message: any }>(`
+    SELECT public.create_channel_message(
+      '${gifChannelId}',
+      '${s16Owner}',
+      '',
+      '${crypto.randomUUID()}',
+      NULL,
+      '[]'::jsonb,
+      false,
+      '${JSON.stringify(validStipopMedia)}'::jsonb
+    );
+  `);
+  const stipopChannelMessage = stipopChannelResult.rows[0].create_channel_message;
+  if (
+    stipopChannelMessage?.externalMedia?.provider !== 'stipop' ||
+    stipopChannelMessage?.externalMedia?.mediaType !== 'sticker'
+  ) {
+    throw new Error(
+      `create_channel_message không trả về Stipop sticker canonical: ${JSON.stringify(stipopChannelMessage)}`,
+    );
+  }
+  console.log('✔ Bước 20.2: create_channel_message lưu và trả về Stipop sticker canonical');
+
+  const stipopDmResult = await pg.query<{ create_conversation_message: any }>(`
+    SELECT public.create_conversation_message(
+      '${convId}',
+      '${userA}',
+      '',
+      '${crypto.randomUUID()}',
+      NULL,
+      '[]'::jsonb,
+      false,
+      '${JSON.stringify({ ...validStipopMedia, externalId: 'stipop-test-dm-45268' })}'::jsonb
+    );
+  `);
+  const stipopDmMessage = stipopDmResult.rows[0].create_conversation_message;
+  if (
+    stipopDmMessage?.externalMedia?.provider !== 'stipop' ||
+    stipopDmMessage?.externalMedia?.mediaType !== 'sticker'
+  ) {
+    throw new Error(
+      `create_conversation_message không trả về Stipop sticker canonical: ${JSON.stringify(stipopDmMessage)}`,
+    );
+  }
+  console.log('✔ Bước 20.3: create_conversation_message lưu và trả về Stipop sticker canonical');
+
+  let invalidProviderPairRejected = false;
+  try {
+    await pg.query(`
+      SELECT public.create_conversation_message(
+        '${convId}',
+        '${userA}',
+        '',
+        '${crypto.randomUUID()}',
+        NULL,
+        '[]'::jsonb,
+        false,
+        '${JSON.stringify({ ...validStipopMedia, externalId: 'stipop-invalid-pair', mediaType: 'gif' })}'::jsonb
+      );
+    `);
+  } catch (err: any) {
+    invalidProviderPairRejected = err?.message?.includes('Dữ liệu external_media không hợp lệ');
+  }
+  if (!invalidProviderPairRejected) {
+    throw new Error('RPC không từ chối cặp provider=stipop, mediaType=gif không hợp lệ');
+  }
+  console.log('✔ Bước 20.4: RPC chỉ chấp nhận đúng cặp Stipop + sticker');
+
+  await pg.exec(stipopMigrationSql);
+  console.log('✔ Bước 20.5: Migration Stipop external media idempotent 100%');
+
+  // =========================================================================
+  // BƯỚC 21: KIỂM THỬ MONOTONIC LAST SEEN + QUYỀN RPC
+  // =========================================================================
+  const monotonicLastSeenMigrationPath = path.resolve(
+    __dirname,
+    '../supabase/migrations/20260826140000_monotonic_last_seen_update.sql',
+  );
+  const monotonicLastSeenMigrationSql = fs.readFileSync(
+    monotonicLastSeenMigrationPath,
+    'utf-8',
+  );
+
+  await pg.exec(`RESET ROLE;`);
+  // Base fixture rút gọn không chạy migration tháng 7, trong khi canonical
+  // profiles schema đã có last_seen_at từ 20260731090100.
+  await pg.exec(`
+    ALTER TABLE public.profiles
+      ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
+  `);
+  await pg.exec(monotonicLastSeenMigrationSql);
+
+  const functionPrivileges = await pg.query<{
+    anon_can_execute: boolean;
+    authenticated_can_execute: boolean;
+    service_role_can_execute: boolean;
+  }>(`
+    SELECT
+      has_function_privilege('anon', 'public.update_profile_last_seen(uuid,timestamptz)', 'EXECUTE') AS anon_can_execute,
+      has_function_privilege('authenticated', 'public.update_profile_last_seen(uuid,timestamptz)', 'EXECUTE') AS authenticated_can_execute,
+      has_function_privilege('service_role', 'public.update_profile_last_seen(uuid,timestamptz)', 'EXECUTE') AS service_role_can_execute;
+  `);
+  const privileges = functionPrivileges.rows[0];
+  if (
+    privileges.anon_can_execute ||
+    privileges.authenticated_can_execute ||
+    !privileges.service_role_can_execute
+  ) {
+    throw new Error(
+      `Quyền update_profile_last_seen không an toàn: ${JSON.stringify(privileges)}`,
+    );
+  }
+  console.log('✔ Bước 21.1: Chỉ service_role có quyền gọi update_profile_last_seen');
+
+  const newerLastSeen = '2026-08-26T08:00:00.000Z';
+  const staleLastSeen = '2026-08-26T07:00:00.000Z';
+  await pg.query(
+    `SELECT public.update_profile_last_seen('${userA}', '${newerLastSeen}'::timestamptz);`,
+  );
+  await pg.query(
+    `SELECT public.update_profile_last_seen('${userA}', '${staleLastSeen}'::timestamptz);`,
+  );
+  const lastSeenCheck = await pg.query<{ last_seen_at: string }>(`
+    SELECT last_seen_at::text FROM public.profiles WHERE id = '${userA}';
+  `);
+  if (new Date(lastSeenCheck.rows[0].last_seen_at).toISOString() !== newerLastSeen) {
+    throw new Error(
+      `last_seen_at bị ghi lùi: ${lastSeenCheck.rows[0].last_seen_at}`,
+    );
+  }
+  console.log('✔ Bước 21.2: Stale worker không thể ghi last_seen_at lùi');
+
+  await pg.exec(monotonicLastSeenMigrationSql);
+  console.log('✔ Bước 21.3: Migration monotonic last seen idempotent 100%');
+
   await pg.exec(`RESET ROLE;`);
   await pg.close();
   console.log(
-    '--- TOÀN BỘ 19 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
+    '--- TOÀN BỘ 21 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
   );
 }
 
