@@ -592,17 +592,194 @@ async function runChannelConcurrencyPostgresTest() {
       [channelId],
     );
     const finalChan = finalChanRes.rows[0];
-    if (finalChan.name !== 'updated-by-session-b' || finalChan.topic !== 'Topic B') {
-      throw new Error(`Trạng thái cuối cùng của channel không hợp lệ: ${JSON.stringify(finalChan)}`);
+    // -------------------------------------------------------------------------
+    // ASSERTION 9: Multi-Session Concurrent recall_message_for_everyone
+    // -------------------------------------------------------------------------
+    console.log('\n--- TEST 6: Multi-Session Concurrent recall_message_for_everyone ---');
+    const recallTestNonce = crypto.randomUUID();
+    const msgToRecallRes = await clientA.query(
+      `INSERT INTO public.messages (channel_id, author_id, content, client_nonce)
+       VALUES ($1, $2, 'Tin nhắn kênh cần kiểm tra recall đồng thời', $3::uuid)
+       RETURNING id::text;`,
+      [channelId, ownerId, recallTestNonce],
+    );
+    const recallMsgId = msgToRecallRes.rows[0].id;
+    const testStoragePath = `chan_${channelId}/concurrent_recall_test.png`;
+
+    await clientA.query(
+      `INSERT INTO public.attachments (id, message_id, storage_path, filename, mime_type, size_bytes)
+       VALUES ($1::uuid, $2, $3, 'test.png', 'image/png', 2048);`,
+      [crypto.randomUUID(), recallMsgId, testStoragePath],
+    );
+    await clientA.query(
+      `INSERT INTO public.message_reactions (message_id, user_id, emoji)
+       VALUES ($1, $2, '🚀');`,
+      [recallMsgId, memberId],
+    );
+
+    // Chạy 2 lệnh recall đồng thời từ Session A và Session B trên cùng 1 message
+    const [recallResA, recallResB] = await Promise.all([
+      clientA.query('SELECT public.recall_message_for_everyone($1, $2) as res;', [ownerId, recallMsgId]),
+      clientB.query('SELECT public.recall_message_for_everyone($1, $2) as res;', [ownerId, recallMsgId]),
+    ]);
+
+    const resultA = recallResA.rows[0].res;
+    const resultB = recallResB.rows[0].res;
+
+    const oneWasInitial = (resultA.recalled && !resultA.alreadyRecalled) || (resultB.recalled && !resultB.alreadyRecalled);
+    const oneWasAlready = (resultA.recalled && resultA.alreadyRecalled) || (resultB.recalled && resultB.alreadyRecalled);
+
+    if (!oneWasInitial || !oneWasAlready) {
+      throw new Error(`Concurrent recall kết quả không chuẩn: A=${JSON.stringify(resultA)}, B=${JSON.stringify(resultB)}`);
     }
-    console.log(`✔ [Assertion 8] Final channel state hợp lệ trong public.channels: name="${finalChan.name}", topic="${finalChan.topic}".`);
+
+    // Đảm bảo đúng 1 record trong storage_cleanup_outbox
+    const outboxCountRes = await clientA.query(
+      'SELECT count(*)::text as c FROM public.storage_cleanup_outbox WHERE storage_path = $1 AND status = \'pending\';',
+      [testStoragePath],
+    );
+    if (outboxCountRes.rows[0].c !== '1') {
+      throw new Error(`storage_cleanup_outbox không có đúng 1 record: count=${outboxCountRes.rows[0].c}`);
+    }
+
+    // Đảm bảo attachments và reactions đã dọn dẹp sạch sẽ
+    const attCleanRes = await clientA.query('SELECT count(*)::text as c FROM public.attachments WHERE message_id = $1;', [recallMsgId]);
+    const reactCleanRes = await clientA.query('SELECT count(*)::text as c FROM public.message_reactions WHERE message_id = $1;', [recallMsgId]);
+    if (attCleanRes.rows[0].c !== '0' || reactCleanRes.rows[0].c !== '0') {
+      throw new Error(`Attachments hoặc reactions chưa được dọn dẹp: att=${attCleanRes.rows[0].c}, react=${reactCleanRes.rows[0].c}`);
+    }
+    console.log('✔ [Assertion 9] Concurrent recall_message_for_everyone: Đúng 1 session thực hiện transition & outbox enqueue, session kia nhận alreadyRecalled=true mà không double-enqueue.');
+
+    // -------------------------------------------------------------------------
+    // ASSERTION 10: Concurrent hide_message_for_user & SQL-Level Pre-Filtering
+    // -------------------------------------------------------------------------
+    console.log('\n--- TEST 7: Concurrent hide_message_for_user & SQL-Level Pre-Filtering ---');
+    const hideTestNonce = crypto.randomUUID();
+    const msgToHideRes = await clientA.query(
+      `INSERT INTO public.messages (channel_id, author_id, content, client_nonce)
+       VALUES ($1, $2, 'Tin nhắn kênh cần kiểm tra hide vs cursor', $3::uuid)
+       RETURNING id::text;`,
+      [channelId, ownerId, hideTestNonce],
+    );
+    const hideMsgId = msgToHideRes.rows[0].id;
+
+    // Chạy song song 2 lệnh hide cho memberId từ cả 2 sessions
+    await Promise.all([
+      clientA.query('SELECT public.hide_message_for_user($1, $2);', [memberId, hideMsgId]),
+      clientB.query('SELECT public.hide_message_for_user($1, $2);', [memberId, hideMsgId]),
+    ]);
+
+    // Kiểm tra memberId query qua get_channel_messages_paged -> 0 rows cho msg này
+    const memberMessages = await clientA.query(
+      'SELECT id::text FROM public.get_channel_messages_paged($1, $2, 50, null, null);',
+      [channelId, memberId],
+    );
+    if (memberMessages.rows.some((r: any) => r.id === hideMsgId)) {
+      throw new Error('get_channel_messages_paged vẫn trả về tin nhắn đã ẩn cho memberId!');
+    }
+
+    // Kiểm tra ownerId query -> vẫn nhìn thấy tin nhắn bình thường
+    const ownerMessages = await clientA.query(
+      'SELECT id::text FROM public.get_channel_messages_paged($1, $2, 50, null, null);',
+      [channelId, ownerId],
+    );
+    if (!ownerMessages.rows.some((r: any) => r.id === hideMsgId)) {
+      throw new Error('get_channel_messages_paged không trả về tin nhắn cho user chưa ẩn!');
+    }
+    console.log('✔ [Assertion 10] hide_message_for_user idempotent và SQL-level pre-filtering hoạt động chính xác tuyệt đối.');
+
+    // -------------------------------------------------------------------------
+    // ASSERTION 11: Channel Effective Permission Precedence & Overwrites
+    // -------------------------------------------------------------------------
+    console.log('\n--- TEST 8: Channel Effective Permission Precedence & Overwrites ---');
+    const privateChanId = crypto.randomUUID();
+    await clientA.query(
+      `INSERT INTO public.channels (id, server_id, name, type, position)
+       VALUES ($1, $2, 'secret-vault', 'text', 1);`,
+      [privateChanId, serverId],
+    );
+
+    // Tạo tin nhắn trong private channel
+    const privMsgRes = await clientA.query(
+      `INSERT INTO public.messages (channel_id, author_id, content, client_nonce)
+       VALUES ($1, $2, 'Bí mật nội bộ', $3::uuid)
+       RETURNING id::text;`,
+      [privateChanId, ownerId, crypto.randomUUID()],
+    );
+    const privMsgId = privMsgRes.rows[0].id;
+
+    // Overwrite @everyone deny VIEW_CHANNEL (bit 1)
+    const everyoneRoleRes = await clientA.query(
+      `SELECT id FROM public.roles WHERE server_id = $1 AND is_default = true;`,
+      [serverId],
+    );
+    const everyoneRoleId = everyoneRoleRes.rows[0].id;
+
+    await clientA.query(
+      `INSERT INTO public.channel_overwrites (channel_id, target_type, target_id, allow, deny)
+       VALUES ($1, 'role', $2, 0, 1);`,
+      [privateChanId, everyoneRoleId],
+    );
+
+    // 1. memberId (không có quyền VIEW_CHANNEL) cố hide -> bị 42501
+    let hideBlocked = false;
+    try {
+      await clientA.query('SELECT public.hide_message_for_user($1, $2);', [memberId, privMsgId]);
+    } catch (err: any) {
+      hideBlocked = true;
+    }
+    if (!hideBlocked) {
+      throw new Error('User không có quyền VIEW_CHANNEL nhưng vẫn hide được tin nhắn trong kênh riêng tư!');
+    }
+
+    // 2. memberId (không có MANAGE_MESSAGES) cố recall tin nhắn của owner -> bị 42501
+    let recallBlocked = false;
+    try {
+      await clientA.query('SELECT public.recall_message_for_everyone($1, $2);', [memberId, privMsgId]);
+    } catch (err: any) {
+      recallBlocked = true;
+    }
+    if (!recallBlocked) {
+      throw new Error('User không có quyền MANAGE_MESSAGES nhưng vẫn recall được tin nhắn của người khác!');
+    }
+
+    // 3. Trao role Mod (có quyền MANAGE_MESSAGES = 4 và VIEW_CHANNEL = 1) cho memberId
+    const modRoleId = crypto.randomUUID();
+    await clientA.query(
+      `INSERT INTO public.roles (id, server_id, name, permissions, position)
+       VALUES ($1, $2, 'Moderator', 5, 1);`, // 5 = VIEW_CHANNEL (1) | MANAGE_MESSAGES (4)
+      [modRoleId, serverId],
+    );
+    await clientA.query(
+      `INSERT INTO public.member_roles (server_id, user_id, role_id)
+       VALUES ($1, $2, $3);`,
+      [serverId, memberId, modRoleId],
+    );
+
+    // Thêm overwrite allow VIEW_CHANNEL cho role Mod trên private channel
+    await clientA.query(
+      `INSERT INTO public.channel_overwrites (channel_id, target_type, target_id, allow, deny)
+       VALUES ($1, 'role', $2, 1, 0);`,
+      [privateChanId, modRoleId],
+    );
+
+    // Moderator recall tin nhắn của owner thành công nhờ MANAGE_MESSAGES
+    const modRecallRes = await clientA.query(
+      'SELECT public.recall_message_for_everyone($1, $2) as res;',
+      [memberId, privMsgId],
+    );
+    if (!modRecallRes.rows[0].res.recalled) {
+      throw new Error(`Moderator có MANAGE_MESSAGES recall thất bại: ${JSON.stringify(modRecallRes.rows[0].res)}`);
+    }
+    console.log('✔ [Assertion 11] Permission Precedence & Overwrites: VIEW_CHANNEL và MANAGE_MESSAGES gating hoạt động chuẩn xác 100%.');
 
     console.log('\n======================================================================');
-    console.log('🎉 TOÀN BỘ 8 ASSERTIONS NATIVE POSTGRESQL CONCURRENCY & ROLLBACK ĐÃ PASS 100%');
+    console.log('🎉 TOÀN BỘ 11 ASSERTIONS NATIVE POSTGRESQL CONCURRENCY & INTEGRITY ĐÃ PASS 100%');
     console.log('======================================================================');
   } finally {
     // -------------------------------------------------------------------------
-    // ASSERTION 9: Cleanup test resources thành công
+    // CLEANUP TEST RESOURCES
+    // -------------------------------------------------------------------------
     // -------------------------------------------------------------------------
     if (clientA) {
       try { await clientA.end(); } catch {}

@@ -261,6 +261,28 @@ describe('Server Channel Realtime & Message Parity E2E Test', () => {
             error: null,
           });
         }
+        if (rpcName === 'hide_message_for_user') {
+          return Promise.resolve({
+            data: {
+              id: String(params.p_message_id),
+              channelId: generalChannelId,
+              conversationId: null,
+              hidden: true,
+            },
+            error: null,
+          });
+        }
+        if (rpcName === 'recall_message_for_everyone') {
+          return Promise.resolve({
+            data: {
+              id: String(params.p_message_id),
+              channelId: generalChannelId,
+              conversationId: null,
+              recalled: true,
+            },
+            error: null,
+          });
+        }
         return Promise.resolve({ data: null, error: null });
       }),
     },
@@ -422,7 +444,7 @@ describe('Server Channel Realtime & Message Parity E2E Test', () => {
     expect(received.message.content).toBe('Edited content');
   });
 
-  it('8. User A xóa tin nhắn -> User B nhận message:deleted realtime', async () => {
+  it('8. User A thu hồi tin nhắn cho mọi người -> User B nhận message:deleted realtime', async () => {
     const deletePromise = new Promise<any>((resolve) => {
       socketB.once('message:deleted', (payload) => {
         resolve(payload);
@@ -430,7 +452,7 @@ describe('Server Channel Realtime & Message Parity E2E Test', () => {
     });
 
     const res = await request(app.getHttpServer())
-      .delete('/messages/101')
+      .delete('/messages/101?scope=everyone')
       .set('Authorization', 'Bearer token-user-a');
 
     expect(res.status).toBe(200);

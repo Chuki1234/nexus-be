@@ -4,9 +4,17 @@ export const CHAT_EVENTS = {
   MESSAGE_CREATED: 'chat.message.created',
   MESSAGE_UPDATED: 'chat.message.updated',
   MESSAGE_DELETED: 'chat.message.deleted',
+  MESSAGE_HIDDEN_FOR_USER: 'chat.message.hidden_for_user',
   MESSAGE_READ: 'chat.message.read',
   REACTION_UPDATED: 'chat.reaction.updated',
 } as const;
+
+export interface MessageHiddenForUserEvent {
+  userId: string;
+  messageId: string;
+  conversationId: string | null;
+  channelId: string | null;
+}
 
 export interface MessageCreatedEvent {
   conversationId: string | null;

@@ -18,6 +18,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { ParsePositiveBigIntPipe } from '../../common/pipes/parse-positive-bigint.pipe';
 import { EditMessageDto } from './dto/edit-message.dto';
+import { DeleteMessageQueryDto, DeleteMessageScope } from './dto/delete-message.dto';
 import { ForwardMessageDto } from './dto/forward-message.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
@@ -39,26 +40,16 @@ export class MessagesController {
   // Conversation (Live DM) Endpoints
   // ---------------------------------------------------------------------------
 
-  /**
-   * Tải lịch sử tin nhắn trong cuộc trò chuyện (cursor pagination).
-   */
-  @Get('conversations/:conversationId/messages')
+  @Get('conversations/:id/messages')
   async getConversationMessages(
     @CurrentUser() user: User,
-    @Param('conversationId', ParseUUIDPipe) conversationId: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Query() query: GetMessagesQueryDto,
   ): Promise<MessagesPaginationResponseDto> {
-    return this.messagesService.getConversationMessages(
-      user.id,
-      conversationId,
-      query,
-    );
+    return this.messagesService.getConversationMessages(user.id, id, query);
   }
 
-  /**
-   * Gửi tin nhắn mới vào cuộc trò chuyện (hỗ trợ text và tối đa 5 files đính kèm).
-   */
-  @Post('conversations/:conversationId/messages')
+  @Post('conversations/:id/messages')
   @UseInterceptors(
     FilesInterceptor('files', 5, {
       limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
@@ -66,13 +57,13 @@ export class MessagesController {
   )
   async sendConversationMessage(
     @CurrentUser() user: User,
-    @Param('conversationId', ParseUUIDPipe) conversationId: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SendMessageDto,
     @UploadedFiles() files?: Express.Multer.File[],
   ): Promise<MessageResponseDto> {
     return this.messagesService.createConversationMessage(
       user.id,
-      conversationId,
+      id,
       dto,
       files,
     );
@@ -274,13 +265,37 @@ export class MessagesController {
   }
 
   /**
-   * Xoá tin nhắn (soft delete).
+   * Ẩn tin nhắn chỉ riêng ở phía người dùng (Hide for Me).
+   */
+  @Post('messages/:id/hide')
+  async hideMessage(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ): Promise<{ id: string; hidden: boolean; scope: 'for_me'; conversationId: string | null; channelId: string | null }> {
+    return this.messagesService.hideMessageForUser(user.id, id);
+  }
+
+  /**
+   * Thu hồi tin nhắn đối với tất cả mọi người trong cuộc trò chuyện (Recall for Everyone).
+   */
+  @Post('messages/:id/recall')
+  async recallMessage(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ): Promise<{ id: string; deleted: boolean; scope: 'everyone'; conversationId: string | null; channelId: string | null }> {
+    return this.messagesService.recallMessageForEveryone(user.id, id);
+  }
+
+  /**
+   * Xoá / Thu hồi tin nhắn theo scope (`for_me` hoặc `everyone`).
    */
   @Delete('messages/:id')
   async deleteMessage(
     @CurrentUser() user: User,
     @Param('id') id: string,
-  ): Promise<{ id: string; deleted: boolean }> {
-    return this.messagesService.deleteMessage(user.id, id);
+    @Query() query?: DeleteMessageQueryDto,
+  ): Promise<{ id: string; deleted?: boolean; hidden?: boolean; scope: 'for_me' | 'everyone'; conversationId: string | null; channelId: string | null }> {
+    const scope = query?.scope ?? DeleteMessageScope.FOR_ME;
+    return this.messagesService.deleteMessage(user.id, id, scope);
   }
 }

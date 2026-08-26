@@ -144,7 +144,7 @@ describe('Local PostgreSQL Migration Test (Real Ephemeral Postgres Engine)', () 
       WHERE table_schema = 'public' AND table_name = 'messages' AND column_name = 'is_forwarded';
     `);
     expect(colRes.rows.length).toBe(1);
-    expect(colRes.rows[0].column_name).toBe('is_forwarded');
+    expect((colRes.rows[0] as any).column_name).toBe('is_forwarded');
   });
 
   it('2. Function create_forwarded_message được tạo đúng signature và security attributes', async () => {
@@ -155,9 +155,9 @@ describe('Local PostgreSQL Migration Test (Real Ephemeral Postgres Engine)', () 
       WHERE n.nspname = 'public' AND p.proname = 'create_forwarded_message';
     `);
     expect(fnRes.rows.length).toBe(1);
-    expect(fnRes.rows[0].proname).toBe('create_forwarded_message');
-    expect(fnRes.rows[0].prosecdef).toBe(true); // SECURITY DEFINER
-    expect(fnRes.rows[0].pronargs).toBe(5); // 5 parameters
+    expect((fnRes.rows[0] as any).proname).toBe('create_forwarded_message');
+    expect((fnRes.rows[0] as any).prosecdef).toBe(true); // SECURITY DEFINER
+    expect((fnRes.rows[0] as any).pronargs).toBe(5); // 5 parameters
   });
 
   it('3. Anon và Authenticated roles bị từ chối thực thi function (Permission Denied)', async () => {
@@ -222,7 +222,7 @@ describe('Local PostgreSQL Migration Test (Real Ephemeral Postgres Engine)', () 
     await pg.exec(`RESET ROLE;`);
 
     expect(res.rows.length).toBe(1);
-    const row = res.rows[0];
+    const row = res.rows[0] as any;
     expect(typeof row.message_id).toBe('string');
     expect(row.conversation_id).toBe(convId);
     expect(row.author_id).toBe(userA);
@@ -243,13 +243,13 @@ describe('Local PostgreSQL Migration Test (Real Ephemeral Postgres Engine)', () 
     // Kiểm tra database thực tế đã lưu cả message và attachment
     const dbMsg = await pg.query(`SELECT * FROM public.messages WHERE id = $1;`, [row.message_id]);
     expect(dbMsg.rows.length).toBe(1);
-    expect(dbMsg.rows[0].is_forwarded).toBe(true);
+    expect((dbMsg.rows[0] as any).is_forwarded).toBe(true);
 
     const dbAtt = await pg.query(`SELECT * FROM public.attachments WHERE message_id = $1;`, [
       row.message_id,
     ]);
     expect(dbAtt.rows.length).toBe(1);
-    expect(dbAtt.rows[0].filename).toBe('file1.png');
+    expect((dbAtt.rows[0] as any).filename).toBe('file1.png');
   });
 
   it('5. Validate p_client_nonce IS NULL -> Ném lỗi 22023', async () => {

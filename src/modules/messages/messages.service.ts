@@ -263,28 +263,68 @@ export class MessagesService {
 
     const limit = query.limit ?? 50;
 
-    let q = this.supabase.client
-      .from('messages')
-      .select(
-        'id, channel_id, conversation_id, author_id, type, content, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-      )
-      .eq('conversation_id', conversationId);
+    let rawMessages: RawMessageRow[] | null = null;
 
-    if (query.before) {
-      q = q.lt('id', query.before);
+    // 1. Ưu tiên gọi RPC get_conversation_messages_paged
+    try {
+      const { data, error } = await this.supabase.client.rpc(
+        'get_conversation_messages_paged',
+        {
+          p_conversation_id: conversationId,
+          p_user_id: userId,
+          p_limit: limit,
+          p_before: query.before ? Number(query.before) : null,
+          p_after: query.after ? Number(query.after) : null,
+        },
+      );
+      if (!error && Array.isArray(data)) {
+        rawMessages = data as RawMessageRow[];
+      }
+    } catch {
+      // Fallback
     }
-    if (query.after) {
-      q = q.gt('id', query.after);
-    }
 
-    // Lấy dư 1 bản ghi để kiểm tra hasMore
-    q = q.order('id', { ascending: false }).limit(limit + 1);
+    // 2. Fallback sang query trực tiếp nếu RPC chưa có trong Database
+    if (rawMessages === null) {
+      let q = this.supabase.client
+        .from('messages')
+        .select(
+          'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        )
+        .eq('conversation_id', conversationId);
 
-    const { data: rawMessages, error } = await q;
+      if (query.before) {
+        q = q.lt('id', query.before);
+      } else if (query.after) {
+        q = q.gt('id', query.after);
+      }
 
-    if (error) {
-      this.logger.error('Lỗi tải tin nhắn:', error);
-      throw new InternalServerErrorException('Lỗi tải lịch sử tin nhắn.');
+      q = q.order('id', { ascending: false }).limit(limit + 1);
+
+      const { data: directMessages, error: directErr } = await q;
+
+      if (directErr) {
+        this.logger.error('Lỗi tải tin nhắn trực tiếp:', directErr);
+        throw new InternalServerErrorException('Lỗi tải lịch sử tin nhắn.');
+      }
+
+      let list = (directMessages ?? []) as RawMessageRow[];
+
+      try {
+        const { data: hiddenData } = await this.supabase.client
+          .from('message_hidden_users')
+          .select('message_id')
+          .eq('user_id', userId);
+
+        if (hiddenData && hiddenData.length > 0) {
+          const hiddenSet = new Set(hiddenData.map((h: any) => String(h.message_id)));
+          list = list.filter((m) => !hiddenSet.has(String(m.id)));
+        }
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
+      }
+
+      rawMessages = list;
     }
 
     const messagesList = (rawMessages ?? []) as RawMessageRow[];
@@ -375,25 +415,68 @@ export class MessagesService {
 
     const limit = query.limit ?? 50;
 
-    let q = this.supabase.client
-      .from('messages')
-      .select(
-        'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
-      )
-      .eq('channel_id', channelId);
+    let rawMessages: RawMessageRow[] | null = null;
 
-    if (query.before) {
-      q = q.lt('id', query.before);
-    } else if (query.after) {
-      q = q.gt('id', query.after);
+    // 1. Ưu tiên gọi RPC get_channel_messages_paged
+    try {
+      const { data, error: msgError } = await this.supabase.client.rpc(
+        'get_channel_messages_paged',
+        {
+          p_channel_id: channelId,
+          p_user_id: userId,
+          p_limit: limit,
+          p_before: query.before ? Number(query.before) : null,
+          p_after: query.after ? Number(query.after) : null,
+        },
+      );
+      if (!msgError && Array.isArray(data)) {
+        rawMessages = data as RawMessageRow[];
+      }
+    } catch {
+      // Fallback
     }
 
-    q = q.order('id', { ascending: false }).limit(limit + 1);
+    // 2. Fallback sang query trực tiếp nếu RPC chưa có trong Database
+    if (rawMessages === null) {
+      let q = this.supabase.client
+        .from('messages')
+        .select(
+          'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
+        )
+        .eq('channel_id', channelId);
 
-    const { data: rawMessages, error: msgError } = await q;
-    if (msgError) {
-      this.logger.error('Lỗi lấy tin nhắn kênh:', msgError);
-      throw new InternalServerErrorException('Lỗi tải tin nhắn kênh.');
+      if (query.before) {
+        q = q.lt('id', query.before);
+      } else if (query.after) {
+        q = q.gt('id', query.after);
+      }
+
+      q = q.order('id', { ascending: false }).limit(limit + 1);
+
+      const { data: directMessages, error: directErr } = await q;
+
+      if (directErr) {
+        this.logger.error('Lỗi tải tin nhắn kênh trực tiếp:', directErr);
+        throw new InternalServerErrorException('Lỗi tải tin nhắn kênh.');
+      }
+
+      let list = (directMessages ?? []) as RawMessageRow[];
+
+      try {
+        const { data: hiddenData } = await this.supabase.client
+          .from('message_hidden_users')
+          .select('message_id')
+          .eq('user_id', userId);
+
+        if (hiddenData && hiddenData.length > 0) {
+          const hiddenSet = new Set(hiddenData.map((h: any) => String(h.message_id)));
+          list = list.filter((m) => !hiddenSet.has(String(m.id)));
+        }
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
+      }
+
+      rawMessages = list;
     }
 
     const messages = (rawMessages || []) as RawMessageRow[];
@@ -1550,132 +1633,205 @@ export class MessagesService {
   }
 
   /**
-   * Xoá tin nhắn (soft delete: set deleted_at = now()).
+   * Ẩn tin nhắn ở phía người dùng (chỉ riêng user này không thấy tin nhắn nữa).
+   * Ghi vào bảng message_hidden_users và phát event user-scoped message:hidden-for-user.
    */
-  async deleteMessage(
+  async hideMessageForUser(
     userId: string,
     messageId: string,
-  ): Promise<{ id: string; deleted: boolean; conversationId: string | null; channelId: string | null }> {
-    const { data: existing, error: findErr } = await this.supabase.client
-      .from('messages')
-      .select('id, conversation_id, channel_id, author_id, deleted_at')
-      .eq('id', messageId)
-      .maybeSingle();
+  ): Promise<{ id: string; hidden: boolean; scope: 'for_me'; conversationId: string | null; channelId: string | null }> {
+    let rpcRes: any = null;
+    try {
+      const { data, error: rpcErr } = await this.supabase.client.rpc(
+        'hide_message_for_user',
+        {
+          p_user_id: userId,
+          p_message_id: Number(messageId),
+        },
+      );
 
-    if (findErr || !existing) {
-      throw new NotFoundException('Không tìm thấy tin nhắn.');
-    }
-
-    const raw = existing as RawMessageRow;
-    if (raw.channel_id) {
-      if (raw.author_id !== userId) {
-        const perms = await this.serverPermissionsService.getChannelPermissions(userId, raw.channel_id);
-        if ((perms & Permission.MANAGE_MESSAGES) === 0n) {
-          throw new ForbiddenException('Bạn không có quyền xoá tin nhắn này.');
+      if (!rpcErr && data) {
+        rpcRes = data;
+      } else if (rpcErr) {
+        if (rpcErr.code === 'P0002') {
+          throw new NotFoundException('Không tìm thấy tin nhắn.');
+        }
+        if (rpcErr.code === '42501') {
+          throw new ForbiddenException('Bạn không có quyền thực hiện thao tác này.');
+        }
+        if (rpcErr.code !== 'PGRST202' && rpcErr.code !== '42883') {
+          this.logger.error(`Lỗi RPC hide_message_for_user (msg: ${messageId}):`, rpcErr);
+          throw new InternalServerErrorException('Lỗi khi ẩn tin nhắn.');
         }
       }
-    } else {
-      if (raw.author_id !== userId) {
-        throw new ForbiddenException('Bạn chỉ có thể xoá tin nhắn của chính mình.');
+    } catch (e) {
+      if (e instanceof NotFoundException || e instanceof ForbiddenException || e instanceof InternalServerErrorException) {
+        throw e;
       }
     }
 
-    // 1. Tìm các attachments đính kèm (nếu có) để dọn dẹp Storage & DB metadata
-    const { data: attRecords, error: attFindErr } = await this.supabase.client
-      .from('attachments')
-      .select('id, storage_path')
-      .eq('message_id', messageId);
+    let conversationId = rpcRes?.conversationId ?? null;
+    let channelId = rpcRes?.channelId ?? null;
 
-    if (attFindErr) {
-      this.logger.error(
-        `Lỗi truy vấn attachments khi xoá message ${messageId}:`,
-        attFindErr,
-      );
-      throw new InternalServerErrorException(
-        'Lỗi kiểm tra tệp đính kèm khi xoá tin nhắn.',
-      );
-    }
+    if (!rpcRes) {
+      const { data: msg } = await this.supabase.client
+        .from('messages')
+        .select('id, conversation_id, channel_id')
+        .eq('id', messageId)
+        .maybeSingle();
 
-    if (attRecords && attRecords.length > 0) {
-      const paths = attRecords.map((a) => a.storage_path);
-      const { error: storageDelErr } = await this.supabase.client.storage
-        .from('message-attachments')
-        .remove(paths);
-
-      if (storageDelErr) {
-        this.logger.error(
-          `Lỗi dọn dẹp storage objects của message ${messageId}:`,
-          storageDelErr,
-        );
-        throw new InternalServerErrorException(
-          'Lỗi dọn dẹp tập tin đính kèm khi xoá tin nhắn.',
-        );
+      if (!msg) {
+        throw new NotFoundException('Không tìm thấy tin nhắn.');
       }
 
-      const { error: attDelErr } = await this.supabase.client
-        .from('attachments')
-        .delete()
-        .eq('message_id', messageId);
+      conversationId = msg.conversation_id;
+      channelId = msg.channel_id;
 
-      if (attDelErr) {
-        this.logger.error(
-          `Lỗi xoá metadata attachments của message ${messageId}:`,
-          attDelErr,
-        );
-        throw new InternalServerErrorException(
-          'Lỗi xoá dữ liệu tệp đính kèm trong cơ sở dữ liệu.',
-        );
+      try {
+        await this.supabase.client.from('message_hidden_users').upsert({
+          user_id: userId,
+          message_id: Number(messageId),
+          hidden_at: new Date().toISOString(),
+        });
+      } catch {
+        // Bỏ qua nếu bảng chưa tồn tại
       }
     }
 
-    // 2. Cập nhật soft delete trên bảng messages
-    const now = new Date().toISOString();
-    const { error: delErr } = await this.supabase.client
-      .from('messages')
-      .update({
-        content: null,
-        deleted_at: now,
-      })
-      .eq('id', messageId);
+    // Phát event user-scoped tới Room riêng của user
+    this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER, {
+      userId,
+      messageId,
+      conversationId,
+      channelId,
+    });
 
-    if (delErr) {
-      this.logger.error('Lỗi soft-delete tin nhắn:', delErr);
-      throw new InternalServerErrorException('Lỗi xoá tin nhắn.');
-    }
+    return {
+      id: messageId,
+      hidden: true,
+      scope: 'for_me',
+      conversationId,
+      channelId,
+    };
+  }
 
-    // 3. Dọn dẹp toàn bộ reactions của tin nhắn sau khi soft-delete thành công
+  /**
+   * Thu hồi tin nhắn cho mọi người (xóa hoàn toàn đối với tất cả thành viên).
+   * Thực hiện giao dịch nguyên tử trong RPC PostgreSQL, enqueue attachments vào storage outbox,
+   * dọn dẹp reactions/GIPHY media, redact content = null và phát realtime CHAT_EVENTS.MESSAGE_DELETED.
+   */
+  async recallMessageForEveryone(
+    userId: string,
+    messageId: string,
+  ): Promise<{ id: string; deleted: boolean; scope: 'everyone'; conversationId: string | null; channelId: string | null }> {
+    let rpcRes: any = null;
     try {
-      const { error: reactCleanupErr } = await this.supabase.client
-        .from('message_reactions')
-        .delete()
-        .eq('message_id', messageId);
-
-      if (reactCleanupErr) {
-        this.logger.error(
-          `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
-          reactCleanupErr,
-        );
-      }
-    } catch (cleanupEx) {
-      this.logger.error(
-        `Lỗi dọn dẹp reactions của message ${messageId} sau khi soft-delete:`,
-        cleanupEx,
+      const { data, error: rpcErr } = await this.supabase.client.rpc(
+        'recall_message_for_everyone',
+        {
+          p_user_id: userId,
+          p_message_id: Number(messageId),
+        },
       );
+
+      if (!rpcErr && data) {
+        rpcRes = data;
+      } else if (rpcErr) {
+        if (rpcErr.code === 'P0002') {
+          throw new NotFoundException('Không tìm thấy tin nhắn.');
+        }
+        if (rpcErr.code === '42501') {
+          throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+        }
+        if (rpcErr.code !== 'PGRST202' && rpcErr.code !== '42883') {
+          this.logger.error(`Lỗi RPC recall_message_for_everyone (msg: ${messageId}):`, rpcErr);
+          throw new InternalServerErrorException('Lỗi khi thu hồi tin nhắn.');
+        }
+      }
+    } catch (e) {
+      if (e instanceof NotFoundException || e instanceof ForbiddenException || e instanceof InternalServerErrorException) {
+        throw e;
+      }
     }
 
-    // 4. Phát sự kiện realtime thông báo tin nhắn đã bị xoá
+    let conversationId = rpcRes?.conversationId ?? null;
+    let channelId = rpcRes?.channelId ?? null;
+
+    if (!rpcRes) {
+      const { data: msg } = await this.supabase.client
+        .from('messages')
+        .select('id, conversation_id, channel_id, author_id, deleted_at')
+        .eq('id', messageId)
+        .maybeSingle();
+
+      if (!msg) {
+        throw new NotFoundException('Không tìm thấy tin nhắn.');
+      }
+
+      conversationId = msg.conversation_id;
+      channelId = msg.channel_id;
+
+      if (msg.author_id !== userId) {
+        if (channelId) {
+          const perms = await this.serverPermissionsService.getChannelPermissions(
+            userId,
+            channelId,
+          );
+          const canManage =
+            (perms & Permission.MANAGE_MESSAGES) !== 0n ||
+            (perms & Permission.ADMINISTRATOR) !== 0n;
+          if (!canManage) {
+            throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+          }
+        } else {
+          throw new ForbiddenException('Bạn không có quyền thu hồi tin nhắn này.');
+        }
+      }
+
+      if (!msg.deleted_at) {
+        await this.supabase.client
+          .from('messages')
+          .update({ content: null, deleted_at: new Date().toISOString() })
+          .eq('id', messageId);
+
+        await Promise.all([
+          this.supabase.client.from('message_reactions').delete().eq('message_id', messageId),
+          this.supabase.client.from('message_external_media').delete().eq('message_id', messageId),
+        ]);
+      }
+    }
+
+    // Phát event realtime thông báo tin nhắn đã bị xóa tới toàn bộ phòng chat
     this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_DELETED, {
-      conversationId: raw.conversation_id,
-      channelId: raw.channel_id ?? null,
+      conversationId,
+      channelId,
       messageId,
     });
 
     return {
       id: messageId,
       deleted: true,
-      conversationId: raw.conversation_id,
-      channelId: raw.channel_id ?? null,
+      scope: 'everyone',
+      conversationId,
+      channelId,
     };
+  }
+
+  /**
+   * Xoá / Thu hồi tin nhắn (hỗ trợ 2 chế độ: 'for_me' và 'everyone').
+   */
+  async deleteMessage(
+    userId: string,
+    messageId: string,
+    scope: 'for_me' | 'everyone' = 'for_me',
+  ): Promise<{ id: string; deleted?: boolean; hidden?: boolean; scope: 'for_me' | 'everyone'; conversationId: string | null; channelId: string | null }> {
+    if (scope === 'for_me') {
+      return this.hideMessageForUser(userId, messageId);
+    }
+    if (scope === 'everyone') {
+      return this.recallMessageForEveryone(userId, messageId);
+    }
+    throw new BadRequestException('Giá trị scope không hợp lệ. Phải là "for_me" hoặc "everyone".');
   }
 
   /**
@@ -2183,7 +2339,7 @@ export class MessagesService {
             channel_id: channelId,
             conversation_id: null,
             last_read_message_id: messageId,
-            last_read_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           },
           { onConflict: 'user_id,channel_id' },
         );

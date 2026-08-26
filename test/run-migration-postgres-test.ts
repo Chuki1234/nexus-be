@@ -2064,10 +2064,180 @@ async function runPostgresMigrationTests() {
   await pg.exec(directCallsMigrationSql);
   console.log('✔ Bước 18.10: Migration 20260825160000_direct_friend_calls.sql idempotent 100%');
 
+  // ============================================================================
+  // BƯỚC 19: Kiểm thử Migration 20260825210000_message_hidden_users_and_atomic_recall.sql
+  // ============================================================================
+  const messageHiddenAndRecallMigrationPath = path.join(
+    __dirname,
+    '../supabase/migrations/20260825210000_message_hidden_users_and_atomic_recall.sql',
+  );
+  const messageHiddenAndRecallMigrationSql = fs.readFileSync(
+    messageHiddenAndRecallMigrationPath,
+    'utf-8',
+  );
+
+  await pg.exec(`RESET ROLE;`);
+  await pg.exec(messageHiddenAndRecallMigrationSql);
+  console.log('✔ Bước 19.1: Áp dụng migration 20260825210000_message_hidden_users_and_atomic_recall.sql thành công');
+
+  // 19.2: Kiểm tra bảo mật RPCs (anon/authenticated denied)
+  await pg.exec(`SET ROLE anon;`);
+  let anonHideBlocked = false;
+  try {
+    await pg.query(`SELECT public.hide_message_for_user('${userA}', 1);`);
+  } catch (err: any) {
+    anonHideBlocked = true;
+  }
+  if (!anonHideBlocked) {
+    throw new Error('Anon role was not blocked from executing hide_message_for_user!');
+  }
+
+  let anonRecallBlocked = false;
+  try {
+    await pg.query(`SELECT public.recall_message_for_everyone('${userA}', 1);`);
+  } catch (err: any) {
+    anonRecallBlocked = true;
+  }
+  if (!anonRecallBlocked) {
+    throw new Error('Anon role was not blocked from executing recall_message_for_everyone!');
+  }
+  console.log('✔ Bước 19.2: Phân quyền bảo mật RPCs chính xác (anon/authenticated blocked)');
+
+  // 19.3: Tạo tin nhắn thử nghiệm DM để test hide_message_for_user
+  await pg.exec(`RESET ROLE;`);
+  const msgInsertRes = await pg.query<{ id: string }>(`
+    INSERT INTO public.messages (conversation_id, author_id, content, client_nonce)
+    VALUES ('${convId}', '${userA}', 'Tin nhắn DM thử nghiệm hide', '${crypto.randomUUID()}')
+    RETURNING id::text;
+  `);
+  const testMsgId = msgInsertRes.rows[0].id;
+
+  // Gọi hide_message_for_user cho userA
+  const hideRes = await pg.query<{ hide_message_for_user: any }>(`
+    SELECT public.hide_message_for_user('${userA}', ${testMsgId}) as hide_message_for_user;
+  `);
+  const hideResult = hideRes.rows[0].hide_message_for_user;
+  if (!hideResult.hidden || hideResult.id !== testMsgId) {
+    throw new Error(`hide_message_for_user returned invalid result: ${JSON.stringify(hideResult)}`);
+  }
+
+  // Kiểm tra bảng message_hidden_users có row
+  const checkHiddenRow = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_hidden_users WHERE user_id = '${userA}' AND message_id = ${testMsgId};
+  `);
+  if (checkHiddenRow.rows[0].count !== '1') {
+    throw new Error('message_hidden_users row not found after hide_message_for_user!');
+  }
+
+  // Idempotent: Gọi lại lần 2 không lỗi
+  const hideRes2 = await pg.query<{ hide_message_for_user: any }>(`
+    SELECT public.hide_message_for_user('${userA}', ${testMsgId}) as hide_message_for_user;
+  `);
+  if (!hideRes2.rows[0].hide_message_for_user.hidden) {
+    throw new Error('hide_message_for_user failed on second idempotent call');
+  }
+  console.log('✔ Bước 19.3: hide_message_for_user ghi nhận message_hidden_users và idempotent chuẩn xác');
+
+  // 19.4: Kiểm tra get_conversation_messages_paged loại bỏ hidden message cho userA nhưng giữ nguyên cho userB
+  const pagedUserA = await pg.query<{ id: string; content: string }>(`
+    SELECT id::text, content FROM public.get_conversation_messages_paged('${convId}', '${userA}', 50, null, null);
+  `);
+  const foundInUserA = pagedUserA.rows.some(r => r.id === testMsgId);
+  if (foundInUserA) {
+    throw new Error('get_conversation_messages_paged leaked hidden message to userA!');
+  }
+
+  const pagedUserB = await pg.query<{ id: string; content: string }>(`
+    SELECT id::text, content FROM public.get_conversation_messages_paged('${convId}', '${userB}', 50, null, null);
+  `);
+  const foundInUserB = pagedUserB.rows.some(r => r.id === testMsgId);
+  if (!foundInUserB) {
+    throw new Error('get_conversation_messages_paged did not return message for other userB!');
+  }
+  console.log('✔ Bước 19.4: Pre-pagination filtering loại bỏ hidden message cho user thực hiện, giữ nguyên cho user khác');
+
+  // 19.5: Kiểm tra recall_message_for_everyone trong DM (author được phép, non-author bị chặn)
+  const recallMsgRes = await pg.query<{ id: string }>(`
+    INSERT INTO public.messages (conversation_id, author_id, content, client_nonce)
+    VALUES ('${convId}', '${userA}', 'Tin nhắn DM cần thu hồi cho mọi người', '${crypto.randomUUID()}')
+    RETURNING id::text;
+  `);
+  const recallMsgId = recallMsgRes.rows[0].id;
+
+  // Thêm attachment và reaction
+  await pg.exec(`
+    CREATE TABLE IF NOT EXISTS public.message_reactions (
+      id BIGSERIAL PRIMARY KEY,
+      message_id BIGINT REFERENCES public.messages(id) ON DELETE CASCADE,
+      user_id UUID,
+      emoji TEXT
+    );
+    INSERT INTO public.attachments (id, message_id, storage_path, filename, mime_type, size_bytes)
+    VALUES ('${crypto.randomUUID()}', ${recallMsgId}, 'conv_${convId}/test_file.png', 'test_file.png', 'image/png', 1024);
+    INSERT INTO public.message_reactions (message_id, user_id, emoji)
+    VALUES (${recallMsgId}, '${userB}', '👍');
+  `);
+
+  // User B (không phải author) cố recall -> 42501
+  let userBRecallBlocked = false;
+  try {
+    await pg.query(`SELECT public.recall_message_for_everyone('${userB}', ${recallMsgId});`);
+  } catch (err: any) {
+    userBRecallBlocked = true;
+  }
+  if (!userBRecallBlocked) {
+    throw new Error('Non-author was able to recall DM message for everyone!');
+  }
+
+  // User A (author) recall thành công
+  const recallRes = await pg.query<{ recall_message_for_everyone: any }>(`
+    SELECT public.recall_message_for_everyone('${userA}', ${recallMsgId}) as recall_message_for_everyone;
+  `);
+  const recallResult = recallRes.rows[0].recall_message_for_everyone;
+  if (!recallResult.recalled) {
+    throw new Error(`recall_message_for_everyone failed: ${JSON.stringify(recallResult)}`);
+  }
+
+  // Kiểm tra outbox storage_cleanup_outbox đã nhận storage_path
+  const outboxCheck = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.storage_cleanup_outbox WHERE storage_path = 'conv_${convId}/test_file.png' AND status = 'pending';
+  `);
+  if (outboxCheck.rows[0].count !== '1') {
+    throw new Error('storage_cleanup_outbox row not enqueued for attachment during recall!');
+  }
+
+  // Kiểm tra attachment metadata và reactions đã bị xóa
+  const attCheck = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.attachments WHERE message_id = ${recallMsgId};
+  `);
+  if (attCheck.rows[0].count !== '0') {
+    throw new Error('Attachment metadata was not cleaned up during recall!');
+  }
+  const reactCheck = await pg.query<{ count: string }>(`
+    SELECT count(*)::text as count FROM public.message_reactions WHERE message_id = ${recallMsgId};
+  `);
+  if (reactCheck.rows[0].count !== '0') {
+    throw new Error('Reactions were not cleaned up during recall!');
+  }
+
+  // Kiểm tra content = null và deleted_at IS NOT NULL
+  const msgCheck = await pg.query<{ content: string | null; deleted_at: string | null }>(`
+    SELECT content, deleted_at FROM public.messages WHERE id = ${recallMsgId};
+  `);
+  if (msgCheck.rows[0].content !== null || !msgCheck.rows[0].deleted_at) {
+    throw new Error('Message content was not redacted to null or deleted_at was null!');
+  }
+  console.log('✔ Bước 19.5: recall_message_for_everyone atomic: enqueue outbox, dọn metadata/reactions và redact message chuẩn');
+
+  // 19.6: Idempotency migration
+  await pg.exec(`RESET ROLE;`);
+  await pg.exec(messageHiddenAndRecallMigrationSql);
+  console.log('✔ Bước 19.6: Migration 20260825210000_message_hidden_users_and_atomic_recall.sql idempotent 100%');
+
   await pg.exec(`RESET ROLE;`);
   await pg.close();
   console.log(
-    '--- TOÀN BỘ 18 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
+    '--- TOÀN BỘ 19 BƯỚC KIỂM THỬ PGlite SQL MIGRATION ĐÃ PASS 100% ---',
   );
 }
 

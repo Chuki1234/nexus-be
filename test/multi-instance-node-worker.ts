@@ -362,10 +362,24 @@ async function bootstrap() {
             return { data: null, error: { message: err.message, code: err.code } };
           }
         }
-        if (fn === 'expire_ringing_direct_calls') {
+        if (fn === 'hide_message_for_user') {
           try {
-            const res = await pgPool.query(`SELECT * FROM public.expire_ringing_direct_calls()`);
-            return { data: res.rows, error: null };
+            const res = await pgPool.query(
+              `SELECT * FROM public.hide_message_for_user($1, $2)`,
+              [params.p_user_id, params.p_message_id],
+            );
+            return { data: res.rows[0]?.hide_message_for_user || res.rows[0], error: null };
+          } catch (err: any) {
+            return { data: null, error: { message: err.message, code: err.code } };
+          }
+        }
+        if (fn === 'recall_message_for_everyone') {
+          try {
+            const res = await pgPool.query(
+              `SELECT * FROM public.recall_message_for_everyone($1, $2)`,
+              [params.p_user_id, params.p_message_id],
+            );
+            return { data: res.rows[0]?.recall_message_for_everyone || res.rows[0], error: null };
           } catch (err: any) {
             return { data: null, error: { message: err.message, code: err.code } };
           }

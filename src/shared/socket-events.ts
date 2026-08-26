@@ -102,6 +102,33 @@ export interface PresenceSyncPayload {
   presences: Record<string, { status: PresenceStatus; lastSeenAt: string | null }>;
 }
 
+export interface VoiceMemberState {
+  userId: string;
+  channelId: string;
+  serverId: string;
+  name: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  isMuted: boolean;
+  isDeafened?: boolean;
+  isCameraOn: boolean;
+  isScreenSharing: boolean;
+  joinedAt: string;
+}
+
+export interface VoiceStateUpdatePayload {
+  serverId: string;
+  channelId: string | null;
+  userId: string;
+  state: VoiceMemberState | null;
+}
+
+export interface VoiceServerStatesSyncPayload {
+  serverId: string;
+  states: VoiceMemberState[];
+}
+
 export interface JoinConversationResponse {
   success: boolean;
   error?: string;
@@ -149,6 +176,42 @@ export interface ClientToServerEvents {
     payload: { serverId: string },
     callback?: (res: { success: boolean }) => void,
   ) => void;
+
+  /** Cập nhật trạng thái voice (mic, cam, screenshare) của local user lên server room */
+  'voice:state-update': (payload: {
+    serverId: string;
+    channelId: string | null;
+    isMuted?: boolean;
+    isDeafened?: boolean;
+    isCameraOn?: boolean;
+    isScreenSharing?: boolean;
+  }) => void;
+
+  /** Lấy snapshot voice states của server khi mở sidebar */
+  'voice:get-server-states': (
+    payload: { serverId: string },
+    callback?: (response: VoiceServerStatesSyncPayload) => void,
+  ) => void;
+
+  /** Chủ server chuyển thành viên sang kênh voice khác */
+  'voice:move-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+    targetChannelId: string;
+  }) => void;
+
+  /** Chủ server ngắt kết nối / kick thành viên khỏi phòng thoại */
+  'voice:kick-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+  }) => void;
+
+  /** Chủ server tắt/bật mic của thành viên trên máy chủ */
+  'voice:server-mute-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+    isMuted: boolean;
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +222,13 @@ export interface ServerToClientEvents {
   'message:created': (payload: { message: MessagePayload }) => void;
   'message:updated': (payload: { message: MessagePayload }) => void;
   'message:deleted': (payload: { messageId: MessageId; channelId?: string | null; conversationId?: string | null }) => void;
+  'message:hidden-for-user': (payload: {
+    messageId: MessageId;
+    userId: string;
+    conversationId?: string | null;
+    channelId?: string | null;
+    hiddenAt: string;
+  }) => void;
   'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
 
   'message:read': (payload: {
@@ -295,6 +365,31 @@ export interface ServerToClientEvents {
    * Người đã ở trong phòng lấy danh sách từ LiveKit, không dùng event này.
    */
   'voice:participants': (payload: { channelId: string; userIds: string[] }) => void;
+
+  /** Broadcast voice state của một member trong server (tham gia, rời, mute, cam, stream) */
+  'voice:state-updated': (payload: VoiceStateUpdatePayload) => void;
+
+  /** Snapshot toàn bộ voice states của server */
+  'voice:server-states-sync': (payload: VoiceServerStatesSyncPayload) => void;
+
+  /** Lệnh điều hướng ép buộc thành viên chuyển kênh thoại */
+  'voice:force-move': (payload: {
+    serverId: string;
+    channelId: string;
+    channelName: string;
+  }) => void;
+
+  /** Lệnh ép buộc thành viên ngắt kết nối khỏi phòng thoại */
+  'voice:force-disconnect': (payload: {
+    serverId: string;
+    channelId?: string;
+  }) => void;
+
+  /** Lệnh ép buộc tắt mic trên máy chủ */
+  'voice:force-mute': (payload: {
+    serverId: string;
+    isMuted: boolean;
+  }) => void;
 
   // Direct Call Signaling (DM 1-1 giữa bạn bè)
   'direct-call:incoming': (payload: DirectCallDto) => void;

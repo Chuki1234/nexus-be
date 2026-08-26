@@ -8,6 +8,7 @@ import {
 import * as crypto from 'crypto';
 import Redis from 'ioredis';
 import * as os from 'os';
+import type { VoiceMemberState } from '../../shared/socket-events';
 
 export interface PresenceSnapshotItem {
   status: string;
@@ -32,6 +33,9 @@ export class RedisStateService
   private deadInstanceSweeperTimer: NodeJS.Timeout | null = null;
   private offlineProcessorTimer: NodeJS.Timeout | null = null;
   private typingSweeperTimer: NodeJS.Timeout | null = null;
+
+  /** In-memory fallback lưu trữ voice states khi không có Redis */
+  private readonly inMemoryVoiceStates = new Map<string, Map<string, VoiceMemberState>>();
 
   // Callbacks
   private onOfflineCallback?: (payload: {
@@ -711,6 +715,120 @@ export class RedisStateService
         this.logger.error(`Lỗi sweep typing cho ${target}: ${err.message}`);
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. Server Voice States Management (Realtime Voice Presence)
+  // ---------------------------------------------------------------------------
+  async setServerVoiceState(
+    serverId: string,
+    userId: string,
+    state: VoiceMemberState,
+  ): Promise<void> {
+    if (!this.client || !this.isConnected) {
+      if (!this.inMemoryVoiceStates.has(serverId)) {
+        this.inMemoryVoiceStates.set(serverId, new Map());
+      }
+      this.inMemoryVoiceStates.get(serverId)!.set(userId, state);
+      return;
+    }
+
+    const serverKey = this.k(`server:${serverId}:voice_states`);
+    const userVoiceServersKey = this.k(`user:${userId}:voice_servers`);
+
+    await this.client
+      .multi()
+      .hset(serverKey, userId, JSON.stringify(state))
+      .sadd(userVoiceServersKey, serverId)
+      .exec();
+  }
+
+  async removeServerVoiceState(
+    serverId: string,
+    userId: string,
+  ): Promise<string | null> {
+    if (!this.client || !this.isConnected) {
+      const serverMap = this.inMemoryVoiceStates.get(serverId);
+      if (!serverMap) return null;
+      const prev = serverMap.get(userId);
+      serverMap.delete(userId);
+      if (serverMap.size === 0) {
+        this.inMemoryVoiceStates.delete(serverId);
+      }
+      return prev ? prev.channelId : null;
+    }
+
+    const serverKey = this.k(`server:${serverId}:voice_states`);
+    const userVoiceServersKey = this.k(`user:${userId}:voice_servers`);
+
+    const prevRaw = await this.client.hget(serverKey, userId);
+    await this.client
+      .multi()
+      .hdel(serverKey, userId)
+      .srem(userVoiceServersKey, serverId)
+      .exec();
+
+    if (!prevRaw) return null;
+    try {
+      const parsed = JSON.parse(prevRaw) as VoiceMemberState;
+      return parsed.channelId;
+    } catch {
+      return null;
+    }
+  }
+
+  async getServerVoiceStates(serverId: string): Promise<VoiceMemberState[]> {
+    if (!this.client || !this.isConnected) {
+      const serverMap = this.inMemoryVoiceStates.get(serverId);
+      if (!serverMap) return [];
+      return Array.from(serverMap.values());
+    }
+
+    const serverKey = this.k(`server:${serverId}:voice_states`);
+    const all = await this.client.hgetall(serverKey);
+    const result: VoiceMemberState[] = [];
+
+    for (const raw of Object.values(all)) {
+      try {
+        result.push(JSON.parse(raw) as VoiceMemberState);
+      } catch {}
+    }
+    return result;
+  }
+
+  async removeUserFromAllVoiceStates(
+    userId: string,
+  ): Promise<Array<{ serverId: string; channelId: string }>> {
+    const affected: Array<{ serverId: string; channelId: string }> = [];
+
+    if (!this.client || !this.isConnected) {
+      for (const [serverId, map] of this.inMemoryVoiceStates.entries()) {
+        const prev = map.get(userId);
+        if (prev) {
+          affected.push({ serverId, channelId: prev.channelId });
+          map.delete(userId);
+        }
+      }
+      return affected;
+    }
+
+    const userVoiceServersKey = this.k(`user:${userId}:voice_servers`);
+    const serverIds = await this.client.smembers(userVoiceServersKey);
+
+    for (const serverId of serverIds) {
+      const serverKey = this.k(`server:${serverId}:voice_states`);
+      const prevRaw = await this.client.hget(serverKey, userId);
+      if (prevRaw) {
+        try {
+          const parsed = JSON.parse(prevRaw) as VoiceMemberState;
+          affected.push({ serverId, channelId: parsed.channelId });
+        } catch {}
+      }
+      await this.client.hdel(serverKey, userId);
+    }
+
+    await this.client.del(userVoiceServersKey);
+    return affected;
   }
 
   // ---------------------------------------------------------------------------

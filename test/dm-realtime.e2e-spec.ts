@@ -204,16 +204,30 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
             error: null,
           });
         }
+        if (name === 'hide_message_for_user') {
+          return Promise.resolve({
+            data: {
+              id: String(params.p_message_id),
+              conversationId: convId,
+              channelId: null,
+              hidden: true,
+            },
+            error: null,
+          });
+        }
+        if (name === 'recall_message_for_everyone') {
+          return Promise.resolve({
+            data: {
+              id: String(params.p_message_id),
+              conversationId: convId,
+              channelId: null,
+              recalled: true,
+            },
+            error: null,
+          });
+        }
         return Promise.resolve({ data: null, error: null });
       }),
-      storage: {
-        from: jest.fn().mockReturnValue({
-          copy: jest.fn().mockResolvedValue({ data: { path: 'ok' }, error: null }),
-          remove: jest.fn().mockResolvedValue({ data: [], error: null }),
-          createSignedUrl: jest.fn().mockResolvedValue({ data: { signedUrl: 'https://storage/signed' }, error: null }),
-          createSignedUrls: jest.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-      },
     },
   };
 
@@ -330,7 +344,26 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
     expect(updated.message.content).toBe('Edited Realtime Message');
   });
 
-  it('6. User A xoá tin nhắn -> User B nhận message:deleted', async () => {
+  it('6. User A ẩn tin nhắn -> Chỉ User A nhận message:hidden-for-user, User B không nhận', async () => {
+    const messagesService = app.get(MessagesService);
+    let userBReceivedHidden = false;
+
+    socketB.once('message:hidden-for-user', () => {
+      userBReceivedHidden = true;
+    });
+
+    const hiddenPromise = new Promise<any>((resolve) => {
+      socketA.once('message:hidden-for-user', (payload) => resolve(payload));
+    });
+
+    await messagesService.hideMessageForUser(userA.id, '101');
+
+    const hidden = await hiddenPromise;
+    expect(hidden.messageId).toBe('101');
+    expect(userBReceivedHidden).toBe(false);
+  });
+
+  it('6b. User A thu hồi tin nhắn cho mọi người -> User B nhận message:deleted', async () => {
     const messagesService = app.get(MessagesService);
 
     const deletePromise = new Promise<any>((resolve) => {
@@ -339,7 +372,7 @@ describe('Direct Messages In-Process Integration Test (Mocked Supabase)', () => 
       });
     });
 
-    await messagesService.deleteMessage(userA.id, '101');
+    await messagesService.recallMessageForEveryone(userA.id, '101');
 
     const deleted = await deletePromise;
     expect(deleted.messageId).toBe('101');

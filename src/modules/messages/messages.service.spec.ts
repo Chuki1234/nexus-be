@@ -172,6 +172,69 @@ describe('MessagesService', () => {
               error: null,
             });
           }
+          if (name === 'get_conversation_messages_paged') {
+            return Promise.resolve({
+              data: [
+                {
+                  id: '9007199254740999999',
+                  channel_id: null,
+                  conversation_id: params.p_conversation_id,
+                  author_id: 'user-1',
+                  type: 'default',
+                  content: 'Hello Huge BigInt',
+                  reply_to_id: null,
+                  client_nonce: 'nonce-huge',
+                  edited_at: null,
+                  deleted_at: null,
+                  created_at: '2026-08-22T10:00:00Z',
+                },
+              ],
+              error: null,
+            });
+          }
+          if (name === 'get_channel_messages_paged') {
+            return Promise.resolve({
+              data: [
+                {
+                  id: '6001',
+                  channel_id: params.p_channel_id,
+                  conversation_id: null,
+                  author_id: 'user-1',
+                  type: 'default',
+                  content: null,
+                  reply_to_id: null,
+                  client_nonce: 'nonce-gif-msg',
+                  edited_at: null,
+                  deleted_at: null,
+                  created_at: '2026-08-25T12:00:00Z',
+                },
+              ],
+              error: null,
+            });
+          }
+          if (name === 'hide_message_for_user') {
+            return Promise.resolve({
+              data: {
+                id: params.p_message_id?.toString() || '101',
+                conversationId: 'conv-1',
+                channelId: null,
+                hidden: true,
+              },
+              error: null,
+            });
+          }
+          if (name === 'recall_message_for_everyone') {
+            return Promise.resolve({
+              data: {
+                id: params.p_message_id?.toString() || '101',
+                conversationId: 'conv-1',
+                channelId: null,
+                recalled: true,
+                storagePaths: ['conversations/conv-1/file.png'],
+              },
+              error: null,
+            });
+          }
           return Promise.resolve({ data: null, error: null });
         }),
         storage: {
@@ -1486,80 +1549,39 @@ describe('MessagesService', () => {
   });
 
   describe('deleteMessage', () => {
-    it('chặn xoá tin nhắn của người khác (403)', async () => {
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                author_id: 'user-other',
-              },
-              error: null,
-            }),
-          };
-        }
-        return {};
-      });
-
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        ForbiddenException,
+    it('hideMessageForUser: gọi RPC hide_message_for_user và emit user-scoped CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER', async () => {
+      const res = await service.hideMessageForUser('user-1', '101');
+      expect(res.hidden).toBe(true);
+      expect(res.scope).toBe('for_me');
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'hide_message_for_user',
+        {
+          p_user_id: 'user-1',
+          p_message_id: 101,
+        },
+      );
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.MESSAGE_HIDDEN_FOR_USER,
+        {
+          userId: 'user-1',
+          messageId: '101',
+          conversationId: 'conv-1',
+          channelId: null,
+        },
       );
     });
 
-    it('soft delete tin nhắn thành công, dọn dẹp Storage objects và emit domain event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({ error: null });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-
-      const deleteAttMock = jest.fn().mockReturnValue({
-        eq: jest.fn().mockResolvedValue({ error: null }),
-      });
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: jest.fn().mockReturnValue({
-              eq: jest.fn().mockResolvedValue({ error: null }),
-            }),
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-            delete: deleteAttMock,
-          };
-        }
-        return {};
-      });
-
-      const res = await service.deleteMessage('user-1', '101');
+    it('recallMessageForEveryone: gọi RPC recall_message_for_everyone và emit CHAT_EVENTS.MESSAGE_DELETED', async () => {
+      const res = await service.recallMessageForEveryone('user-1', '101');
       expect(res.deleted).toBe(true);
-      expect(res.id).toBe('101');
-      expect(removeStorageMock).toHaveBeenCalledWith(['conversations/conv-1/file.png']);
-      expect(deleteAttMock).toHaveBeenCalled();
+      expect(res.scope).toBe('everyone');
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'recall_message_for_everyone',
+        {
+          p_user_id: 'user-1',
+          p_message_id: 101,
+        },
+      );
       expect(mockEventEmitter.emit).toHaveBeenCalledWith(
         CHAT_EVENTS.MESSAGE_DELETED,
         {
@@ -1570,148 +1592,71 @@ describe('MessagesService', () => {
       );
     });
 
-    it('xử lý khi query attachments trả lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const updateMsgMock = jest.fn();
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: null,
-              error: { message: 'Database connection failed' },
-            }),
-          };
-        }
-        return {};
+    it('deleteMessage with scope="for_me" delegates to hideMessageForUser', async () => {
+      const spy = jest.spyOn(service, 'hideMessageForUser').mockResolvedValueOnce({
+        id: '101',
+        hidden: true,
+        scope: 'for_me',
+        conversationId: 'conv-1',
+        channelId: null,
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        InternalServerErrorException,
-      );
-
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
+      const res = await service.deleteMessage('user-1', '101', 'for_me');
+      expect(spy).toHaveBeenCalledWith('user-1', '101');
+      expect(res.hidden).toBe(true);
     });
 
-    it('xử lý khi storage remove trả lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({
-        error: { message: 'Storage connection timeout' },
-      });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-      const updateMsgMock = jest.fn();
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-          };
-        }
-        return {};
+    it('deleteMessage with scope="everyone" delegates to recallMessageForEveryone', async () => {
+      const spy = jest.spyOn(service, 'recallMessageForEveryone').mockResolvedValueOnce({
+        id: '101',
+        deleted: true,
+        scope: 'everyone',
+        conversationId: 'conv-1',
+        channelId: null,
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
-        InternalServerErrorException,
-      );
-
-      expect(removeStorageMock).toHaveBeenCalled();
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
+      const res = await service.deleteMessage('user-1', '101', 'everyone');
+      expect(spy).toHaveBeenCalledWith('user-1', '101');
+      expect(res.deleted).toBe(true);
     });
 
-    it('xử lý khi delete metadata attachments lỗi: ném 500, không soft-delete và không emit event', async () => {
-      const removeStorageMock = jest.fn().mockResolvedValue({ error: null });
-      mockSupabase.client.storage.from.mockReturnValue({
-        remove: removeStorageMock,
-      });
-      const updateMsgMock = jest.fn();
+    it('deleteMessage ném BadRequestException khi scope không hợp lệ', async () => {
+      await expect(
+        service.deleteMessage('user-1', '101', 'invalid_scope' as any),
+      ).rejects.toThrow(BadRequestException);
+    });
 
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'messages') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: '101',
-                conversation_id: 'conv-1',
-                author_id: 'user-1',
-              },
-              error: null,
-            }),
-            update: updateMsgMock,
-          };
-        }
-        if (table === 'attachments') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockResolvedValue({
-              data: [
-                {
-                  id: 'att-1',
-                  storage_path: 'conversations/conv-1/file.png',
-                },
-              ],
-              error: null,
-            }),
-            delete: jest.fn().mockReturnValue({
-              eq: jest.fn().mockResolvedValue({
-                error: { message: 'Foreign key constraint error' },
-              }),
-            }),
-          };
-        }
-        return {};
+    it('xử lý khi RPC trả lỗi P0002 -> NotFoundException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: 'P0002', message: 'Not found' },
       });
 
-      await expect(service.deleteMessage('user-1', '101')).rejects.toThrow(
+      await expect(service.hideMessageForUser('user-1', '999')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('xử lý khi RPC trả lỗi 42501 -> ForbiddenException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: '42501', message: 'Permission denied' },
+      });
+
+      await expect(service.recallMessageForEveryone('user-2', '101')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('xử lý khi RPC trả lỗi database khác -> 500 InternalServerErrorException', async () => {
+      mockSupabase.client.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { code: 'XX000', message: 'Internal DB crash' },
+      });
+
+      await expect(service.hideMessageForUser('user-1', '101')).rejects.toThrow(
         InternalServerErrorException,
       );
-
-      expect(removeStorageMock).toHaveBeenCalled();
-      expect(updateMsgMock).not.toHaveBeenCalled();
-      expect(mockEventEmitter.emit).not.toHaveBeenCalled();
     });
   });
 
