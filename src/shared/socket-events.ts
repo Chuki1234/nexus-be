@@ -265,6 +265,12 @@ export interface ServerToClientEvents {
     unreadDelta: number;
   }) => void;
 
+  /** Thông báo cấp user-room khi cuộc trò chuyện bị xóa (ví dụ khi hủy kết bạn) */
+  'conversation:deleted': (payload: {
+    conversationId: string;
+    friendId?: string;
+  }) => void;
+
   'notification:new': (payload: { notification: NotificationPayload }) => void;
 
   /** Sự kiện tạo kênh mới trong server */
