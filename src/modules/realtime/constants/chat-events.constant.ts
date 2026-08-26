@@ -6,6 +6,7 @@ export const CHAT_EVENTS = {
   MESSAGE_DELETED: 'chat.message.deleted',
   MESSAGE_HIDDEN_FOR_USER: 'chat.message.hidden_for_user',
   MESSAGE_READ: 'chat.message.read',
+  MESSAGE_PIN_UPDATED: 'chat.message.pin_updated',
   REACTION_UPDATED: 'chat.reaction.updated',
 } as const;
 

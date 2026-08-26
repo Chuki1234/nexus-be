@@ -15,6 +15,7 @@ import {
   Room,
   type ClientToServerEvents,
   type JoinConversationResponse,
+  type MessagePayload,
   type ServerToClientEvents,
   type VoiceMemberState,
   type VoiceServerStatesSyncPayload,
@@ -801,6 +802,20 @@ export class ChatGateway
       this.server
         ?.to(Room.channel(channelId))
         .emit('message:updated', { message });
+    }
+  }
+
+  @OnEvent(CHAT_EVENTS.MESSAGE_PIN_UPDATED)
+  handleMessagePinUpdated(event: {
+    channelId: string;
+    message: MessagePayload;
+    pinned: boolean;
+  }): void {
+    const { channelId, message, pinned } = event;
+    if (channelId) {
+      this.server
+        ?.to(Room.channel(channelId))
+        .emit('message:pin-updated', { channelId, message, pinned });
     }
   }
 

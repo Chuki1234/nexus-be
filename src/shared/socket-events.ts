@@ -229,6 +229,11 @@ export interface ServerToClientEvents {
     hiddenAt: string;
   }) => void;
   'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
+  'message:pin-updated': (payload: {
+    channelId: string;
+    message: MessagePayload;
+    pinned: boolean;
+  }) => void;
 
   'message:read': (payload: {
     conversationId?: string | null;
