@@ -20,6 +20,7 @@ import {
   type VoiceMemberState,
   type VoiceServerStatesSyncPayload,
 } from '../../shared/socket-events';
+export { Room };
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { PresenceService } from './presence.service';

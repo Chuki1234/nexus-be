@@ -10,8 +10,9 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { PresenceStatus } from '../../shared/dto/common';
+import { Room } from '../../shared/socket-events';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
-import { ChatGateway, Room } from '../realtime/chat.gateway';
+import { ChatGateway } from '../realtime/chat.gateway';
 import type {
   FriendRequestsResponseDto,
   FriendRequestSummaryDto,
