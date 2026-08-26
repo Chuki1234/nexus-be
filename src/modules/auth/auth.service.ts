@@ -199,12 +199,7 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
 
-    const ok = await this.twoFactor.verifyBackupCode(link.user.id, code.trim());
-    if (!ok) {
-      throw new UnauthorizedException('Mã dự phòng không đúng hoặc đã được dùng.');
-    }
-
-    // Mã đúng → đổi token magic link lấy phiên thật.
+    // Đổi token magic link lấy session AAL1 trước
     const { data: session, error: verifyError } =
       await this.supabase.authClient.auth.verifyOtp({
         token_hash: link.properties.hashed_token,
@@ -212,6 +207,41 @@ export class AuthService {
       });
     if (verifyError || !session.session) {
       throw new UnauthorizedException(INVALID_LOGIN);
+    }
+
+    const normalized = code.trim();
+    const isTotp = /^\d{6}$/.test(normalized);
+
+    if (isTotp) {
+      const factor = (link.user.factors ?? []).find(
+        (f) => f.factor_type === 'totp' && f.status === 'verified',
+      );
+      if (factor) {
+        try {
+          const challengeId = await this.twoFactor.challengeForLogin(
+            session.session.access_token,
+            factor.id,
+          );
+          const verified = await this.twoFactor.verifyLogin(
+            session.session.access_token,
+            challengeId,
+            normalized,
+          );
+          return {
+            accessToken: verified.accessToken,
+            refreshToken: verified.refreshToken,
+            expiresAt: verified.expiresAt,
+          };
+        } catch {
+          throw new UnauthorizedException('Mã xác thực Google Authenticator không đúng hoặc đã hết hạn.');
+        }
+      }
+    }
+
+    // Mã dự phòng
+    const ok = await this.twoFactor.verifyBackupCode(link.user.id, normalized);
+    if (!ok) {
+      throw new UnauthorizedException('Mã xác thực 2FA hoặc mã dự phòng không đúng.');
     }
 
     return {
