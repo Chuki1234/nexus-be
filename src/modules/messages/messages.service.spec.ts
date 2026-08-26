@@ -1510,6 +1510,7 @@ describe('MessagesService', () => {
                 id: '101',
                 author_id: 'user-other',
                 deleted_at: null,
+                created_at: new Date().toISOString(),
               },
               error: null,
             }),
@@ -1534,6 +1535,7 @@ describe('MessagesService', () => {
                 id: '101',
                 author_id: 'user-1',
                 deleted_at: '2026-08-22T09:00:00Z',
+                created_at: new Date().toISOString(),
               },
               error: null,
             }),
@@ -1545,6 +1547,161 @@ describe('MessagesService', () => {
       await expect(
         service.editMessage('user-1', '101', { content: 'Sửa tin đã xoá' }),
       ).rejects.toThrow('Tin nhắn đã bị xoá, không thể chỉnh sửa.');
+    });
+
+    it('chặn chỉnh sửa khi đã hết thời gian 5 phút (ConflictException)', async () => {
+      const pastTime = new Date(Date.now() - 6 * 60 * 1000).toISOString(); // 6 phút trước
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: {
+                id: '101',
+                author_id: 'user-1',
+                deleted_at: null,
+                created_at: pastTime,
+                content: 'Tin cũ',
+                type: 'default',
+              },
+              error: null,
+            }),
+          };
+        }
+        return {};
+      });
+
+      await expect(
+        service.editMessage('user-1', '101', { content: 'Sửa tin cũ' }),
+      ).rejects.toThrow('Đã hết thời gian chỉnh sửa tin nhắn (5 phút).');
+    });
+
+    it('cho phép chỉnh sửa khi còn trong cửa sổ 5 phút và broadcast event', async () => {
+      const recentTime = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // 2 phút trước
+      const existingRow = {
+        id: '101',
+        channel_id: 'chan-1',
+        conversation_id: null,
+        author_id: 'user-1',
+        type: 'default',
+        content: 'Nội dung cũ',
+        is_forwarded: false,
+        reply_to_id: null,
+        client_nonce: 'nonce-101',
+        edited_at: null,
+        deleted_at: null,
+        created_at: recentTime,
+      };
+      const updatedRow = {
+        ...existingRow,
+        content: 'Nội dung mới đã sửa',
+        edited_at: new Date().toISOString(),
+      };
+
+      let messageQueryCount = 0;
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            is: jest.fn().mockReturnThis(),
+            gt: jest.fn().mockReturnThis(),
+            update: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockImplementation(() => {
+              messageQueryCount++;
+              if (messageQueryCount === 1) {
+                return Promise.resolve({ data: existingRow, error: null });
+              }
+              return Promise.resolve({ data: updatedRow, error: null });
+            }),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: 'user-1', username: 'alice', display_name: 'Alice', avatar_url: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'attachments' || table === 'message_external_media') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            in: jest.fn().mockResolvedValue({ data: [], error: null }),
+          };
+        }
+        return {};
+      });
+
+      const res = await service.editMessage('user-1', '101', { content: 'Nội dung mới đã sửa' });
+      expect(res.content).toBe('Nội dung mới đã sửa');
+      expect(res.editedAt).toBeTruthy();
+      expect(mockEventEmitter.emit).toHaveBeenCalledWith(
+        CHAT_EVENTS.MESSAGE_UPDATED,
+        expect.objectContaining({
+          channelId: 'chan-1',
+          message: expect.objectContaining({ id: '101', content: 'Nội dung mới đã sửa' }),
+        }),
+      );
+    });
+
+    it('no-op khi nội dung giống hệt: không update DB, không emit event, trả DTO đầy đủ', async () => {
+      const recentTime = new Date(Date.now() - 1 * 60 * 1000).toISOString();
+      mockEventEmitter.emit.mockClear();
+
+      mockSupabase.client.from.mockImplementation((table: string) => {
+        if (table === 'messages') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: {
+                id: '101',
+                channel_id: 'chan-1',
+                conversation_id: null,
+                author_id: 'user-1',
+                type: 'default',
+                content: 'Không đổi',
+                is_forwarded: false,
+                reply_to_id: null,
+                client_nonce: 'nonce-101',
+                edited_at: null,
+                deleted_at: null,
+                created_at: recentTime,
+              },
+              error: null,
+            }),
+            update: jest.fn(),
+          };
+        }
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { id: 'user-1', username: 'alice', display_name: 'Alice', avatar_url: null },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'attachments' || table === 'message_external_media') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            in: jest.fn().mockResolvedValue({ data: [], error: null }),
+          };
+        }
+        return {};
+      });
+
+      const res = await service.editMessage('user-1', '101', { content: '  Không đổi  ' });
+      expect(res.content).toBe('Không đổi');
+      expect(mockEventEmitter.emit).not.toHaveBeenCalledWith(
+        CHAT_EVENTS.MESSAGE_UPDATED,
+        expect.anything(),
+      );
     });
   });
 
