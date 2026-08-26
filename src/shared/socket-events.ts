@@ -229,6 +229,11 @@ export interface ServerToClientEvents {
     hiddenAt: string;
   }) => void;
   'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
+  'message:pin-updated': (payload: {
+    channelId: string;
+    message: MessagePayload;
+    pinned: boolean;
+  }) => void;
 
   'message:read': (payload: {
     conversationId?: string | null;
@@ -263,6 +268,12 @@ export interface ServerToClientEvents {
     lastMessagePreview: string | null;
     lastMessageAt: string;
     unreadDelta: number;
+  }) => void;
+
+  /** Thông báo cấp user-room khi cuộc trò chuyện bị xóa (ví dụ khi hủy kết bạn) */
+  'conversation:deleted': (payload: {
+    conversationId: string;
+    friendId?: string;
   }) => void;
 
   'notification:new': (payload: { notification: NotificationPayload }) => void;

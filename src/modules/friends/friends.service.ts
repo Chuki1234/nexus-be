@@ -7,8 +7,10 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { PresenceStatus } from '../../shared/dto/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import type {
   FriendRequestsResponseDto,
   FriendRequestSummaryDto,
@@ -53,7 +55,10 @@ const PRESENCE_VALUES = new Set<PresenceStatus>([
 export class FriendsService {
   private readonly logger = new Logger(FriendsService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
 
   async sendRequest(
     requesterId: string,
@@ -212,6 +217,39 @@ export class FriendsService {
       'accepted',
       'Quan hệ bạn bè không tồn tại.',
     );
+
+    // Xóa hoàn toàn cuộc trò chuyện trực tiếp (DM) và tất cả tin nhắn giữa hai người
+    const [userAId, userBId] = this.orderedPair(userId, friendId);
+    const dmKey = `${userAId}:${userBId}`;
+
+    try {
+      const { data: conv } = await this.supabase.client
+        .from('conversations')
+        .select('id')
+        .eq('dm_key', dmKey)
+        .maybeSingle();
+
+      if (conv?.id) {
+        const convId = conv.id as string;
+        const { error: delConvErr } = await this.supabase.client
+          .from('conversations')
+          .delete()
+          .eq('id', convId);
+
+        if (delConvErr) {
+          this.logger.error('Lỗi xóa cuộc trò chuyện khi hủy kết bạn:', delConvErr);
+        }
+
+        // Phát realtime sự kiện conversation:deleted tới user-room của cả 2 phía
+        this.eventEmitter.emit(CHAT_EVENTS.CONVERSATION_DELETED, {
+          conversationId: convId,
+          userId,
+          friendId,
+        });
+      }
+    } catch (err) {
+      this.logger.error('Lỗi dọn dẹp conversation khi removeFriend:', err);
+    }
   }
 
   private async deleteRelationship(

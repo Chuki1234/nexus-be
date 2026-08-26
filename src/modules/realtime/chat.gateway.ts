@@ -15,16 +15,19 @@ import {
   Room,
   type ClientToServerEvents,
   type JoinConversationResponse,
+  type MessagePayload,
   type ServerToClientEvents,
   type VoiceMemberState,
   type VoiceServerStatesSyncPayload,
 } from '../../shared/socket-events';
+export { Room };
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { PresenceService } from './presence.service';
 import { RedisStateService } from './redis-state.service';
 import {
   CHAT_EVENTS,
+  type ConversationDeletedEvent,
   type MessageCreatedEvent,
   type MessageDeletedEvent,
   type MessageHiddenForUserEvent,
@@ -804,6 +807,20 @@ export class ChatGateway
     }
   }
 
+  @OnEvent(CHAT_EVENTS.MESSAGE_PIN_UPDATED)
+  handleMessagePinUpdated(event: {
+    channelId: string;
+    message: MessagePayload;
+    pinned: boolean;
+  }): void {
+    const { channelId, message, pinned } = event;
+    if (channelId) {
+      this.server
+        ?.to(Room.channel(channelId))
+        .emit('message:pin-updated', { channelId, message, pinned });
+    }
+  }
+
   @OnEvent(CHAT_EVENTS.MESSAGE_DELETED)
   handleMessageDeleted(event: MessageDeletedEvent): void {
     const { conversationId, channelId, messageId } = event;
@@ -852,6 +869,19 @@ export class ChatGateway
         lastReadMessageId,
       });
     }
+  }
+
+  @OnEvent(CHAT_EVENTS.CONVERSATION_DELETED)
+  handleConversationDeleted(event: ConversationDeletedEvent): void {
+    const { conversationId, userId, friendId } = event;
+    this.server?.to(Room.user(userId)).emit('conversation:deleted', {
+      conversationId,
+      friendId,
+    });
+    this.server?.to(Room.user(friendId)).emit('conversation:deleted', {
+      conversationId,
+      friendId: userId,
+    });
   }
 
   @OnEvent(CHAT_EVENTS.REACTION_UPDATED)

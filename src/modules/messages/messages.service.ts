@@ -22,6 +22,7 @@ import type { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import type {
   AttachmentResponseDto,
   ChannelMessagesResponseDto,
+  ChannelSearchResponseDto,
   MessageAuthorDto,
   MessageResponseDto,
   MessagesPaginationResponseDto,
@@ -45,6 +46,8 @@ interface RawMessageRow {
   edited_at: string | null;
   deleted_at: string | null;
   created_at: string;
+  pinned_at?: string | null;
+  pinned_by?: string | null;
 }
 
 interface RawProfileRow {
@@ -569,6 +572,164 @@ export class MessagesService {
    * Helper tải gộp (batch load) toàn bộ reactions cho danh sách message IDs.
    * Chỉ tốn đúng 1 truy vấn database (O(1) query) không phụ thuộc số lượng tin nhắn.
    */
+  /**
+   * Enrich RawMessageRow[] -> MessageResponseDto[] (author, attachments,
+   * reactions, external media, pin). Dùng chung cho tìm kiếm & danh sách ghim.
+   */
+  private async assembleMessageDtos(
+    rows: RawMessageRow[],
+    userId: string,
+  ): Promise<MessageResponseDto[]> {
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const authorIds = Array.from(
+      new Set(rows.map((m) => m.author_id).filter((id): id is string => !!id)),
+    );
+    const authorMap = new Map<string, MessageAuthorDto>();
+    if (authorIds.length > 0) {
+      const { data: profiles } = await this.supabase.client
+        .from('profiles')
+        .select('id, username, display_name, avatar_url')
+        .in('id', authorIds);
+      for (const p of (profiles ?? []) as RawProfileRow[]) {
+        authorMap.set(p.id, {
+          id: p.id,
+          username: p.username,
+          displayName: p.display_name ?? p.username,
+          avatarUrl: p.avatar_url,
+        });
+      }
+    }
+
+    const activeIds = rows.filter((m) => !m.deleted_at).map((m) => m.id);
+    const [attachmentMap, reactionMap, extMediaMap] = await Promise.all([
+      this.loadAttachmentsForMessages(activeIds),
+      this.loadReactionsForMessages(activeIds, userId),
+      this.loadExternalMediaForMessages(activeIds),
+    ]);
+
+    return rows.map((m) => {
+      const msgId = m.id.toString();
+      const atts = m.deleted_at ? undefined : attachmentMap.get(msgId);
+      const reacts = m.deleted_at ? undefined : (reactionMap.get(msgId) ?? []);
+      const extMedia = m.deleted_at ? null : (extMediaMap.get(msgId) ?? null);
+      return {
+        id: msgId,
+        channelId: m.channel_id,
+        conversationId: m.conversation_id,
+        authorId: m.author_id,
+        author: m.author_id ? authorMap.get(m.author_id) : undefined,
+        type: m.type,
+        content: m.deleted_at ? null : m.content,
+        isForwarded: Boolean(m.is_forwarded),
+        externalMedia: extMedia,
+        replyToId: m.reply_to_id ? m.reply_to_id.toString() : null,
+        clientNonce: m.client_nonce,
+        editedAt: m.edited_at,
+        deletedAt: m.deleted_at,
+        pinnedAt: m.pinned_at ?? null,
+        pinnedBy: m.pinned_by ?? null,
+        ...(atts && atts.length > 0 ? { attachments: atts } : {}),
+        reactions: reacts,
+        createdAt: m.created_at,
+      } as MessageResponseDto;
+    });
+  }
+
+  /** Tìm kiếm tin nhắn trong phạm vi một kênh (nội dung + tên file đính kèm). */
+  async searchChannelMessages(
+    channelId: string,
+    userId: string,
+    rawQuery: string,
+    limit = 30,
+    before?: string,
+  ): Promise<ChannelSearchResponseDto> {
+    const q = (rawQuery ?? '').trim();
+    if (q.length === 0) {
+      return { messages: [], hasMore: false };
+    }
+    const cappedLimit = Math.min(Math.max(limit, 1), 50);
+
+    const { data, error } = await this.supabase.client.rpc('search_channel_messages', {
+      p_channel_id: channelId,
+      p_user_id: userId,
+      p_query: q,
+      p_limit: cappedLimit,
+      p_before: before ? Number(before) : null,
+    });
+    if (error) {
+      this.logger.error('Lỗi tìm kiếm tin nhắn kênh:', error);
+      throw new InternalServerErrorException('Lỗi tìm kiếm tin nhắn.');
+    }
+
+    const rows = (data ?? []) as RawMessageRow[];
+    const hasMore = rows.length > cappedLimit;
+    const finalRows = hasMore ? rows.slice(0, cappedLimit) : rows;
+    const messages = await this.assembleMessageDtos(finalRows, userId);
+
+    const result: ChannelSearchResponseDto = { messages, hasMore };
+    if (hasMore && finalRows.length > 0) {
+      result.nextCursor = finalRows[finalRows.length - 1].id.toString();
+    }
+    return result;
+  }
+
+  /** Danh sách tin đã ghim của một kênh. */
+  async getChannelPinnedMessages(
+    channelId: string,
+    userId: string,
+  ): Promise<MessageResponseDto[]> {
+    const { data, error } = await this.supabase.client.rpc('get_channel_pinned_messages', {
+      p_channel_id: channelId,
+      p_user_id: userId,
+    });
+    if (error) {
+      this.logger.error('Lỗi tải danh sách tin đã ghim:', error);
+      throw new InternalServerErrorException('Lỗi tải danh sách tin đã ghim.');
+    }
+    return this.assembleMessageDtos((data ?? []) as RawMessageRow[], userId);
+  }
+
+  /** Ghim / bỏ ghim một tin nhắn trong kênh, phát socket cho cả kênh. */
+  async setChannelMessagePin(
+    messageId: string,
+    userId: string,
+    pinned: boolean,
+  ): Promise<MessageResponseDto> {
+    const { data, error } = await this.supabase.client.rpc('set_channel_message_pin', {
+      p_message_id: Number(messageId),
+      p_user_id: userId,
+      p_pinned: pinned,
+    });
+    if (error) {
+      this.logger.error('Lỗi ghim tin nhắn:', error);
+      if (error.code === '42501') {
+        throw new ForbiddenException('Bạn không có quyền ghim tin trong kênh này.');
+      }
+      if (error.code === 'P0002') {
+        throw new NotFoundException('Tin nhắn không tồn tại.');
+      }
+      throw new InternalServerErrorException('Lỗi ghim tin nhắn.');
+    }
+
+    const rows = (data ?? []) as RawMessageRow[];
+    if (rows.length === 0) {
+      throw new NotFoundException('Tin nhắn không tồn tại.');
+    }
+    const [dto] = await this.assembleMessageDtos(rows, userId);
+
+    if (dto.channelId) {
+      this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_PIN_UPDATED, {
+        channelId: dto.channelId,
+        message: dto,
+        pinned,
+      });
+    }
+    return dto;
+  }
+
   private async loadReactionsForMessages(
     messageIds: (number | string)[],
     currentUserId: string,

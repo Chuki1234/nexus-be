@@ -40,6 +40,10 @@ export interface MessageResponseDto {
   externalMedia: GiphyMediaDto | null;
   attachments?: AttachmentResponseDto[];
   reactions?: ReactionSummaryDto[];
+  /** Thời điểm được ghim (null/vắng nếu chưa ghim). */
+  pinnedAt?: string | null;
+  /** Người ghim (null/vắng nếu chưa ghim). */
+  pinnedBy?: string | null;
   createdAt: string;
 }
 
@@ -54,4 +58,10 @@ export interface ChannelMessagesResponseDto {
   hasMore: boolean;
   nextCursor?: string;
   lastReadMessageId: string | null;
+}
+
+export interface ChannelSearchResponseDto {
+  messages: MessageResponseDto[];
+  hasMore: boolean;
+  nextCursor?: string;
 }

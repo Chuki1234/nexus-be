@@ -24,6 +24,7 @@ import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
 import type {
   ChannelMessagesResponseDto,
+  ChannelSearchResponseDto,
   MessageResponseDto,
   MessagesPaginationResponseDto,
 } from './dto/message-response.dto';
@@ -155,6 +156,59 @@ export class MessagesController {
       channelId,
       query,
     );
+  }
+
+  /**
+   * Tìm kiếm tin nhắn (nội dung + tên file) trong phạm vi một kênh.
+   */
+  @Get('channels/:channelId/messages/search')
+  async searchChannelMessages(
+    @CurrentUser() user: User,
+    @Param('channelId', ParseUUIDPipe) channelId: string,
+    @Query('q') q: string,
+    @Query('limit') limit?: string,
+    @Query('before') before?: string,
+  ): Promise<ChannelSearchResponseDto> {
+    return this.messagesService.searchChannelMessages(
+      channelId,
+      user.id,
+      q ?? '',
+      limit ? Number(limit) : 30,
+      before,
+    );
+  }
+
+  /**
+   * Danh sách tin nhắn đã ghim của một kênh.
+   */
+  @Get('channels/:channelId/pins')
+  async getChannelPins(
+    @CurrentUser() user: User,
+    @Param('channelId', ParseUUIDPipe) channelId: string,
+  ): Promise<MessageResponseDto[]> {
+    return this.messagesService.getChannelPinnedMessages(channelId, user.id);
+  }
+
+  /**
+   * Ghim một tin nhắn trong kênh.
+   */
+  @Post('messages/:id/pin')
+  async pinMessage(
+    @CurrentUser() user: User,
+    @Param('id', ParsePositiveBigIntPipe) id: string,
+  ): Promise<MessageResponseDto> {
+    return this.messagesService.setChannelMessagePin(id, user.id, true);
+  }
+
+  /**
+   * Bỏ ghim một tin nhắn trong kênh.
+   */
+  @Delete('messages/:id/pin')
+  async unpinMessage(
+    @CurrentUser() user: User,
+    @Param('id', ParsePositiveBigIntPipe) id: string,
+  ): Promise<MessageResponseDto> {
+    return this.messagesService.setChannelMessagePin(id, user.id, false);
   }
 
   /**
