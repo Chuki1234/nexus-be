@@ -12,7 +12,7 @@ import { RedisStateService } from './redis-state.service';
   imports: [
     SupabaseModule,
     ConversationsModule,
-    FriendsModule,
+    forwardRef(() => FriendsModule),
     ConfigModule,
     forwardRef(() => ServersModule),
   ],
