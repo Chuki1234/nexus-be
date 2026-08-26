@@ -332,7 +332,7 @@ begin
         v_ext_width       := (p_external_media->>'width')::integer;
         v_ext_height      := (p_external_media->>'height')::integer;
 
-        if v_ext_provider <> 'giphy' or v_ext_media_type <> 'gif' or v_ext_external_id is null 
+        if not ((v_ext_provider = 'giphy' and v_ext_media_type = 'gif') or (v_ext_provider = 'stipop' and v_ext_media_type = 'sticker')) or v_ext_external_id is null 
            or v_ext_page_url is null or v_ext_preview_url is null or v_ext_display_url is null
            or v_ext_width is null or v_ext_height is null or v_ext_width <= 0 or v_ext_height <= 0 then
             raise exception 'Dữ liệu external_media không hợp lệ' using errcode = '22023';
