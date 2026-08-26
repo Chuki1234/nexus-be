@@ -29,7 +29,7 @@ import type {
 } from './dto/message-response.dto';
 import type { SendMessageDto } from './dto/send-message.dto';
 import type { SetReactionDto } from './dto/set-reaction.dto';
-import type { GiphyMediaDto } from '../../shared/dto/messages.dto';
+import { type GiphyMediaDto, MESSAGE_EDIT_WINDOW_MS } from '../../shared/dto/messages.dto';
 import { validateAndSanitizeGiphyMedia } from './validators/giphy-media.validator';
 
 interface RawMessageRow {
@@ -1542,16 +1542,55 @@ export class MessagesService {
   }
 
   /**
-   * Chỉnh sửa tin nhắn (chỉ cho phép chính tác giả).
+   * Helper hydrate đầy đủ MessageResponseDto (Author, Attachments, ExternalMedia) từ RawMessageRow.
+   */
+  private async hydrateMessageResponseDto(
+    raw: RawMessageRow,
+    userId?: string,
+  ): Promise<MessageResponseDto> {
+    const author = raw.author_id ? await this.getAuthorProfile(raw.author_id) : null;
+    const [attMap, extMediaMap] = await Promise.all([
+      this.loadAttachmentsForMessages([raw.id]),
+      this.loadExternalMediaForMessages([raw.id]),
+    ]);
+    const attachmentDtos = attMap.get(raw.id.toString()) || [];
+    const extMedia = extMediaMap.get(raw.id.toString()) || null;
+
+    return {
+      id: raw.id.toString(),
+      channelId: raw.channel_id,
+      conversationId: raw.conversation_id,
+      authorId: raw.author_id,
+      ...(author ? { author } : {}),
+      type: raw.type,
+      content: raw.content,
+      isForwarded: Boolean(raw.is_forwarded),
+      externalMedia: extMedia,
+      replyToId: raw.reply_to_id
+        ? raw.reply_to_id.toString()
+        : null,
+      clientNonce: raw.client_nonce,
+      editedAt: raw.edited_at,
+      deletedAt: raw.deleted_at,
+      ...(attachmentDtos.length > 0 ? { attachments: attachmentDtos } : {}),
+      createdAt: raw.created_at,
+    };
+  }
+
+  /**
+   * Chỉnh sửa tin nhắn (chỉ cho phép chính tác giả trong vòng 5 phút).
    */
   async editMessage(
     userId: string,
     messageId: string,
     dto: EditMessageDto,
   ): Promise<MessageResponseDto> {
-    const text = dto.content.trim();
+    const text = dto.content ? dto.content.trim() : '';
     if (!text) {
       throw new BadRequestException('Nội dung tin nhắn không được để trống.');
+    }
+    if (text.length > 4000) {
+      throw new BadRequestException('Nội dung tin nhắn không được vượt quá 4000 ký tự.');
     }
 
     const { data: existing, error: findErr } = await this.supabase.client
@@ -1577,7 +1616,27 @@ export class MessagesService {
       throw new BadRequestException('Tin nhắn đã bị xoá, không thể chỉnh sửa.');
     }
 
-    const now = new Date().toISOString();
+    // Kiểm tra loại tin nhắn có text body có thể chỉnh sửa (chỉ type 'default' mới chứa editable text)
+    if (raw.type && raw.type !== 'default') {
+      throw new ForbiddenException('Loại tin nhắn này không thể chỉnh sửa.');
+    }
+
+    // Kiểm tra thời gian 5 phút tính từ created_at canonical (tại đúng deadline hoặc sau deadline: hết hạn)
+    const createdAtMs = new Date(raw.created_at).getTime();
+    const serverNow = Date.now();
+    if (Number.isNaN(createdAtMs) || serverNow >= createdAtMs + MESSAGE_EDIT_WINDOW_MS) {
+      throw new ConflictException('Đã hết thời gian chỉnh sửa tin nhắn (5 phút).');
+    }
+
+    // No-op check: nếu nội dung sau normalize giống hệt nội dung canonical
+    if (raw.content === text) {
+      return this.hydrateMessageResponseDto(raw, userId);
+    }
+
+    const now = new Date(serverNow).toISOString();
+    const cutoff = new Date(serverNow - MESSAGE_EDIT_WINDOW_MS).toISOString();
+
+    // Atomic conditional update với id, author_id, deleted_at IS NULL và created_at > cutoff
     const { data: updated, error: updateErr } = await this.supabase.client
       .from('messages')
       .update({
@@ -1585,44 +1644,39 @@ export class MessagesService {
         edited_at: now,
       })
       .eq('id', messageId)
+      .eq('author_id', userId)
+      .is('deleted_at', null)
+      .gt('created_at', cutoff)
       .select(
         'id, channel_id, conversation_id, author_id, type, content, is_forwarded, reply_to_id, client_nonce, edited_at, deleted_at, created_at',
       )
-      .single();
+      .maybeSingle();
 
     if (updateErr || !updated) {
-      this.logger.error('Lỗi cập nhật tin nhắn:', updateErr);
-      throw new InternalServerErrorException('Lỗi cập nhật tin nhắn.');
+      if (updateErr) {
+        this.logger.error('Lỗi cập nhật tin nhắn:', updateErr);
+      }
+      // Kiểm tra lại lý do không update được
+      const { data: recheck } = await this.supabase.client
+        .from('messages')
+        .select('created_at, deleted_at')
+        .eq('id', messageId)
+        .maybeSingle();
+
+      if (recheck) {
+        if (recheck.deleted_at) {
+          throw new BadRequestException('Tin nhắn đã bị xoá.');
+        }
+        const recheckCreated = new Date(recheck.created_at).getTime();
+        if (Date.now() >= recheckCreated + MESSAGE_EDIT_WINDOW_MS) {
+          throw new ConflictException('Đã hết thời gian chỉnh sửa tin nhắn (5 phút).');
+        }
+      }
+      throw new ConflictException('Không thể cập nhật tin nhắn. Có thể tin nhắn đã hết hạn hoặc bị thay đổi.');
     }
 
     const rawUpdated = updated as RawMessageRow;
-    const author = await this.getAuthorProfile(userId);
-    const [attMap, extMediaMap] = await Promise.all([
-      this.loadAttachmentsForMessages([rawUpdated.id]),
-      this.loadExternalMediaForMessages([rawUpdated.id]),
-    ]);
-    const attachmentDtos = attMap.get(rawUpdated.id.toString()) || [];
-    const extMedia = extMediaMap.get(rawUpdated.id.toString()) || null;
-
-    const result: MessageResponseDto = {
-      id: rawUpdated.id.toString(),
-      channelId: rawUpdated.channel_id,
-      conversationId: rawUpdated.conversation_id,
-      authorId: rawUpdated.author_id,
-      author,
-      type: rawUpdated.type,
-      content: rawUpdated.content,
-      isForwarded: Boolean(rawUpdated.is_forwarded),
-      externalMedia: extMedia,
-      replyToId: rawUpdated.reply_to_id
-        ? rawUpdated.reply_to_id.toString()
-        : null,
-      clientNonce: rawUpdated.client_nonce,
-      editedAt: rawUpdated.edited_at,
-      deletedAt: rawUpdated.deleted_at,
-      ...(attachmentDtos.length > 0 ? { attachments: attachmentDtos } : {}),
-      createdAt: rawUpdated.created_at,
-    };
+    const result = await this.hydrateMessageResponseDto(rawUpdated, userId);
 
     this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_UPDATED, {
       conversationId: result.conversationId,
