@@ -35,13 +35,13 @@ describe('ConversationsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('chặn tạo DM nếu hai người chưa là bạn bè (403)', async () => {
+    it('chặn tạo DM nếu hai người chặn nhau (403)', async () => {
       mockSupabase.client.from.mockImplementation((table: string) => {
         if (table === 'friendships') {
           return {
             select: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+            maybeSingle: jest.fn().mockResolvedValue({ data: { status: 'blocked' }, error: null }),
           };
         }
         return {};

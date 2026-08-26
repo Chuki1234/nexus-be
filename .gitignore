@@ -57,3 +57,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Bài tập trường "Quầy Trà Sữa" — không liên quan Nexus, đang tắt trong app.module.ts.
 src/modules/drink/
+.claude/student-context.json

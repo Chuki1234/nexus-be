@@ -10,6 +10,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as crypto from 'node:crypto';
 import sharp from 'sharp';
+import type { PostgrestError } from '@supabase/supabase-js';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
@@ -1021,10 +1022,10 @@ export class MessagesService {
 
         uploadedPaths.push(storagePath);
         attachmentsToRpc.push({
-          storage_path: storagePath,
+          storagePath: storagePath,
           filename: item.normalizedFilename,
-          mime_type: item.file.mimetype,
-          size_bytes: item.file.size,
+          mimeType: item.file.mimetype,
+          sizeBytes: item.file.size,
           width: item.width,
           height: item.height,
         });
@@ -1392,10 +1393,10 @@ export class MessagesService {
 
         uploadedPaths.push(storagePath);
         attachmentsToRpc.push({
-          storage_path: storagePath,
+          storagePath: storagePath,
           filename: item.normalizedFilename,
-          mime_type: item.file.mimetype,
-          size_bytes: item.file.size,
+          mimeType: item.file.mimetype,
+          sizeBytes: item.file.size,
           width: item.width,
           height: item.height,
         });
@@ -2385,21 +2386,14 @@ export class MessagesService {
     }
 
     if (shouldUpdate) {
-      const { error: upsertErr } = await this.supabase.client
-        .from('read_states')
-        .upsert(
-          {
-            user_id: userId,
-            channel_id: channelId,
-            conversation_id: null,
-            last_read_message_id: messageId,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id,channel_id' },
-        );
+      const writeErr = await this.writeChannelReadState(
+        userId,
+        channelId,
+        messageId,
+      );
 
-      if (upsertErr) {
-        this.logger.error('Lỗi cập nhật read_states channel:', upsertErr);
+      if (writeErr) {
+        this.logger.error('Lỗi cập nhật read_states channel:', writeErr);
         throw new InternalServerErrorException('Lỗi cập nhật trạng thái đọc kênh.');
       }
 
@@ -2417,6 +2411,78 @@ export class MessagesService {
       updated: shouldUpdate,
       lastReadMessageId: messageId,
     };
+  }
+
+  /**
+   * Ghi con trỏ đã đọc của kênh vào `read_states` theo kiểu UPDATE trước, INSERT sau.
+   *
+   * Không dùng `.upsert()` được: `read_states` không có primary key, chỉ có hai
+   * *partial* unique index (`... where channel_id is not null`). Postgres chỉ chấp
+   * nhận partial index làm conflict target khi câu lệnh lặp lại đúng mệnh đề WHERE
+   * của index, trong khi supabase-js chỉ sinh ra `ON CONFLICT (user_id, channel_id)`
+   * trần — nên mọi lần đánh dấu đã đọc đều nổ 42P10. Phía DM đã tránh được chuyện
+   * này bằng RPC `mark_conversation_read`, kênh thì chưa có hàm tương ứng.
+   *
+   * Điều kiện `last_read_message_id IS NULL OR < messageId` giữ tính đơn điệu ngay
+   * ở tầng DB: hai request song song không thể kéo con trỏ đã đọc lùi lại.
+   *
+   * @returns lỗi nếu ghi hỏng thật sự, `null` nếu đã ở trạng thái mong muốn.
+   */
+  private async writeChannelReadState(
+    userId: string,
+    channelId: string,
+    messageId: string,
+  ): Promise<PostgrestError | null> {
+    // `markChannelAsRead` đã chặn messageId không khớp `^[1-9]\d*$`, nên chuỗi này
+    // chỉ gồm chữ số — an toàn khi nội suy vào biểu thức filter của PostgREST.
+    const monotonic = `last_read_message_id.is.null,last_read_message_id.lt.${messageId}`;
+
+    const updateRow = async () =>
+      this.supabase.client
+        .from('read_states')
+        .update({
+          last_read_message_id: messageId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId)
+        .eq('channel_id', channelId)
+        .or(monotonic)
+        .select('user_id');
+
+    const { data: updated, error: updateErr } = await updateRow();
+    if (updateErr) {
+      return updateErr;
+    }
+    if (updated && updated.length > 0) {
+      return null;
+    }
+
+    // Không có hàng nào khớp: hoặc user chưa từng đọc kênh này (chưa có hàng),
+    // hoặc đã có hàng nhưng con trỏ của nó mới hơn (mệnh đề đơn điệu loại ra).
+    // Thử INSERT để phủ trường hợp đầu; trường hợp sau sẽ rơi vào 23505.
+    const { error: insertErr } = await this.supabase.client
+      .from('read_states')
+      .insert({
+        user_id: userId,
+        channel_id: channelId,
+        conversation_id: null,
+        last_read_message_id: messageId,
+        updated_at: new Date().toISOString(),
+      });
+
+    if (!insertErr) {
+      return null;
+    }
+
+    if (insertErr.code !== '23505') {
+      return insertErr;
+    }
+
+    // 23505 = hàng đã tồn tại. Có thể là hàng "mới hơn" nói trên (không cần làm gì),
+    // cũng có thể là request song song vừa chèn một con trỏ CŨ hơn giữa hai bước.
+    // Chạy lại UPDATE đơn điệu một lần để không đánh rơi giá trị của mình.
+    const { error: retryErr } = await updateRow();
+    return retryErr ?? null;
   }
 
   /**

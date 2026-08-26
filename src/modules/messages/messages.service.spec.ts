@@ -3681,7 +3681,10 @@ describe('MessagesService', () => {
       const rpcArrivalOrder: string[] = [];
       mockSupabase.client.rpc = jest.fn().mockImplementation(async (rpcName: string, params: any) => {
         if (rpcName === 'create_channel_message') {
-          const reqAttachmentPath = params?.p_attachments?.[0]?.storage_path || '';
+          // RPC đọc khoá camelCase (`v_att_elem->>'storagePath'`), nên payload cũng
+          // phải là camelCase. Mock đọc `storage_path` thì cả hai request cùng nhận
+          // chuỗi rỗng, hoà nhau ở bước chọn winner và không ai bị 23505.
+          const reqAttachmentPath = params?.p_attachments?.[0]?.storagePath || '';
           rpcArrivalOrder.push(reqAttachmentPath);
 
           // CẢ HAI REQUEST DỪNG LẠI TẠI BARRIER (chờ cả hai cùng upload storage xong và đến điểm RPC)

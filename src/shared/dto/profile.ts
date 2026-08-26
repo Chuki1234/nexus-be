@@ -17,6 +17,67 @@ export interface ProfileLink {
   url: string;
 }
 
+/**
+ * Widget trò chơi nào trên hồ sơ. Mỗi loại là một khối riêng, hạn mức riêng.
+ *
+ * Gộp chung một danh sách rồi lọc theo `kind` chứ không tách bốn cột trong
+ * database: cả bốn đều nhỏ, luôn đọc kèm hồ sơ, không bao giờ query riêng —
+ * tách ra chỉ tốn thêm bốn ràng buộc phải giữ đồng bộ với nhau.
+ */
+export type ProfileGameKind = 'rotation' | 'favorite' | 'like' | 'wishlist';
+
+/** Một trò chơi người dùng khoe trên hồ sơ. */
+export interface ProfileGame {
+  /**
+   * Khoá ổn định, duy nhất trong cả danh sách, dạng `kind:slug-tên-game`.
+   *
+   * Cần khoá riêng chứ không dùng `title`: Angular `@for` ném lỗi runtime khi
+   * `track` trùng giá trị, mà cùng một game hoàn toàn có thể nằm ở hai widget
+   * khác nhau (vừa đang chơi vừa yêu thích).
+   */
+  id: string;
+  kind: ProfileGameKind;
+  title: string;
+  /** Ảnh bìa `https://`. `null` = dùng ảnh sinh tự động theo tên. */
+  cover: string | null;
+  /** Nhãn tự do ("Đang chơi", "142 giờ"). Chỉ widget `rotation` dùng tới. */
+  tags: string[];
+}
+
+/** Tên hiển thị của từng widget. Dùng chung cho UI lẫn câu báo lỗi. */
+export const GAME_KIND_LABELS: Record<ProfileGameKind, string> = {
+  rotation: 'Trò Chơi Luân Phiên',
+  favorite: 'Trò Chơi Yêu Thích',
+  like: 'Trò Chơi Tôi Thích',
+  wishlist: 'Muốn Chơi',
+};
+
+/**
+ * Số trò chơi tối đa của từng widget.
+ *
+ * `favorite` chỉ 1 vì đúng nghĩa "trò chơi yêu thích nhất" — cho nhiều thì nó
+ * thành bản sao của `like`. Phải khớp ràng buộc `profile_games_valid` dưới
+ * database, sửa một bên là phải sửa cả hai.
+ */
+const GAME_LIMITS: Record<ProfileGameKind, number> = {
+  rotation: 5,
+  favorite: 1,
+  like: 20,
+  wishlist: 20,
+};
+
+export function gameLimitFor(kind: ProfileGameKind): number {
+  return GAME_LIMITS[kind];
+}
+
+/** Tổng trần cho cả danh sách — chặn ở tầng mảng trước khi xét từng loại. */
+export const MAX_PROFILE_GAMES = 46;
+
+export const GAME_TITLE_MAX = 64;
+export const GAME_TAG_MAX = 24;
+export const MAX_GAME_TAGS = 4;
+export const GAME_COVER_URL_MAX = 2048;
+
 /** Hồ sơ mà bất kỳ ai đã đăng nhập cũng xem được. */
 export interface PublicProfile {
   id: string;
@@ -27,13 +88,23 @@ export interface PublicProfile {
   statusMessage: string | null;
   bio: string | null;
   location: string | null;
+  birthdate?: IsoDate | null;
   links: ProfileLink[];
+  /** Trò chơi khoe trên hồ sơ, gộp cả bốn widget — lọc theo `kind` khi hiển thị. */
+  games: ProfileGame[];
   /** Màu nền ảnh bìa người dùng tự chọn. Null = tự động băm từ username. */
   accentColor: string | null;
   /** ISO timestamp. */
   createdAt: string;
   /** True khi người xem chính là chủ hồ sơ — frontend dựa vào đây để hiện nút sửa. */
   isSelf: boolean;
+  /**
+   * Bạn chung giữa người xem và chủ hồ sơ. Luôn rỗng khi `isSelf` — so bạn bè
+   * với chính mình không có ý nghĩa gì, backend bỏ qua việc tính cho nhanh.
+   */
+  mutualFriends: ProfileSummary[];
+  /** Máy chủ mà cả người xem lẫn chủ hồ sơ đều là thành viên. Cũng rỗng khi `isSelf`. */
+  mutualServers: MutualServer[];
 }
 
 /** Hồ sơ của chính mình: `GET /api/profiles/me` trả thêm trường không công khai. */
@@ -49,6 +120,16 @@ export interface ProfileSummary {
   avatarUrl: string | null;
 }
 
+/** Một máy chủ trong danh sách "máy chủ chung" trên hồ sơ người khác. */
+export interface MutualServer {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+}
+
+/** Ghi chú riêng tư người xem tự viết về chủ hồ sơ — chỉ người viết thấy được. */
+export const PROFILE_NOTE_MAX = 256;
+
 /**
  * Thân request của `PATCH /api/profiles/me`.
  *
@@ -62,6 +143,8 @@ export interface UpdateProfileRequest {
   accentColor?: string | null;
   /** Gửi lên là thay cả danh sách, không phải thêm vào. */
   links?: ProfileLink[];
+  /** Cũng thay CẢ danh sách như `links`. Mảng rỗng = gỡ hết trò chơi. */
+  games?: ProfileGame[];
 }
 
 /** Giới hạn độ dài — khớp DTO backend và ràng buộc CHECK dưới database. */

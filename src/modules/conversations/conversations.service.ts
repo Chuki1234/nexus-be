@@ -76,9 +76,9 @@ export class ConversationsService {
       throw new InternalServerErrorException('Lỗi kiểm tra quan hệ bạn bè.');
     }
 
-    if (!friendship || friendship.status !== 'accepted') {
+    if (friendship && friendship.status === 'blocked') {
       throw new ForbiddenException(
-        'Chỉ có thể nhắn tin trực tiếp với người đã kết bạn.',
+        'Không thể nhắn tin trực tiếp với người dùng này do đã bị chặn.',
       );
     }
 
