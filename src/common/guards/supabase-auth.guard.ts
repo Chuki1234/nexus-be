@@ -2,6 +2,7 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
@@ -11,6 +12,8 @@ import { SupabaseService } from '../../infra/supabase/supabase.service';
 /** Request đã qua guard mang theo user Supabase đã xác thực. */
 export interface AuthenticatedRequest extends Request {
   user: User;
+  /** Access token đã xác thực — cần khi gọi GoTrue thay mặt user (vd MFA). */
+  accessToken: string;
 }
 
 /**
@@ -22,6 +25,8 @@ export interface AuthenticatedRequest extends Request {
  */
 @Injectable()
 export class SupabaseAuthGuard implements CanActivate {
+  private readonly logger = new Logger(SupabaseAuthGuard.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -34,21 +39,33 @@ export class SupabaseAuthGuard implements CanActivate {
 
     const { data, error } = await this.supabase.client.auth.getUser(token);
     if (error || !data.user) {
+      // Ghi lại lỗi gốc: không phải 401 nào cũng do token của người dùng. Sai
+      // SUPABASE_SERVICE_ROLE_KEY (hoặc key của project khác) cũng rơi vào đây
+      // với message "Invalid API key" — không log thì mọi request đều báo
+      // "phiên hết hạn" và người sửa lỗi đi tìm nhầm phía frontend.
+      this.logger.warn(
+        `Xác thực token thất bại: ${error?.message ?? 'không có user'}`,
+      );
       throw new UnauthorizedException(
         'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.',
       );
     }
 
     request.user = data.user;
+    request.accessToken = token;
     return true;
   }
 
   private extractToken(request: Request): string | null {
     const header = request.headers.authorization;
-    if (!header) {
+    if (!header || typeof header !== 'string') {
       return null;
     }
-    const [scheme, value] = header.split(' ');
-    return scheme === 'Bearer' && value ? value : null;
+    const trimmed = header.trim();
+    if (trimmed.startsWith('Bearer ')) {
+      return trimmed.slice(7).trim();
+    }
+    const [scheme, value] = trimmed.split(/\s+/);
+    return scheme?.toLowerCase() === 'bearer' && value ? value.trim() : null;
   }
 }

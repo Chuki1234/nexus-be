@@ -19,9 +19,25 @@ describe('permissions bitfield', () => {
     expect(Permission.ADMINISTRATOR).not.toBe(BigInt(1 << 30));
   });
 
-  it('quyền mặc định của @everyone khớp con số trong hàm SQL', () => {
-    // create_default_role() hardcode 3339. Lệch là server mới sinh ra sai quyền.
-    expect(DEFAULT_EVERYONE_PERMISSIONS).toBe(3339n);
+  it('quyền mặc định của @everyone khớp con số trong hàm SQL (3083n)', () => {
+    // create_default_role() và create_server_with_template dùng 3083n
+    expect(DEFAULT_EVERYONE_PERMISSIONS).toBe(3083n);
+
+    // Decomposition đúng: VIEW_CHANNEL(1) | SEND_MESSAGES(2) | ATTACH_FILES(8) | CONNECT_VOICE(1024) | SPEAK_VOICE(2048)
+    const expectedComposition =
+      Permission.VIEW_CHANNEL |
+      Permission.SEND_MESSAGES |
+      Permission.ATTACH_FILES |
+      Permission.CONNECT_VOICE |
+      Permission.SPEAK_VOICE;
+
+    expect(DEFAULT_EVERYONE_PERMISSIONS).toBe(expectedComposition);
+
+    // Bit-level verification: tuyệt đối không chứa CREATE_INVITE, MANAGE_CHANNELS hay MANAGE_SERVER
+    expect(DEFAULT_EVERYONE_PERMISSIONS & Permission.CREATE_INVITE).toBe(0n);
+    expect(DEFAULT_EVERYONE_PERMISSIONS & Permission.MANAGE_CHANNELS).toBe(0n);
+    expect(DEFAULT_EVERYONE_PERMISSIONS & Permission.MANAGE_SERVER).toBe(0n);
+    expect(DEFAULT_EVERYONE_PERMISSIONS & Permission.MANAGE_ROLES).toBe(0n);
   });
 
   it('mỗi quyền chiếm một bit riêng', () => {

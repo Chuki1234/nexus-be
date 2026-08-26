@@ -1,9 +1,28 @@
-import { ValidationPipe } from '@nestjs/common';
+import { json, urlencoded } from 'express';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { RedisIoAdapter } from './common/adapters/redis-io.adapter';
+import { normalizeCorsOrigins } from './common/utils/cors.util';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    bodyParser: false,
+  });
+
+  app.use(
+    json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+      type: ['application/json', 'application/webhook+json', '*/*+json'],
+    }),
+  );
+  app.use(urlencoded({ extended: true }));
+
+  app.enableShutdownHooks();
 
   // Chuyển hướng các request không thuộc /api (như OAuth redirect từ Supabase bị trỏ nhầm về 3000)
   // sang cổng frontend (4200).
@@ -33,14 +52,49 @@ async function bootstrap() {
     }),
   );
 
-  // Trình duyệt gửi Origin không có dấu "/" cuối, còn cors so sánh chuỗi chính
-  // xác. Cắt sẵn khoảng trắng và "/" thừa để một dấu gõ nhầm trong .env không
-  // làm chết toàn bộ request từ frontend.
+  const isDistributed = process.env.REALTIME_DISTRIBUTED === 'true';
+  const redisUrl = process.env.REDIS_URL;
+  const keyPrefix = process.env.REDIS_KEY_PREFIX || 'nexuscord:dev:';
+
+  if (isDistributed || redisUrl) {
+    if (!redisUrl) {
+      throw new Error(
+        'Lỗi cấu hình: REALTIME_DISTRIBUTED=true yêu cầu biến môi trường REDIS_URL hợp lệ',
+      );
+    }
+    try {
+      const redisIoAdapter = new RedisIoAdapter(app);
+      await redisIoAdapter.connectToRedis(redisUrl, keyPrefix);
+      app.useWebSocketAdapter(redisIoAdapter);
+      logger.log(`Đã kết nối Socket.IO Redis Adapter tại prefix: ${keyPrefix}`);
+    } catch (err: any) {
+      logger.error(
+        `Không thể kết nối Redis Socket.IO Adapter: ${err.message}`,
+        err.stack,
+      );
+      if (isDistributed) {
+        throw new Error(
+          `Fail-fast bootstrap: Không thể kết nối Redis tại ${redisUrl} (${err.message})`,
+        );
+      }
+    }
+  }
+
+  const allowedOrigins = normalizeCorsOrigins(process.env.CORS_ORIGINS);
+
   app.enableCors({
-    origin: (process.env.CORS_ORIGINS ?? 'http://localhost:4200')
-      .split(',')
-      .map((origin) => origin.trim().replace(/\/+$/, ''))
-      .filter(Boolean),
+    origin: (origin, callback) => {
+      // Cho phép request không có origin (server-to-server, curl, Postman)
+      // hoặc origin trùng khớp sau khi chuẩn hóa
+      if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ''))) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origin ${origin} is not allowed by CORS`));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Accept'],
   });
 
   await app.listen(process.env.PORT ?? 3000);

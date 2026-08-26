@@ -46,18 +46,11 @@ export const ALL_PERMISSIONS: bigint = Object.values(Permission).reduce(
 );
 
 /**
- * Quyền mặc định của role `@everyone` khi tạo server mới.
- *
- * Phải khớp con số hardcode `3339` trong hàm SQL `create_default_role()`
- * (migration 20260731090200). Có unit test canh chừng cặp giá trị này.
+ * Quyền mặc định cho role @everyone trên máy chủ mới:
+ * VIEW_CHANNEL(1) | SEND_MESSAGES(2) | ATTACH_FILES(8) | CONNECT_VOICE(1024) | SPEAK_VOICE(2048)
+ * = 3083n (Không chứa bit CREATE_INVITE = 256n hay MANAGE_CHANNELS = 16n)
  */
-export const DEFAULT_EVERYONE_PERMISSIONS: bigint =
-  Permission.VIEW_CHANNEL |
-  Permission.SEND_MESSAGES |
-  Permission.ATTACH_FILES |
-  Permission.CREATE_INVITE |
-  Permission.CONNECT_VOICE |
-  Permission.SPEAK_VOICE;
+export const DEFAULT_EVERYONE_PERMISSIONS: bigint = 3083n;
 
 /** Một dòng trong `channel_overwrites`. */
 export interface PermissionOverwrite {

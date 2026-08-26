@@ -1,20 +1,42 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { SupabaseModule } from './infra/supabase/supabase.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { ProfilesModule } from './modules/profiles/profiles.module';
+import { ServersModule } from './modules/servers/servers.module';
+import { VoiceModule } from './modules/voice/voice.module';
+import { FriendsModule } from './modules/friends/friends.module';
+import { ConversationsModule } from './modules/conversations/conversations.module';
+import { MessagesModule } from './modules/messages/messages.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
+import { DirectCallsModule } from './modules/direct-calls/direct-calls.module';
+import { GiphyModule } from './modules/giphy/giphy.module';
+import { StipopModule } from './modules/stipop/stipop.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    EventEmitterModule.forRoot(),
     // Trần chung, rộng tay — chỉ để chặn kiểu gọi loạn. Các route nhạy cảm tự
     // siết thêm bằng @Throttle (xem AuthController).
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     SupabaseModule,
     AuthModule,
+    ProfilesModule,
+    ServersModule,
+    VoiceModule,
+    FriendsModule,
+    ConversationsModule,
+    MessagesModule,
+    RealtimeModule,
+    DirectCallsModule,
+    GiphyModule,
+    StipopModule,
   ],
   controllers: [AppController],
   providers: [
