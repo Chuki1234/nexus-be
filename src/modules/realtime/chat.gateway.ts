@@ -729,6 +729,66 @@ export class ChatGateway
     }
   }
 
+  @SubscribeMessage('voice:server-deafen-member')
+  async handleVoiceServerDeafenMember(
+    client: TypedSocket,
+    payload: {
+      serverId: string;
+      targetUserId: string;
+      isDeafened: boolean;
+    },
+  ): Promise<void> {
+    const userId = client.data.userId;
+    if (
+      !userId ||
+      !isValidUuid(payload?.serverId) ||
+      !isValidUuid(payload?.targetUserId)
+    ) {
+      return;
+    }
+
+    try {
+      const caps = await this.serverPermissionsService.getCapabilities(
+        userId,
+        payload.serverId,
+      );
+      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
+        return;
+      }
+
+      this.server.to(Room.user(payload.targetUserId)).emit('voice:force-deafen', {
+        serverId: payload.serverId,
+        isDeafened: payload.isDeafened,
+      });
+
+      const serverStates = await this.redisState.getServerVoiceStates(
+        payload.serverId,
+      );
+      const targetState = serverStates.find(
+        (state) => state.userId === payload.targetUserId,
+      );
+      if (!targetState) return;
+
+      const updatedState: VoiceMemberState = {
+        ...targetState,
+        isDeafened: payload.isDeafened,
+      };
+      await this.redisState.setServerVoiceState(
+        payload.serverId,
+        payload.targetUserId,
+        updatedState,
+      );
+      this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
+        serverId: payload.serverId,
+        channelId: targetState.channelId,
+        userId: payload.targetUserId,
+        state: updatedState,
+      });
+    } catch (err) {
+      this.logger.error(`Lỗi khi server-deafen voice member:`, err);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Typing Indicators (Conversation & Channel)
   // ---------------------------------------------------------------------------

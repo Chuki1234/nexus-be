@@ -219,6 +219,13 @@ export interface ClientToServerEvents {
     targetUserId: string;
     isMuted: boolean;
   }) => void;
+
+  /** Chủ server tắt/bật tiếng nghe của thành viên trên máy chủ */
+  'voice:server-deafen-member': (payload: {
+    serverId: string;
+    targetUserId: string;
+    isDeafened: boolean;
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +436,9 @@ export interface ServerToClientEvents {
 
   /** Lệnh ép buộc tắt mic trên máy chủ */
   'voice:force-mute': (payload: { serverId: string; isMuted: boolean }) => void;
+
+  /** Lệnh ép buộc tắt tiếng nghe trên máy chủ */
+  'voice:force-deafen': (payload: { serverId: string; isDeafened: boolean }) => void;
 
   // Direct Call Signaling (DM 1-1 giữa bạn bè)
   'direct-call:incoming': (payload: DirectCallDto) => void;

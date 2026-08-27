@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { User } from '@supabase/supabase-js';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { statusExpiryFor } from '../../common/utils/status-ttl.util';
 import type { LoginMfaRequired, LoginResponse, Profile } from '../../shared/dto/auth';
 import { CompleteProfileDto } from './dto/complete-profile.dto';
 import { LoginDto } from './dto/login.dto';
@@ -267,7 +268,11 @@ export class AuthService {
     if (dto.displayName !== undefined) updatePayload.display_name = dto.displayName;
     if (dto.avatarUrl !== undefined) updatePayload.avatar_url = dto.avatarUrl;
     if (dto.bannerColor !== undefined) updatePayload.banner_url = dto.bannerColor;
-    if (dto.customStatus !== undefined) updatePayload.status_message = dto.customStatus;
+    if (dto.customStatus !== undefined) {
+      // Đồng bộ với ProfilesService: status tuỳ chỉnh tự hết hạn sau 24h.
+      updatePayload.status_message = dto.customStatus;
+      updatePayload.status_message_expires_at = statusExpiryFor(dto.customStatus);
+    }
 
     if (Object.keys(updatePayload).length > 0) {
       const { error } = await this.supabase.client

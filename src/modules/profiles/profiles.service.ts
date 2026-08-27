@@ -38,6 +38,7 @@ import type {
   PublicProfile,
 } from '../../shared';
 import { GAME_KIND_LABELS, gameLimitFor } from '../../shared';
+import { activeStatus, statusExpiryFor } from '../../common/utils/status-ttl.util';
 
 interface ProfileRow {
   id: string;
@@ -46,6 +47,7 @@ interface ProfileRow {
   avatar_url: string | null;
   banner_url: string | null;
   status_message: string | null;
+  status_message_expires_at: string | null;
   bio: string | null;
   location: string | null;
   links: ProfileLink[] | null;
@@ -60,7 +62,7 @@ type ProfileSummaryRow = Pick<
 >;
 
 const PROFILE_COLUMNS =
-  'id, username, display_name, avatar_url, banner_url, status_message, bio, location, links, accent_color, birthdate, created_at';
+  'id, username, display_name, avatar_url, banner_url, status_message, status_message_expires_at, bio, location, links, accent_color, birthdate, created_at';
 
 const SUMMARY_COLUMNS = 'id, username, display_name, avatar_url';
 
@@ -174,8 +176,16 @@ export class ProfilesService {
     const patch: Record<string, unknown> = {};
 
     if (dto.displayName !== undefined) patch.display_name = dto.displayName;
-    if (dto.statusMessage !== undefined)
-      patch.status_message = dto.statusMessage;
+    if (dto.statusMessage !== undefined) {
+      // Trạng thái tuỳ chỉnh tự hết hạn sau 24h kể từ lúc lưu; mỗi lần lưu lại
+      // reset đồng hồ. Xoá trắng thì bỏ luôn mốc hết hạn.
+      const message =
+        dto.statusMessage && dto.statusMessage.trim().length > 0
+          ? dto.statusMessage
+          : null;
+      patch.status_message = message;
+      patch.status_message_expires_at = statusExpiryFor(message);
+    }
     if (dto.bio !== undefined) patch.bio = dto.bio;
     if (dto.location !== undefined) patch.location = dto.location;
     if (dto.accentColor !== undefined) patch.accent_color = dto.accentColor;
@@ -570,7 +580,8 @@ export class ProfilesService {
       displayName: row.display_name,
       avatarUrl: row.avatar_url,
       bannerUrl: row.banner_url,
-      statusMessage: row.status_message,
+      // Ẩn ngay nếu đã quá 24h — không phải chờ job pg_cron dọn cột.
+      statusMessage: activeStatus(row.status_message, row.status_message_expires_at),
       bio: row.bio,
       location: row.location,
       birthdate: row.birthdate,
