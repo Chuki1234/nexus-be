@@ -81,6 +81,52 @@ describe('PresenceService', () => {
     expect(service.getEffectiveStatus('user-alice')).toBe('online');
   });
 
+  it('đưa thành viên cùng server vào presence peers và loại trùng/chính mình', async () => {
+    mockSupabase.client.from.mockImplementation((table: string) => {
+      if (table !== 'server_members') {
+        return {
+          select: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({
+              maybeSingle: jest.fn().mockResolvedValue({
+                data: { manual_presence: 'online' },
+              }),
+            }),
+          }),
+        };
+      }
+
+      return {
+        select: jest.fn((columns: string) => {
+          if (columns === 'server_id') {
+            return {
+              eq: jest.fn().mockResolvedValue({
+                data: [{ server_id: 'server-1' }, { server_id: 'server-2' }],
+                error: null,
+              }),
+            };
+          }
+          return {
+            in: jest.fn().mockResolvedValue({
+              data: [
+                { user_id: 'user-alice' },
+                { user_id: 'user-bob' },
+                { user_id: 'user-server-only' },
+                { user_id: 'user-server-only' },
+              ],
+              error: null,
+            }),
+          };
+        }),
+      };
+    });
+
+    const peers = await service.getUserPeers('user-alice');
+
+    expect(peers.sort()).toEqual(
+      ['user-bob', 'user-charlie', 'user-david', 'user-server-only'].sort(),
+    );
+  });
+
   it('không fallback sang UPDATE trực tiếp khi RPC last_seen monotonic lỗi', async () => {
     mockSupabase.client.rpc.mockResolvedValueOnce({
       error: new Error('RPC unavailable'),

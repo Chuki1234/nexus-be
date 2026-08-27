@@ -265,12 +265,22 @@ export interface ServerToClientEvents {
     userIds: string[];
   }) => void;
 
+  /**
+   * Cập nhật số chưa đọc/nhắc tên cho một mục tiêu (kênh, hội thoại hoặc server).
+   *
+   * `unreadCount`/`mentionCount` mang ngữ nghĩa DELTA (cộng dồn) khi phát cho tin
+   * nhắn kênh: `unreadCount: 1` = có thêm 1 tin chưa đọc, `mentionCount: 1` = có
+   * thêm 1 lượt nhắc. `authorId` để client bỏ qua tin của chính mình; `messageId`
+   * để chống đếm trùng. Với DM, luồng dùng `conversation:updated` riêng.
+   */
   'unread:update': (payload: {
     channelId?: string | null;
     conversationId?: string | null;
     serverId?: string;
     unreadCount: number;
     mentionCount: number;
+    authorId?: string | null;
+    messageId?: string | null;
   }) => void;
 
   /** Thông báo cấp user-room khi có tin nhắn mới trong conversation mà user chưa join room. */
@@ -321,6 +331,20 @@ export interface ServerToClientEvents {
 
   /** Sự kiện danh sách kênh trong server bị thay đổi (tạo/sửa/xóa/đổi quyền) */
   'server:channels-invalidated': (payload: { serverId: string }) => void;
+
+  /** Cấu trúc category/channel canonical của server vừa được quản trị viên thay đổi. */
+  'server:channel-structure-updated': (payload: {
+    serverId: string;
+    structure: {
+      version: 1;
+      categories: Array<{ id: string; name: string; isPrivate?: boolean }>;
+      rootItems: Array<{ kind: 'category'; id: string } | { kind: 'channel'; id: string }>;
+      categoryChannels: Record<string, string[]>;
+      revision?: number;
+      updatedAt?: string | null;
+    };
+    updatedBy: string;
+  }) => void;
 
   /** Sự kiện thành viên mới tham gia server */
   'server:member-joined': (payload: {

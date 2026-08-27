@@ -23,9 +23,16 @@ import {
 } from '../../shared/dto/server-invitations.dto';
 import { ServerTemplateDefinition } from './constants/server-templates.constant';
 import { CreateChannelDto } from './dto/create-channel.dto';
-import { CreateDirectInvitationDto, CreateInviteLinkDto } from './dto/create-invite.dto';
+import {
+  CreateDirectInvitationDto,
+  CreateInviteLinkDto,
+} from './dto/create-invite.dto';
 import { CreateServerDto } from './dto/create-server.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
+import {
+  ServerChannelStructureDto,
+  UpdateServerChannelStructureDto,
+} from './dto/server-channel-structure.dto';
 import {
   ChannelSummaryDto,
   CreateServerResponseDto,
@@ -102,6 +109,31 @@ export class ServersController {
     return this.servers.listServerChannels(user.id, serverId);
   }
 
+  /** GET /api/servers/:serverId/channel-structure */
+  @Get(':serverId/channel-structure')
+  @HttpCode(HttpStatus.OK)
+  getChannelStructure(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+  ): Promise<ServerChannelStructureDto | null> {
+    return this.servers.getChannelStructure(user.id, serverId);
+  }
+
+  /** PUT /api/servers/:serverId/channel-structure */
+  @Patch(':serverId/channel-structure')
+  @HttpCode(HttpStatus.OK)
+  updateChannelStructure(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: UpdateServerChannelStructureDto,
+  ): Promise<ServerChannelStructureDto> {
+    return this.servers.updateChannelStructure(
+      user.id,
+      serverId,
+      dto.structure,
+    );
+  }
+
   /**
    * POST /api/servers/:serverId/channels
    */
@@ -137,7 +169,11 @@ export class ServersController {
     @Param('serverId') serverId: string,
     @Body() dto: CreateDirectInvitationDto,
   ): Promise<DirectServerInvitationDto> {
-    return this.invites.createDirectInvitation(user.id, serverId, dto.inviteeId);
+    return this.invites.createDirectInvitation(
+      user.id,
+      serverId,
+      dto.inviteeId,
+    );
   }
 
   /**
@@ -382,7 +418,9 @@ export class InvitesController {
 
   @Get(':code')
   @HttpCode(HttpStatus.OK)
-  getInvitePreview(@Param('code') code: string): Promise<ServerInvitePreviewDto> {
+  getInvitePreview(
+    @Param('code') code: string,
+  ): Promise<ServerInvitePreviewDto> {
     return this.invites.getInvitePreview(code);
   }
 
@@ -392,7 +430,12 @@ export class InvitesController {
   joinByInviteCode(
     @CurrentUser() user: User,
     @Param('code') code: string,
-  ): Promise<{ success: boolean; serverId: string; channelId?: string; alreadyMember: boolean }> {
+  ): Promise<{
+    success: boolean;
+    serverId: string;
+    channelId?: string;
+    alreadyMember: boolean;
+  }> {
     return this.invites.joinByInviteCode(user.id, code);
   }
 }

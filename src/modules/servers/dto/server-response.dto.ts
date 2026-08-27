@@ -1,4 +1,5 @@
 import { ServerTemplateDefinition } from '../constants/server-templates.constant';
+import { ServerChannelStructureDto } from './server-channel-structure.dto';
 
 export interface ServerSummaryDto {
   id: string;
@@ -26,6 +27,7 @@ export interface CreateServerResponseDto {
 
 export interface ServerWithChannelsDto extends ServerSummaryDto {
   channels: ChannelSummaryDto[];
+  channelStructure: ServerChannelStructureDto | null;
 }
 
 export type ServerTemplateDto = ServerTemplateDefinition;

@@ -116,6 +116,17 @@ export class FriendsService {
     }
 
     const relationship = data as RawFriendshipRow;
+
+    // Realtime: báo cho người nhận để badge "chờ duyệt" cập nhật ngay (không cần
+    // reload). Gateway sẽ tra hồ sơ người gửi rồi phát `notification:new` tới
+    // user-room của người nhận (giữ service này không thêm query để không phá
+    // chuỗi mock tuần tự của test).
+    this.eventEmitter.emit(CHAT_EVENTS.FRIEND_REQUEST_RECEIVED, {
+      recipientId: target.id,
+      requesterId,
+      createdAt: relationship.created_at,
+    });
+
     return this.toRequestSummary(target, relationship.created_at);
   }
 

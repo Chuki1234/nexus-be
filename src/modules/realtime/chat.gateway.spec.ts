@@ -75,7 +75,10 @@ describe('ChatGateway', () => {
         ChatGateway,
         { provide: SupabaseService, useValue: supabaseMock },
         { provide: ConversationsService, useValue: conversationsServiceMock },
-        { provide: ServerPermissionsService, useValue: serverPermissionsServiceMock },
+        {
+          provide: ServerPermissionsService,
+          useValue: serverPermissionsServiceMock,
+        },
         { provide: PresenceService, useValue: presenceServiceMock },
         { provide: RedisStateService, useValue: redisStateMock },
       ],
@@ -319,6 +322,20 @@ describe('ChatGateway', () => {
         userIds: [],
       });
     });
+
+    it('đặt người vừa có hoạt động gõ gần nhất ở cuối danh sách', async () => {
+      await (gateway as any).addTyping(validUuid, 'user-a', true);
+      await (gateway as any).addTyping(validUuid, 'user-b', true);
+      await (gateway as any).addTyping(validUuid, 'user-a', true);
+
+      expect(serverMock.emit).toHaveBeenLastCalledWith('typing:updated', {
+        channelId: validUuid,
+        userIds: ['user-b', 'user-a'],
+      });
+
+      await (gateway as any).removeTyping(validUuid, 'user-a', true);
+      await (gateway as any).removeTyping(validUuid, 'user-b', true);
+    });
   });
 
   describe('Domain Events Broadcast', () => {
@@ -353,17 +370,23 @@ describe('ChatGateway', () => {
 
       // conversation:updated tới user room của user-456 (không phải sender user-123)
       expect(serverMock.to).toHaveBeenCalledWith(Room.user('user-456'));
-      expect(serverMock.emit).toHaveBeenCalledWith('conversation:updated', expect.objectContaining({
-        conversationId: validUuid,
-        senderId: 'user-123',
-        lastMessagePreview: 'Hello World',
-        unreadDelta: 1,
-      }));
+      expect(serverMock.emit).toHaveBeenCalledWith(
+        'conversation:updated',
+        expect.objectContaining({
+          conversationId: validUuid,
+          senderId: 'user-123',
+          lastMessagePreview: 'Hello World',
+          unreadDelta: 1,
+        }),
+      );
 
       // sender KHÔNG nhận conversation:updated
       expect(serverMock.to).not.toHaveBeenCalledWith(Room.user('user-123'));
 
-      expect(serverMock.emit).not.toHaveBeenCalledWith('message:new', expect.anything());
+      expect(serverMock.emit).not.toHaveBeenCalledWith(
+        'message:new',
+        expect.anything(),
+      );
     });
 
     it('broadcast message:updated tới conversation room', () => {
@@ -506,7 +529,9 @@ describe('ChatGateway', () => {
       } as unknown as TypedSocket;
 
       const res = await gateway.handleGetPresenceSnapshot(mockClient);
-      expect(presenceServiceMock.getPeersSnapshot).toHaveBeenCalledWith('user-123');
+      expect(presenceServiceMock.getPeersSnapshot).toHaveBeenCalledWith(
+        'user-123',
+      );
       expect(res.presences).toEqual({
         'peer-bob': { status: 'online', lastSeenAt: null },
         'peer-charlie': { status: 'offline', lastSeenAt: null },
@@ -572,7 +597,9 @@ describe('ChatGateway', () => {
     });
 
     it('handleVoiceStateUpdate: broadcast state: null khi user rời kênh', async () => {
-      redisStateMock.removeServerVoiceState.mockResolvedValueOnce('22222222-2222-4222-a222-222222222222');
+      redisStateMock.removeServerVoiceState.mockResolvedValueOnce(
+        '22222222-2222-4222-a222-222222222222',
+      );
 
       const mockClient = {
         data: { userId: 'user-123' },
@@ -585,7 +612,10 @@ describe('ChatGateway', () => {
         channelId: null,
       });
 
-      expect(redisStateMock.removeServerVoiceState).toHaveBeenCalledWith(serverId, 'user-123');
+      expect(redisStateMock.removeServerVoiceState).toHaveBeenCalledWith(
+        serverId,
+        'user-123',
+      );
       expect(serverMock.to).toHaveBeenCalledWith(Room.server(serverId));
       expect(serverMock.emit).toHaveBeenCalledWith('voice:state-updated', {
         serverId,

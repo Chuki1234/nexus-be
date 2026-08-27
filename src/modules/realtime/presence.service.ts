@@ -425,13 +425,19 @@ export class PresenceService
   }
 
   /**
-   * Tìm tập hợp Peers liên quan (Accepted Friends + DM Conversation Peers) loại trừ chính userId
+   * Tìm tập hợp peers liên quan tới một user.
+   *
+   * Presence không chỉ xuất hiện ở DM/bạn bè mà còn ở member list của server.
+   * Vì mọi socket luôn join Room.user(userId), việc đưa shared-server members vào
+   * đây giúp cùng một delta/snapshot canonical nuôi tất cả màn hình mà không phải
+   * dựng một presence store riêng cho từng server.
    */
   async getUserPeers(userId: string): Promise<string[]> {
     try {
-      const [friendIds, dmPeerIds] = await Promise.all([
+      const [friendIds, dmPeerIds, sharedServerMemberIds] = await Promise.all([
         this.friendsService.getAcceptedFriendUserIds(userId),
         this.conversationsService.getDmPeerUserIds(userId),
+        this.getSharedServerMemberIds(userId),
       ]);
 
       const peerSet = new Set<string>();
@@ -441,10 +447,65 @@ export class PresenceService
       for (const id of dmPeerIds) {
         if (id && id !== userId) peerSet.add(id);
       }
+      for (const id of sharedServerMemberIds) {
+        if (id && id !== userId) peerSet.add(id);
+      }
 
       return Array.from(peerSet);
     } catch (err) {
       this.logger.error(`Lỗi lấy peer IDs cho user ${userId}:`, err);
+      return [];
+    }
+  }
+
+  /** Lấy toàn bộ user cùng tham gia ít nhất một server với user hiện tại. */
+  private async getSharedServerMemberIds(userId: string): Promise<string[]> {
+    try {
+      const { data: memberships, error: membershipError } =
+        await this.supabase.client
+          .from('server_members')
+          .select('server_id')
+          .eq('user_id', userId);
+
+      if (membershipError) {
+        throw membershipError;
+      }
+
+      const serverIds = Array.from(
+        new Set(
+          (memberships ?? [])
+            .map((item: { server_id: string }) => item.server_id)
+            .filter(Boolean),
+        ),
+      );
+      if (serverIds.length === 0) {
+        return [];
+      }
+
+      const { data: members, error: membersError } =
+        await this.supabase.client
+          .from('server_members')
+          .select('user_id')
+          .in('server_id', serverIds);
+
+      if (membersError) {
+        throw membersError;
+      }
+
+      return Array.from(
+        new Set(
+          (members ?? [])
+            .map((item: { user_id: string }) => item.user_id)
+            .filter(Boolean),
+        ),
+      );
+    } catch (error) {
+      // Presence của friends/DM vẫn phải hoạt động nếu truy vấn shared server
+      // tạm thời lỗi; không để một nguồn peer làm rỗng toàn bộ snapshot.
+      this.logger.warn(
+        `Không thể lấy shared-server presence peers cho user ${userId}`,
+        error instanceof Error ? error.message : String(error),
+      );
       return [];
     }
   }
@@ -458,7 +519,9 @@ export class PresenceService
     const peers = await this.getUserPeers(userId);
     const result: Record<string, UserPresenceDto> = {};
 
-    for (const peerId of peers) {
+    // Bao gồm chính user để user panel/settings/member list không phải hardcode
+    // trạng thái "online" và vẫn dùng đúng canonical presence store.
+    for (const peerId of [userId, ...peers]) {
       if (this.redisState.isDistributedActive()) {
         const pres = await this.redisState.getUserPresence(peerId);
         result[peerId] = {
