@@ -114,6 +114,41 @@ export class ServerRolesService {
       }
     }
 
+    // Đảm bảo luôn có role Admin hệ thống ("Quản trị viên (Admin)")
+    const hasAdminRole = roles.some(
+      (r) =>
+        r.name === 'Quản trị viên (Admin)' ||
+        r.name === 'Admin' ||
+        (BigInt(r.permissions ?? 0) & Permission.ADMINISTRATOR) !== 0n,
+    );
+
+    if (!hasAdminRole) {
+      const adminMask =
+        Permission.ADMINISTRATOR |
+        Permission.MANAGE_SERVER |
+        Permission.MANAGE_ROLES |
+        Permission.MANAGE_CHANNELS |
+        Permission.KICK_MEMBERS |
+        Permission.BAN_MEMBERS;
+
+      const { data: newAdmin, error: adminErr } = await this.supabase.client
+        .from('roles')
+        .insert({
+          server_id: serverId,
+          name: 'Quản trị viên (Admin)',
+          color: hexColorToInt('#00ed64'),
+          permissions: adminMask.toString(),
+          position: 1000,
+          is_default: false,
+        })
+        .select('id, server_id, name, color, permissions, position, is_default, created_at')
+        .single();
+
+      if (!adminErr && newAdmin) {
+        roles = [newAdmin, ...roles];
+      }
+    }
+
     // 3. Đếm số lượng thành viên cho mỗi role
     const { data: memberRolesData } = await this.supabase.client
       .from('member_roles')
@@ -246,7 +281,15 @@ export class ServerRolesService {
       updates.color = hexColorToInt(dto.color);
     }
 
+    const isSystemAdmin =
+      existing.name === 'Quản trị viên (Admin)' ||
+      existing.name === 'Admin' ||
+      (BigInt(existing.permissions ?? 0) & Permission.ADMINISTRATOR) !== 0n;
+
     if (dto.permissions !== undefined) {
+      if (isSystemAdmin && !dto.permissions.administrator) {
+        throw new ForbiddenException('Không thể chỉnh sửa hoặc hạ phân quyền của vai trò Quản trị viên.');
+      }
       const bitmask = permissionsToBitmask(dto.permissions);
       updates.permissions = bitmask.toString();
     }
@@ -289,7 +332,7 @@ export class ServerRolesService {
 
     const { data: existing, error: findErr } = await this.supabase.client
       .from('roles')
-      .select('id, is_default')
+      .select('id, name, permissions, is_default')
       .eq('id', roleId)
       .eq('server_id', serverId)
       .maybeSingle();
@@ -300,6 +343,15 @@ export class ServerRolesService {
 
     if (existing.is_default) {
       throw new BadRequestException('Không thể xóa vai trò mặc định @everyone.');
+    }
+
+    const isSystemAdmin =
+      existing.name === 'Quản trị viên (Admin)' ||
+      existing.name === 'Admin' ||
+      (BigInt(existing.permissions ?? 0) & Permission.ADMINISTRATOR) !== 0n;
+
+    if (isSystemAdmin) {
+      throw new ForbiddenException('Không thể xóa vai trò Quản trị viên của máy chủ.');
     }
 
     const { error: delErr } = await this.supabase.client

@@ -631,7 +631,7 @@ export class ChatGateway
         userId,
         payload.serverId,
       );
-      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
+      if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels && !caps.canKickMembers) {
         this.logger.warn(`User ${userId} không có quyền kick voice member`);
         return;
       }

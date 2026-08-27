@@ -22,8 +22,8 @@ describe('MessagesService message pins', () => {
       { emit } as never,
     );
 
-    jest
-      .spyOn(service as never, 'assembleMessageDtos' as never)
+    (jest
+      .spyOn(service as any, 'assembleMessageDtos') as any)
       .mockImplementation(async (rows: any[]) =>
         rows.map((row) => ({
           id: String(row.id),
