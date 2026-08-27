@@ -1170,6 +1170,18 @@ export class MessagesService {
       );
     }
 
+    // "Message request" từ người lạ: người nhận đang chờ duyệt thì CHƯA được nhắn
+    // (chỉ đọc) cho tới khi bấm "Chấp nhận". Người khởi tạo (accepted) vẫn gửi được.
+    const myRequestState = await this.conversationsService.getRequestState(
+      userId,
+      conversationId,
+    );
+    if (myRequestState === 'pending') {
+      throw new ForbiddenException(
+        'Bạn cần chấp nhận cuộc trò chuyện này trước khi nhắn tin.',
+      );
+    }
+
     const text = dto.content?.trim() || null;
     const uploadFiles = files || [];
 

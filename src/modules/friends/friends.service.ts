@@ -212,6 +212,21 @@ export class FriendsService {
       throw new ConflictException('Lời mời vừa được xử lý ở một phiên khác.');
     }
 
+    // Đã là bạn bè: nếu trước đó có DM "người lạ" đang chờ duyệt thì mở khoá luôn
+    // (không còn là message request nữa).
+    const dmKey = `${userAId}:${userBId}`;
+    const { data: dmConv } = await this.supabase.client
+      .from('conversations')
+      .select('id')
+      .eq('dm_key', dmKey)
+      .maybeSingle();
+    if (dmConv?.id) {
+      await this.supabase.client
+        .from('conversation_participants')
+        .update({ request_state: 'accepted' })
+        .eq('conversation_id', dmConv.id as string);
+    }
+
     const profiles = await this.loadProfiles([requesterId]);
     const requester = profiles.get(requesterId);
     if (!requester) {

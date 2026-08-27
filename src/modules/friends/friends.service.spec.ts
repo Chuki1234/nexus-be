@@ -286,6 +286,9 @@ describe('FriendsService', () => {
       'friendships',
       relationship(userA, userB, userA, 'accepted'),
     );
+    // acceptRequest nay tra DM giua hai nguoi de bo trang thai "cho duyet";
+    // khong co DM -> tra null, bo qua buoc cap nhat conversation_participants.
+    queue('conversations', null);
     queue('profiles', [profile(userA, 'ban_a')]);
 
     const result = await service.acceptRequest(userB, userA);

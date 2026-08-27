@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from './conversations.service';
 
@@ -24,6 +25,7 @@ describe('ConversationsService', () => {
       providers: [
         ConversationsService,
         { provide: SupabaseService, useValue: mockSupabase },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
 
@@ -71,7 +73,20 @@ describe('ConversationsService', () => {
             }),
           };
         }
-        return {};
+        // Fallback chainable cho friendships/messages/conversation_participants —
+        // getOrCreateDm giờ tra bạn bè + đặt trạng thái duyệt; test này không quan
+        // tâm các bảng đó nên trả rỗng.
+        const chain: any = {
+          select: jest.fn(() => chain),
+          eq: jest.fn(() => chain),
+          or: jest.fn(() => chain),
+          in: jest.fn(() => chain),
+          update: jest.fn(() => chain),
+          limit: jest.fn().mockResolvedValue({ data: [], error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          then: (resolve: any) => resolve({ data: [], count: 0, error: null }),
+        };
+        return chain;
       });
 
       const res = await service.getOrCreateDm('user-1', 'user-2');
@@ -244,7 +259,7 @@ describe('ConversationsService', () => {
       expect(res[0].unreadCount).toBe(2);
     });
 
-    it('lọc bỏ các cuộc trò chuyện DM với người không còn là bạn bè', async () => {
+    it('GIỮ DM người-lạ (chưa kết bạn) và gắn cờ isFriend=false thay vì lọc bỏ', async () => {
       mockSupabase.client.from.mockImplementation((table: string) => {
         if (table === 'conversation_participants') {
           return {
@@ -329,7 +344,11 @@ describe('ConversationsService', () => {
       });
 
       const res = await service.listConversations('user-1');
-      expect(res).toHaveLength(0);
+      // Trước đây DM người-lạ bị lọc bỏ; nay giữ lại để hiện ở "Người lạ"/DM.
+      expect(res).toHaveLength(1);
+      expect(res[0].id).toBe('conv-orphan');
+      expect(res[0].isFriend).toBe(false);
+      expect(res[0].recipient?.username).toBe('stranger');
     });
   });
 

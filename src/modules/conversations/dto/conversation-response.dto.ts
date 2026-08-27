@@ -22,4 +22,12 @@ export interface ConversationResponseDto {
     createdAt: string;
   };
   createdAt: string;
+  /**
+   * Trạng thái duyệt của CHÍNH user gọi API trong DM này.
+   * - 'pending'  = đây là "message request" từ người lạ, user chỉ đọc tới khi duyệt.
+   * - 'accepted' = nhắn tin bình thường.
+   */
+  requestState?: 'pending' | 'accepted';
+  /** Người đối thoại (DM) đã là bạn bè accepted của user gọi API hay chưa. */
+  isFriend?: boolean;
 }
