@@ -53,7 +53,7 @@ export class TwoFactorController {
     @AccessToken() token: string,
     @Body() dto: UnenrollDto,
   ): Promise<{ success: true }> {
-    return this.twoFactor.unenroll(token, user.id, dto.factorId);
+    return this.twoFactor.unenroll(token, user.id, dto.factorId, dto.code);
   }
 
   /** POST /api/auth/2fa/regenerate-backup-codes — tạo lại bộ mã dự phòng. */

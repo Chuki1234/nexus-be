@@ -4,4 +4,6 @@ export interface CurrentServerCapabilities {
   canManageServer: boolean;
   canManageChannels: boolean;
   canManageRoles: boolean;
+  canKickMembers: boolean;
+  canBanMembers: boolean;
 }

@@ -70,6 +70,8 @@ export class ServerPermissionsService {
         canManageServer: true,
         canManageChannels: true,
         canManageRoles: true,
+        canKickMembers: true,
+        canBanMembers: true,
       };
     }
 
@@ -81,6 +83,8 @@ export class ServerPermissionsService {
         canManageServer: true,
         canManageChannels: true,
         canManageRoles: true,
+        canKickMembers: true,
+        canBanMembers: true,
       };
     }
 
@@ -130,6 +134,8 @@ export class ServerPermissionsService {
       canManageServer: isAdmin || (basePerms & Permission.MANAGE_SERVER) !== 0n,
       canManageChannels: isAdmin || (basePerms & Permission.MANAGE_CHANNELS) !== 0n,
       canManageRoles: isAdmin || (basePerms & Permission.MANAGE_ROLES) !== 0n,
+      canKickMembers: isAdmin || (basePerms & Permission.KICK_MEMBERS) !== 0n,
+      canBanMembers: isAdmin || (basePerms & Permission.BAN_MEMBERS) !== 0n,
     };
   }
 
@@ -158,6 +164,20 @@ export class ServerPermissionsService {
     const caps = await this.getCapabilities(userId, serverId);
     if (!caps.canManageRoles && !caps.isOwner) {
       throw new ForbiddenException('Bạn không có quyền quản lý vai trò trong máy chủ này.');
+    }
+  }
+
+  async assertCanKickMembers(userId: string, serverId: string): Promise<void> {
+    const caps = await this.getCapabilities(userId, serverId);
+    if (!caps.canKickMembers && !caps.isOwner) {
+      throw new ForbiddenException('Bạn không có quyền trục xuất thành viên trong máy chủ này.');
+    }
+  }
+
+  async assertCanBanMembers(userId: string, serverId: string): Promise<void> {
+    const caps = await this.getCapabilities(userId, serverId);
+    if (!caps.canBanMembers && !caps.isOwner) {
+      throw new ForbiddenException('Bạn không có quyền cấm thành viên trong máy chủ này.');
     }
   }
 

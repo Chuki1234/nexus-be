@@ -25,9 +25,10 @@ export class SupabaseService {
    */
   readonly authClient: SupabaseClient;
 
-  /** URL project + anon key — để gọi thẳng GoTrue REST thay mặt user (vd MFA). */
+  /** URL project + anon key + service role key */
   readonly url: string;
   readonly anonKey: string;
+  readonly serviceRoleKey: string;
 
   constructor(config: ConfigService) {
     const url = config.get<string>('SUPABASE_URL');
@@ -53,5 +54,6 @@ export class SupabaseService {
 
     this.url = url;
     this.anonKey = anonKey;
+    this.serviceRoleKey = serviceRoleKey;
   }
 }

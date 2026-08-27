@@ -170,10 +170,86 @@ export class TwoFactorService {
     };
   }
 
-  /** Tắt 2FA: gỡ factor + xoá backup codes. */
-  async unenroll(accessToken: string, userId: string, factorId: string): Promise<{ success: true }> {
-    await this.gotrue(`/factors/${factorId}`, 'DELETE', accessToken);
+  /** Tắt 2FA: xác thực mã từ Google Authenticator hoặc mã dự phòng, sau đó gỡ factor + xoá backup codes. */
+  async unenroll(
+    accessToken: string,
+    userId: string,
+    factorId: string,
+    code: string,
+  ): Promise<{ success: true }> {
+    if (!code || !code.trim()) {
+      throw new BadRequestException('Vui lòng nhập mã xác thực từ Google Authenticator.');
+    }
+    const normalized = code.trim().replace(/\s+/g, '');
+
+    let verified = false;
+    let aal2Token: string | null = null;
+
+    // 1. Thử verify bằng mã TOTP từ Google Authenticator
+    try {
+      const challengeId = await this.challengeForLogin(accessToken, factorId);
+      const session = await this.gotrue<GotrueSession>(
+        `/factors/${factorId}/verify`,
+        'POST',
+        accessToken,
+        { challenge_id: challengeId, code: normalized },
+      );
+      if (session?.access_token) {
+        verified = true;
+        aal2Token = session.access_token;
+      }
+    } catch {
+      // Nếu không phải TOTP, thử kiểm tra mã dự phòng (backup code)
+      const isBackupValid = await this.verifyBackupCode(userId, normalized);
+      if (isBackupValid) {
+        verified = true;
+      }
+    }
+
+    if (!verified) {
+      throw new UnauthorizedException('Mã xác thực từ Google Authenticator không chính xác.');
+    }
+
+    // 2. Gỡ bỏ factor bằng AAL2 token nếu có, hoặc dùng Admin API
+    let deleted = false;
+    if (aal2Token) {
+      try {
+        await this.gotrue(`/factors/${factorId}`, 'DELETE', aal2Token);
+        deleted = true;
+      } catch (err) {
+        this.logger.warn(`Xóa factor bằng AAL2 token thất bại, chuyển sang Admin API: ${(err as Error).message}`);
+      }
+    }
+
+    if (!deleted) {
+      try {
+        const { error } = await this.supabase.client.auth.admin.mfa.deleteFactor({
+          id: factorId,
+          userId,
+        });
+        if (error) throw error;
+        deleted = true;
+      } catch {
+        const res = await fetch(`${this.supabase.url}/auth/v1/admin/users/${userId}/factors/${factorId}`, {
+          method: 'DELETE',
+          headers: {
+            apikey: this.supabase.serviceRoleKey,
+            Authorization: `Bearer ${this.supabase.serviceRoleKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          this.logger.error(`Xóa factor admin thất bại: ${errText}`);
+          throw new InternalServerErrorException('Không thể gỡ bỏ yếu tố xác thực.');
+        }
+        deleted = true;
+      }
+    }
+
+    // 3. Xóa backup codes
     await this.deleteBackupCodes(userId);
+
     return { success: true };
   }
 

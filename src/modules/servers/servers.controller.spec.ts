@@ -98,6 +98,8 @@ describe('ServersController', () => {
         canManageServer: true,
         canManageChannels: true,
         canManageRoles: true,
+        canKickMembers: true,
+        canBanMembers: true,
       };
       permissionsService.getCapabilities.mockResolvedValue(caps);
 
