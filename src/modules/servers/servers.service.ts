@@ -26,6 +26,10 @@ import {
 } from './dto/server-response.dto';
 import { ServerMemberDto } from '../../shared/dto/server-members.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
+import {
+  ServerChannelStructureDto,
+  ServerChannelStructureRootItemDto,
+} from './dto/server-channel-structure.dto';
 
 interface RawServerRow {
   id: string;
@@ -33,6 +37,9 @@ interface RawServerRow {
   template_id?: string;
   icon_url: string | null;
   created_at?: string;
+  channel_structure?: unknown;
+  channel_structure_revision?: number;
+  channel_structure_updated_at?: string | null;
 }
 
 interface RawChannelRow {
@@ -138,13 +145,116 @@ export class ServersService {
   /**
    * Lấy danh sách máy chủ mà user đang tham gia, kèm toàn bộ channels theo đúng thứ tự position.
    */
+  /**
+   * Tính badge chưa đọc/nhắc tên cho một tập kênh theo đúng thiết kế của bảng
+   * `read_states` (nguồn DUY NHẤT cho unread) — tính ON-READ nên tự đúng sau khi
+   * F5 hoặc mở tab thứ hai, không phụ thuộc bộ đếm trong memory.
+   *
+   * - `unread` = có tin (không phải của mình, chưa xoá) với id > last_read.
+   * - `mention` = số tin thoả điều kiện trên VÀ nhắc `@username`/`@everyone`/`@here`.
+   *
+   * Tối ưu: 1 query read_states + 1 query ứng viên nhắc tên cho cả cụm kênh, còn
+   * kiểm tra tồn tại unread chạy song song (Promise.all).
+   */
+  private async computeChannelBadges(
+    userId: string,
+    channelIds: string[],
+  ): Promise<Map<string, { unread: boolean; mention: number }>> {
+    const result = new Map<string, { unread: boolean; mention: number }>();
+    if (channelIds.length === 0) return result;
+    for (const id of channelIds) result.set(id, { unread: false, mention: 0 });
+
+    try {
+      await this.fillChannelBadges(userId, channelIds, result);
+    } catch (err) {
+      // Badge chỉ là phụ trợ: lỗi tính toán không được làm hỏng danh sách kênh.
+      this.logger.warn(`computeChannelBadges lỗi (badge về 0): ${String(err)}`);
+    }
+    return result;
+  }
+
+  private async fillChannelBadges(
+    userId: string,
+    channelIds: string[],
+    result: Map<string, { unread: boolean; mention: number }>,
+  ): Promise<void> {
+    // Con trỏ đã đọc theo kênh.
+    const { data: reads } = await this.supabase.client
+      .from('read_states')
+      .select('channel_id, last_read_message_id')
+      .eq('user_id', userId)
+      .in('channel_id', channelIds);
+    const lastReadMap = new Map<string, string | null>();
+    for (const r of reads ?? []) {
+      lastReadMap.set(
+        r.channel_id as string,
+        r.last_read_message_id ? String(r.last_read_message_id) : null,
+      );
+    }
+
+    const gtBigInt = (id: string, threshold: string | null): boolean => {
+      if (!threshold) return true;
+      try {
+        return BigInt(id) > BigInt(threshold);
+      } catch {
+        return true;
+      }
+    };
+
+    // Username để dò `@username`.
+    const { data: me } = await this.supabase.client
+      .from('profiles')
+      .select('username')
+      .eq('id', userId)
+      .maybeSingle();
+    const username = (me?.username as string | undefined)?.toLowerCase() ?? '';
+
+    // Ứng viên nhắc tên cho toàn cụm kênh (1 query). Bọc giá trị trong ngoặc kép
+    // để `.` trong username không phá cú pháp `.or()` của PostgREST.
+    const orParts = ['content.ilike."%@everyone%"', 'content.ilike."%@here%"'];
+    if (username) orParts.push(`content.ilike."%@${username}%"`);
+    const { data: mentionRows } = await this.supabase.client
+      .from('messages')
+      .select('channel_id, id')
+      .in('channel_id', channelIds)
+      .neq('author_id', userId)
+      .is('deleted_at', null)
+      .or(orParts.join(','));
+    for (const m of mentionRows ?? []) {
+      const cid = m.channel_id as string;
+      const last = lastReadMap.get(cid) ?? null;
+      if (gtBigInt(String(m.id), last)) {
+        const cur = result.get(cid);
+        if (cur) cur.mention += 1;
+      }
+    }
+
+    // Tồn tại tin chưa đọc theo từng kênh (song song).
+    await Promise.all(
+      channelIds.map(async (cid) => {
+        const last = lastReadMap.get(cid) ?? null;
+        let q = this.supabase.client
+          .from('messages')
+          .select('id')
+          .eq('channel_id', cid)
+          .neq('author_id', userId)
+          .is('deleted_at', null)
+          .order('id', { ascending: false })
+          .limit(1);
+        if (last) q = q.gt('id', last);
+        const { data } = await q;
+        const cur = result.get(cid);
+        if (cur && data && data.length > 0) cur.unread = true;
+      }),
+    );
+  }
+
   async listUserServers(userId: string): Promise<ServerWithChannelsDto[]> {
     // 1. Lấy danh sách server_id từ server_members
-    const { data: memberships, error: memberError } =
-      await this.supabase.client
-        .from('server_members')
-        .select('server_id')
-        .eq('user_id', userId);
+    const { data: memberships, error: memberError } = await this.supabase.client
+      .from('server_members')
+      .select('server_id')
+      .eq('user_id', userId);
 
     if (memberError) {
       this.logger.error(
@@ -166,7 +276,9 @@ export class ServersService {
     // 2. Lấy thông tin servers
     const { data: servers, error: serverError } = await this.supabase.client
       .from('servers')
-      .select('id, name, template_id, icon_url, created_at')
+      .select(
+        'id, name, template_id, icon_url, created_at, channel_structure, channel_structure_revision, channel_structure_updated_at',
+      )
       .in('id', serverIds)
       .order('created_at', { ascending: true });
 
@@ -194,26 +306,40 @@ export class ServersService {
     const rawServers = (servers ?? []) as RawServerRow[];
     const rawChannels = (channels ?? []) as RawChannelRow[];
 
+    // Badge chưa đọc/nhắc tên (persist qua reload) cho toàn bộ kênh text.
+    const textChannelIds = rawChannels
+      .filter((c) => c.type !== 'voice')
+      .map((c) => c.id);
+    const badges = await this.computeChannelBadges(userId, textChannelIds);
+
     return rawServers.map((server) => {
       const serverChannels = rawChannels
         .filter((c) => c.server_id === server.id)
-        .map((c) => ({
-          id: c.id,
-          name: c.name,
-          type: (c.type === 'voice' ? 'voice' : 'text') as 'text' | 'voice',
-          topic: c.topic ?? null,
-          unread: false,
-          mentionCount: 0,
-        }));
+        .map((c) => {
+          const b = badges.get(c.id);
+          return {
+            id: c.id,
+            name: c.name,
+            type: (c.type === 'voice' ? 'voice' : 'text') as 'text' | 'voice',
+            topic: c.topic ?? null,
+            position: c.position,
+            unread: b?.unread ?? false,
+            mentionCount: b?.mention ?? 0,
+          };
+        });
+
+      const serverUnread = serverChannels.some((c) => c.unread || c.mentionCount > 0);
+      const serverMentions = serverChannels.reduce((acc, c) => acc + c.mentionCount, 0);
 
       return {
         id: server.id,
         name: server.name,
         templateId: server.template_id,
         iconUrl: server.icon_url ?? null,
-        unread: false,
-        mentionCount: 0,
+        unread: serverUnread,
+        mentionCount: serverMentions,
         channels: serverChannels,
+        channelStructure: this.mapStoredChannelStructure(server),
       };
     });
   }
@@ -233,7 +359,9 @@ export class ServersService {
       .maybeSingle();
 
     if (memberError || !member) {
-      throw new ForbiddenException('Bạn không phải là thành viên của máy chủ này.');
+      throw new ForbiddenException(
+        'Bạn không phải là thành viên của máy chủ này.',
+      );
     }
 
     const { data: channels, error: channelsError } = await this.supabase.client
@@ -255,13 +383,17 @@ export class ServersService {
 
     for (const c of allChannels) {
       try {
-        const perms = await this.serverPermissions.getChannelPermissions(userId, c.id);
+        const perms = await this.serverPermissions.getChannelPermissions(
+          userId,
+          c.id,
+        );
         if ((perms & Permission.VIEW_CHANNEL) !== 0n) {
           visibleChannels.push({
             id: c.id,
             name: c.name,
             type: (c.type === 'voice' ? 'voice' : 'text') as 'text' | 'voice',
             topic: c.topic ?? null,
+            position: c.position,
             unread: false,
             mentionCount: 0,
           });
@@ -271,7 +403,170 @@ export class ServersService {
       }
     }
 
+    // Badge chỉ tính cho các kênh text mà user THỰC SỰ nhìn thấy (đã lọc VIEW_CHANNEL
+    // ở trên) — không rò rỉ chưa đọc của kênh riêng tư.
+    const badges = await this.computeChannelBadges(
+      userId,
+      visibleChannels.filter((c) => c.type !== 'voice').map((c) => c.id),
+    );
+    for (const c of visibleChannels) {
+      const b = badges.get(c.id);
+      if (b) {
+        c.unread = b.unread;
+        c.mentionCount = b.mention;
+      }
+    }
+
     return visibleChannels;
+  }
+
+  /**
+   * Lấy cấu trúc category/channel canonical của server cho một thành viên.
+   * Null có nghĩa frontend cần derive layout mặc định từ channels.position.
+   */
+  async getChannelStructure(
+    userId: string,
+    serverId: string,
+  ): Promise<ServerChannelStructureDto | null> {
+    const { data: membership, error: membershipError } =
+      await this.supabase.client
+        .from('server_members')
+        .select('server_id')
+        .eq('server_id', serverId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (membershipError || !membership) {
+      throw new ForbiddenException(
+        'Bạn không phải là thành viên của máy chủ này.',
+      );
+    }
+
+    const { data: server, error } = await this.supabase.client
+      .from('servers')
+      .select(
+        'channel_structure, channel_structure_revision, channel_structure_updated_at',
+      )
+      .eq('id', serverId)
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(`Lấy cấu trúc kênh server thất bại: ${error.message}`);
+      throw new InternalServerErrorException(
+        'Không thể tải cấu trúc kênh máy chủ.',
+      );
+    }
+    if (!server) {
+      throw new NotFoundException('Máy chủ không tồn tại.');
+    }
+
+    return this.mapStoredChannelStructure(server as RawServerRow);
+  }
+
+  /**
+   * Lưu cấu trúc category/channel dùng chung. Chỉ owner/admin hoặc role có
+   * MANAGE_CHANNELS được phép cập nhật; mọi channel của server phải xuất hiện
+   * đúng một lần trong layout để không thể làm mất kênh khỏi sidebar.
+   */
+  async updateChannelStructure(
+    userId: string,
+    serverId: string,
+    input: ServerChannelStructureDto,
+  ): Promise<ServerChannelStructureDto> {
+    const capabilities = await this.serverPermissions.getCapabilities(
+      userId,
+      serverId,
+    );
+    if (!capabilities.canManageChannels) {
+      throw new ForbiddenException(
+        'Bạn không có quyền thay đổi cấu trúc kênh.',
+      );
+    }
+
+    const { data: channelRows, error: channelError } =
+      await this.supabase.client
+        .from('channels')
+        .select('id')
+        .eq('server_id', serverId);
+
+    if (channelError) {
+      this.logger.error(
+        `Kiểm tra channel structure thất bại: ${channelError.message}`,
+      );
+      throw new InternalServerErrorException(
+        'Không thể kiểm tra cấu trúc kênh máy chủ.',
+      );
+    }
+
+    const knownChannelIds = new Set(
+      (channelRows ?? []).map((row: { id: string }) => row.id),
+    );
+    const structure = this.validateAndNormalizeChannelStructure(
+      input,
+      knownChannelIds,
+    );
+
+    const { data: current, error: currentError } = await this.supabase.client
+      .from('servers')
+      .select('channel_structure_revision')
+      .eq('id', serverId)
+      .maybeSingle();
+
+    if (currentError || !current) {
+      throw new NotFoundException('Máy chủ không tồn tại.');
+    }
+
+    const revision = Number(current.channel_structure_revision ?? 0) + 1;
+    const updatedAt = new Date().toISOString();
+    const { error: updateError } = await this.supabase.client
+      .from('servers')
+      .update({
+        channel_structure: structure,
+        channel_structure_revision: revision,
+        channel_structure_updated_at: updatedAt,
+        channel_structure_updated_by: userId,
+      })
+      .eq('id', serverId);
+
+    if (updateError) {
+      this.logger.error(
+        `Lưu cấu trúc kênh server thất bại: ${updateError.message}`,
+      );
+      if (
+        updateError.code === '42703' ||
+        updateError.code === 'PGRST204' ||
+        updateError.message?.includes('channel_structure')
+      ) {
+        throw new ServiceUnavailableException(
+          'Cơ sở dữ liệu chưa sẵn sàng: migration cấu trúc kênh chưa được áp dụng.',
+        );
+      }
+      throw new InternalServerErrorException(
+        'Không thể lưu cấu trúc kênh máy chủ.',
+      );
+    }
+
+    const result: ServerChannelStructureDto = {
+      ...structure,
+      revision,
+      updatedAt,
+    };
+
+    try {
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:channel-structure-updated', {
+          serverId,
+          structure: result,
+          updatedBy: userId,
+        });
+    } catch (err) {
+      this.logger.warn(
+        `Phát tán server:channel-structure-updated thất bại: ${err}`,
+      );
+    }
+
+    return result;
   }
 
   /**
@@ -291,7 +586,9 @@ export class ServersService {
     }
 
     if (dto.type !== 'text' && dto.type !== 'voice') {
-      throw new BadRequestException('Loại kênh chỉ có thể là "text" hoặc "voice".');
+      throw new BadRequestException(
+        'Loại kênh chỉ có thể là "text" hoặc "voice".',
+      );
     }
 
     const trimmedTopic = dto.topic ? dto.topic.trim() : null;
@@ -338,7 +635,9 @@ export class ServersService {
         );
       }
 
-      throw new InternalServerErrorException('Không thể tạo kênh trên máy chủ.');
+      throw new InternalServerErrorException(
+        'Không thể tạo kênh trên máy chủ.',
+      );
     }
 
     const result: ChannelSummaryDto = {
@@ -397,17 +696,24 @@ export class ServersService {
 
     // Broadcast realtime event sau khi commit DB thành công
     try {
-      const memberUserIds: string[] = (rpcData?.memberUserIds as string[]) || [];
+      const memberUserIds: string[] =
+        (rpcData?.memberUserIds as string[]) || [];
 
       // 1. Gửi vào Room của server
-      this.chatGateway.server.to(Room.server(serverId)).emit('server:deleted', { serverId });
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:deleted', { serverId });
 
       // 2. Gửi vào User Room của từng thành viên
       for (const memberId of memberUserIds) {
-        this.chatGateway.server.to(Room.user(memberId)).emit('server:deleted', { serverId });
+        this.chatGateway.server
+          .to(Room.user(memberId))
+          .emit('server:deleted', { serverId });
       }
     } catch (broadcastErr) {
-      this.logger.warn(`Phát tán sự kiện server:deleted thất bại: ${broadcastErr}`);
+      this.logger.warn(
+        `Phát tán sự kiện server:deleted thất bại: ${broadcastErr}`,
+      );
     }
 
     return {
@@ -452,27 +758,36 @@ export class ServersService {
     if (rpcData && !rpcData.success) {
       if (rpcData.reason === 'owner_cannot_leave') {
         throw new ConflictException(
-          rpcData.message || 'Chủ sở hữu không thể rời máy chủ. Vui lòng chuyển quyền sở hữu hoặc xóa máy chủ.',
+          rpcData.message ||
+            'Chủ sở hữu không thể rời máy chủ. Vui lòng chuyển quyền sở hữu hoặc xóa máy chủ.',
         );
       }
-      throw new BadRequestException(rpcData.message || 'Không thể rời máy chủ.');
+      throw new BadRequestException(
+        rpcData.message || 'Không thể rời máy chủ.',
+      );
     }
 
     // Broadcast member-left nếu vừa thực sự rời
     if (!rpcData?.alreadyLeft) {
       try {
         // Broadcast tới server room
-        this.chatGateway.server.to(Room.server(serverId)).emit('server:member-left', {
-          serverId,
-          userId,
-        });
+        this.chatGateway.server
+          .to(Room.server(serverId))
+          .emit('server:member-left', {
+            serverId,
+            userId,
+          });
         // Broadcast tới user room của chính người rời để đồng bộ tất cả các phiên / tab đang mở
-        this.chatGateway.server.to(Room.user(userId)).emit('server:member-left', {
-          serverId,
-          userId,
-        });
+        this.chatGateway.server
+          .to(Room.user(userId))
+          .emit('server:member-left', {
+            serverId,
+            userId,
+          });
       } catch (broadcastErr) {
-        this.logger.warn(`Phát tán sự kiện server:member-left thất bại: ${broadcastErr}`);
+        this.logger.warn(
+          `Phát tán sự kiện server:member-left thất bại: ${broadcastErr}`,
+        );
       }
     }
 
@@ -500,12 +815,16 @@ export class ServersService {
       .maybeSingle();
 
     if (myMemErr) {
-      this.logger.error(`Lỗi kiểm tra quyền xem server members: ${myMemErr.message}`);
+      this.logger.error(
+        `Lỗi kiểm tra quyền xem server members: ${myMemErr.message}`,
+      );
       throw new InternalServerErrorException('Lỗi xác thực thành viên.');
     }
 
     if (!myMembership) {
-      throw new ForbiddenException('Bạn không phải là thành viên của máy chủ này.');
+      throw new ForbiddenException(
+        'Bạn không phải là thành viên của máy chủ này.',
+      );
     }
 
     // 2. Lấy danh sách server_members
@@ -515,7 +834,9 @@ export class ServersService {
       .eq('server_id', serverId);
 
     if (memErr) {
-      this.logger.error(`Lấy danh sách server_members thất bại: ${memErr.message}`);
+      this.logger.error(
+        `Lấy danh sách server_members thất bại: ${memErr.message}`,
+      );
       throw new InternalServerErrorException('Lỗi tải danh sách thành viên.');
     }
 
@@ -607,14 +928,18 @@ export class ServersService {
     // Broadcast tới Room.server(serverId) và Room.channel(channelId)
     try {
       this.chatGateway.emitChannelsInvalidated(serverId);
-      this.chatGateway.server.to(Room.server(serverId)).emit('server:channel-updated', {
-        serverId,
-        channel: result,
-      });
-      this.chatGateway.server.to(Room.channel(channelId)).emit('server:channel-updated', {
-        serverId,
-        channel: result,
-      });
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:channel-updated', {
+          serverId,
+          channel: result,
+        });
+      this.chatGateway.server
+        .to(Room.channel(channelId))
+        .emit('server:channel-updated', {
+          serverId,
+          channel: result,
+        });
     } catch (err) {
       this.logger.warn(`Phát tán server:channel-updated thất bại: ${err}`);
     }
@@ -660,14 +985,18 @@ export class ServersService {
     // Broadcast tới Room.server(serverId) và Room.channel(channelId)
     try {
       this.chatGateway.emitChannelsInvalidated(serverId);
-      this.chatGateway.server.to(Room.server(serverId)).emit('server:channel-deleted', {
-        serverId,
-        channelId,
-      });
-      this.chatGateway.server.to(Room.channel(channelId)).emit('server:channel-deleted', {
-        serverId,
-        channelId,
-      });
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:channel-deleted', {
+          serverId,
+          channelId,
+        });
+      this.chatGateway.server
+        .to(Room.channel(channelId))
+        .emit('server:channel-deleted', {
+          serverId,
+          channelId,
+        });
     } catch (err) {
       this.logger.warn(`Phát tán server:channel-deleted thất bại: ${err}`);
     }
@@ -678,6 +1007,140 @@ export class ServersService {
       serverId,
     };
   }
+
+  private mapStoredChannelStructure(
+    server: RawServerRow,
+  ): ServerChannelStructureDto | null {
+    const stored = server.channel_structure;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+      return null;
+    }
+
+    const structure = stored as ServerChannelStructureDto;
+    return {
+      ...structure,
+      revision: Number(server.channel_structure_revision ?? 0),
+      updatedAt: server.channel_structure_updated_at ?? null,
+    };
+  }
+
+  private validateAndNormalizeChannelStructure(
+    input: ServerChannelStructureDto,
+    knownChannelIds: Set<string>,
+  ): Omit<ServerChannelStructureDto, 'revision' | 'updatedAt'> {
+    if (!input || input.version !== 1) {
+      throw new BadRequestException('Phiên bản cấu trúc kênh không hợp lệ.');
+    }
+    if (!Array.isArray(input.categories) || input.categories.length > 100) {
+      throw new BadRequestException('Danh sách danh mục không hợp lệ.');
+    }
+    if (
+      !Array.isArray(input.rootItems) ||
+      !input.categoryChannels ||
+      typeof input.categoryChannels !== 'object' ||
+      Array.isArray(input.categoryChannels)
+    ) {
+      throw new BadRequestException('Bố cục kênh không hợp lệ.');
+    }
+
+    const categoryIds = new Set<string>();
+    const categories = input.categories.map((category) => {
+      const id = typeof category?.id === 'string' ? category.id.trim() : '';
+      const name =
+        typeof category?.name === 'string' ? category.name.trim() : '';
+      if (!id || id.length > 120 || categoryIds.has(id)) {
+        throw new BadRequestException(
+          'ID danh mục bị trùng hoặc không hợp lệ.',
+        );
+      }
+      if (!name || name.length > 100) {
+        throw new BadRequestException('Tên danh mục phải từ 1 đến 100 ký tự.');
+      }
+      categoryIds.add(id);
+      return { id, name, isPrivate: category.isPrivate === true };
+    });
+
+    const seenRootIds = new Set<string>();
+    const rootCategoryIds = new Set<string>();
+    const seenChannelIds = new Set<string>();
+    const rootItems: ServerChannelStructureRootItemDto[] = input.rootItems.map(
+      (item) => {
+        if (
+          !item ||
+          (item.kind !== 'category' && item.kind !== 'channel') ||
+          typeof item.id !== 'string' ||
+          !item.id.trim() ||
+          seenRootIds.has(item.id)
+        ) {
+          throw new BadRequestException(
+            'Phần tử cấp gốc của cấu trúc kênh không hợp lệ.',
+          );
+        }
+        seenRootIds.add(item.id);
+
+        if (item.kind === 'category') {
+          if (!categoryIds.has(item.id) || rootCategoryIds.has(item.id)) {
+            throw new BadRequestException(
+              'Danh mục cấp gốc không tồn tại hoặc bị trùng.',
+            );
+          }
+          rootCategoryIds.add(item.id);
+        } else {
+          if (!knownChannelIds.has(item.id) || seenChannelIds.has(item.id)) {
+            throw new BadRequestException(
+              'Kênh cấp gốc không tồn tại hoặc bị trùng.',
+            );
+          }
+          seenChannelIds.add(item.id);
+        }
+
+        return {
+          kind: item.kind,
+          id: item.id,
+        } as ServerChannelStructureRootItemDto;
+      },
+    );
+
+    if (rootCategoryIds.size !== categoryIds.size) {
+      throw new BadRequestException(
+        'Mỗi danh mục phải xuất hiện đúng một lần ở cấp gốc.',
+      );
+    }
+
+    const categoryChannels: Record<string, string[]> = {};
+    for (const key of Object.keys(input.categoryChannels)) {
+      if (!categoryIds.has(key)) {
+        throw new BadRequestException('Cấu trúc chứa danh mục không tồn tại.');
+      }
+    }
+    for (const categoryId of categoryIds) {
+      const channelIds = input.categoryChannels[categoryId];
+      if (!Array.isArray(channelIds)) {
+        throw new BadRequestException(
+          'Danh sách kênh con của danh mục không hợp lệ.',
+        );
+      }
+      categoryChannels[categoryId] = channelIds.map((channelId) => {
+        if (
+          typeof channelId !== 'string' ||
+          !knownChannelIds.has(channelId) ||
+          seenChannelIds.has(channelId)
+        ) {
+          throw new BadRequestException(
+            'Kênh con không tồn tại hoặc xuất hiện nhiều lần.',
+          );
+        }
+        seenChannelIds.add(channelId);
+        return channelId;
+      });
+    }
+
+    if (seenChannelIds.size !== knownChannelIds.size) {
+      throw new BadRequestException(
+        'Mọi kênh của máy chủ phải xuất hiện đúng một lần.',
+      );
+    }
+
+    return { version: 1, categories, rootItems, categoryChannels };
+  }
 }
-
-

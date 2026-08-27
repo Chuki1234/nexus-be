@@ -37,6 +37,7 @@ import {
   type UserBlockCreatedEvent,
   type UserBlockRemovedEvent,
   type RelationshipInvalidatedEvent,
+  type FriendRequestReceivedEvent,
 } from './constants/chat-events.constant';
 
 interface SocketData {
@@ -836,10 +837,138 @@ export class ChatGateway
         });
       }
     } else if (channelId) {
-      // Broadcast tới channel room
+      // Broadcast tới channel room (người đang mở kênh)
       this.server
         ?.to(Room.channel(channelId))
         .emit('message:created', { message });
+
+      // Thông báo chưa đọc/nhắc tên tới toàn bộ thành viên server (kể cả người
+      // không mở kênh) qua server room + user room. Không chặn luồng chính.
+      void this.fanoutChannelUnread(channelId, message).catch((err) =>
+        this.logger.error(
+          `[ChatGateway] fanoutChannelUnread lỗi cho kênh ${channelId}: ${String(err)}`,
+        ),
+      );
+    }
+  }
+
+  /**
+   * Phát tín hiệu chưa đọc + nhắc tên cho một tin nhắn kênh.
+   *
+   * - Broadcast `unread:update` (delta) tới `server room` để mọi thành viên online
+   *   tăng badge kênh/server — client tự bỏ qua tin của chính mình và kênh đang mở.
+   * - `@everyone`: coi như nhắc tên toàn server (mentionCount trong broadcast) và
+   *   phát `notification:new` popup tới server room.
+   * - `@username`: giải mã sang thành viên server, phát thêm mention delta + popup
+   *   riêng tới user room của họ (khi không có `@everyone`).
+   */
+  private async fanoutChannelUnread(
+    channelId: string,
+    message: MessagePayload,
+  ): Promise<void> {
+    if (!this.server) return;
+    // Chỉ tin nhắn thường mới sinh thông báo (bỏ qua system join/leave).
+    if (message.type && message.type !== 'default') return;
+
+    const { data: channel } = await this.supabase.client
+      .from('channels')
+      .select('id, server_id, name, type')
+      .eq('id', channelId)
+      .maybeSingle();
+    if (!channel?.server_id || channel.type !== 'text') return;
+
+    const serverId = channel.server_id as string;
+    const authorId = message.authorId ?? null;
+    const content = message.content ?? '';
+    const mentionsEveryone = /(^|\s)@(everyone|here)\b/i.test(content);
+
+    // 1. Broadcast unread (+ mention nếu @everyone) tới toàn server room.
+    this.server.to(Room.server(serverId)).emit('unread:update', {
+      serverId,
+      channelId,
+      unreadCount: 1,
+      mentionCount: mentionsEveryone ? 1 : 0,
+      authorId,
+      messageId: message.id,
+    });
+
+    const { data: server } = await this.supabase.client
+      .from('servers')
+      .select('name')
+      .eq('id', serverId)
+      .maybeSingle();
+
+    const notificationBase = {
+      serverId,
+      channelId,
+      channelName: (channel.name as string) ?? null,
+      serverName: (server?.name as string) ?? null,
+      messageId: message.id,
+      authorId,
+      authorName:
+        message.author?.displayName ?? message.author?.username ?? null,
+      authorAvatarUrl: message.author?.avatarUrl ?? null,
+      preview: content ? content.slice(0, 120) : null,
+    };
+
+    if (mentionsEveryone) {
+      // Popup nhắc tên toàn server (client bỏ qua tác giả).
+      this.server.to(Room.server(serverId)).emit('notification:new', {
+        notification: {
+          id: `mention-${message.id}`,
+          type: 'mention',
+          payload: { ...notificationBase, mentionType: 'everyone' },
+          createdAt: message.createdAt,
+        },
+      });
+      return;
+    }
+
+    // 2. @username: giải mã sang thành viên server rồi phát mention riêng.
+    const usernames = Array.from(
+      new Set(
+        (content.match(/@([a-zA-Z0-9_.]+)/g) ?? [])
+          .map((m) => m.slice(1).toLowerCase())
+          .filter((u) => u && u !== 'everyone' && u !== 'here'),
+      ),
+    );
+    if (usernames.length === 0) return;
+
+    const { data: profiles } = await this.supabase.client
+      .from('profiles')
+      .select('id, username')
+      .in('username', usernames);
+    const mentionedIds = (profiles ?? [])
+      .map((p) => p.id as string)
+      .filter((id) => id && id !== authorId);
+    if (mentionedIds.length === 0) return;
+
+    // Chỉ giữ những người thực sự là thành viên server.
+    const { data: members } = await this.supabase.client
+      .from('server_members')
+      .select('user_id')
+      .eq('server_id', serverId)
+      .in('user_id', mentionedIds);
+    const targetIds = (members ?? []).map((m) => m.user_id as string);
+
+    for (const targetId of targetIds) {
+      // mentionCount:1, unreadCount:0 — tránh cộng trùng unread đã tính ở broadcast.
+      this.server.to(Room.user(targetId)).emit('unread:update', {
+        serverId,
+        channelId,
+        unreadCount: 0,
+        mentionCount: 1,
+        authorId,
+        messageId: message.id,
+      });
+      this.server.to(Room.user(targetId)).emit('notification:new', {
+        notification: {
+          id: `mention-${message.id}-${targetId}`,
+          type: 'mention',
+          payload: { ...notificationBase, mentionType: 'direct' },
+          createdAt: message.createdAt,
+        },
+      });
     }
   }
 
@@ -984,6 +1113,34 @@ export class ChatGateway
         ?.to(Room.channel(channelId))
         .emit('message:reaction-updated', payload);
     }
+  }
+
+  @OnEvent(CHAT_EVENTS.FRIEND_REQUEST_RECEIVED)
+  async handleFriendRequestReceived(
+    event: FriendRequestReceivedEvent,
+  ): Promise<void> {
+    if (!this.server) return;
+    const { data: requester } = await this.supabase.client
+      .from('profiles')
+      .select('username, display_name, avatar_url')
+      .eq('id', event.requesterId)
+      .maybeSingle();
+
+    this.server.to(Room.user(event.recipientId)).emit('notification:new', {
+      notification: {
+        id: `friend-request-${event.requesterId}`,
+        type: 'friend_request',
+        payload: {
+          requesterId: event.requesterId,
+          requesterName:
+            (requester?.display_name as string | null) ??
+            (requester?.username as string | null) ??
+            null,
+          requesterAvatarUrl: (requester?.avatar_url as string | null) ?? null,
+        },
+        createdAt: event.createdAt,
+      },
+    });
   }
 
   @OnEvent(CHAT_EVENTS.USER_BLOCK_CREATED)

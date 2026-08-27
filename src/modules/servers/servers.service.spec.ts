@@ -18,7 +18,10 @@ import { ServerPermissionsService } from './server-permissions.service';
 describe('ServersService', () => {
   let service: ServersService;
   let supabaseService: { client: any };
-  let chatGatewayMock: { server: { to: jest.Mock }; emitChannelsInvalidated: jest.Mock };
+  let chatGatewayMock: {
+    server: { to: jest.Mock };
+    emitChannelsInvalidated: jest.Mock;
+  };
   let emitMock: jest.Mock;
 
   beforeEach(async () => {
@@ -53,6 +56,9 @@ describe('ServersService', () => {
         {
           provide: ServerPermissionsService,
           useValue: {
+            getCapabilities: jest
+              .fn()
+              .mockResolvedValue({ canManageChannels: true }),
             getChannelPermissions: jest.fn().mockResolvedValue(~0n),
             assertChannelView: jest.fn().mockResolvedValue(undefined),
             assertChannelSend: jest.fn().mockResolvedValue(undefined),
@@ -67,6 +73,42 @@ describe('ServersService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  describe('channel structure validation', () => {
+    it('accepts a two-level layout containing every server channel exactly once', () => {
+      const result = (service as any).validateAndNormalizeChannelStructure(
+        {
+          version: 1,
+          categories: [{ id: 'cat-main', name: 'Chính' }],
+          rootItems: [
+            { kind: 'category', id: 'cat-main' },
+            { kind: 'channel', id: 'channel-root' },
+          ],
+          categoryChannels: { 'cat-main': ['channel-child'] },
+        },
+        new Set(['channel-root', 'channel-child']),
+      );
+
+      expect(result.categoryChannels['cat-main']).toEqual(['channel-child']);
+    });
+
+    it('rejects a layout that duplicates or omits a server channel', () => {
+      expect(() =>
+        (service as any).validateAndNormalizeChannelStructure(
+          {
+            version: 1,
+            categories: [{ id: 'cat-main', name: 'Chính' }],
+            rootItems: [
+              { kind: 'category', id: 'cat-main' },
+              { kind: 'channel', id: 'channel-1' },
+            ],
+            categoryChannels: { 'cat-main': ['channel-1'] },
+          },
+          new Set(['channel-1', 'channel-2']),
+        ),
+      ).toThrow(BadRequestException);
+    });
   });
 
   describe('getTemplates', () => {
@@ -300,12 +342,14 @@ describe('ServersService', () => {
           iconUrl: null,
           unread: false,
           mentionCount: 0,
+          channelStructure: null,
           channels: [
             {
               id: 'c-1',
               name: 'chào-mừng',
               type: 'text',
               topic: null,
+              position: 0,
               unread: false,
               mentionCount: 0,
             },
@@ -314,6 +358,7 @@ describe('ServersService', () => {
               name: 'Phòng chờ',
               type: 'voice',
               topic: null,
+              position: 1,
               unread: false,
               mentionCount: 0,
             },
@@ -347,13 +392,16 @@ describe('ServersService', () => {
 
       const result = await service.createChannel('user-1', 'server-1', dto);
 
-      expect(supabaseService.client.rpc).toHaveBeenCalledWith('create_server_channel', {
-        p_server_id: 'server-1',
-        p_user_id: 'user-1',
-        p_name: 'thảo-luận-mới',
-        p_type: 'text',
-        p_topic: 'Thảo luận các chủ đề mới',
-      });
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith(
+        'create_server_channel',
+        {
+          p_server_id: 'server-1',
+          p_user_id: 'user-1',
+          p_name: 'thảo-luận-mới',
+          p_type: 'text',
+          p_topic: 'Thảo luận các chủ đề mới',
+        },
+      );
 
       expect(result).toEqual({
         id: 'c-new-1',
@@ -373,7 +421,10 @@ describe('ServersService', () => {
 
       supabaseService.client.rpc.mockResolvedValue({
         data: null,
-        error: { code: '42501', message: 'Bạn không có quyền quản lý kênh trong máy chủ này' },
+        error: {
+          code: '42501',
+          message: 'Bạn không có quyền quản lý kênh trong máy chủ này',
+        },
       });
 
       await expect(
@@ -398,7 +449,10 @@ describe('ServersService', () => {
 
       supabaseService.client.rpc.mockResolvedValue({
         data: null,
-        error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+        error: {
+          code: '23505',
+          message: 'duplicate key value violates unique constraint',
+        },
       });
 
       await expect(
@@ -431,7 +485,9 @@ describe('ServersService', () => {
       });
 
       // Kiểm tra broadcast server room
-      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(
+        Room.server(serverId),
+      );
       expect(emitMock).toHaveBeenCalledWith('server:deleted', { serverId });
 
       // Kiểm tra broadcast user rooms
@@ -443,12 +499,15 @@ describe('ServersService', () => {
     it('should throw ForbiddenException if user is not owner (code 42501)', async () => {
       supabaseService.client.rpc.mockResolvedValue({
         data: null,
-        error: { code: '42501', message: 'Chỉ chủ sở hữu máy chủ mới có quyền xóa máy chủ' },
+        error: {
+          code: '42501',
+          message: 'Chỉ chủ sở hữu máy chủ mới có quyền xóa máy chủ',
+        },
       });
 
-      await expect(service.deleteServer('usr-member', 'srv-100')).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.deleteServer('usr-member', 'srv-100'),
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it('should throw NotFoundException if server does not exist (code P0002)', async () => {
@@ -457,9 +516,9 @@ describe('ServersService', () => {
         error: { code: 'P0002', message: 'Máy chủ không tồn tại' },
       });
 
-      await expect(service.deleteServer('usr-owner', 'srv-nonexistent')).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.deleteServer('usr-owner', 'srv-nonexistent'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -485,9 +544,14 @@ describe('ServersService', () => {
         p_user_id: userId,
       });
 
-      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.server(serverId));
+      expect(chatGatewayMock.server.to).toHaveBeenCalledWith(
+        Room.server(serverId),
+      );
       expect(chatGatewayMock.server.to).toHaveBeenCalledWith(Room.user(userId));
-      expect(emitMock).toHaveBeenCalledWith('server:member-left', { serverId, userId });
+      expect(emitMock).toHaveBeenCalledWith('server:member-left', {
+        serverId,
+        userId,
+      });
     });
 
     it('should return alreadyLeft: true without re-broadcasting if already left (idempotent)', async () => {
@@ -514,12 +578,15 @@ describe('ServersService', () => {
         data: {
           success: false,
           reason: 'owner_cannot_leave',
-          message: 'Chủ sở hữu không thể rời máy chủ. Vui lòng chuyển quyền sở hữu hoặc xóa máy chủ.',
+          message:
+            'Chủ sở hữu không thể rời máy chủ. Vui lòng chuyển quyền sở hữu hoặc xóa máy chủ.',
         },
         error: null,
       });
 
-      await expect(service.leaveServer('usr-owner', 'srv-100')).rejects.toThrow(ConflictException);
+      await expect(service.leaveServer('usr-owner', 'srv-100')).rejects.toThrow(
+        ConflictException,
+      );
     });
   });
 
@@ -548,13 +615,16 @@ describe('ServersService', () => {
 
       expect(res.name).toBe('general-chat');
       expect(res.topic).toBe('New topic');
-      expect(supabaseService.client.rpc).toHaveBeenCalledWith('update_server_channel', {
-        p_server_id: serverId,
-        p_channel_id: channelId,
-        p_user_id: userId,
-        p_name: 'general-chat',
-        p_topic: 'New topic',
-      });
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith(
+        'update_server_channel',
+        {
+          p_server_id: serverId,
+          p_channel_id: channelId,
+          p_user_id: userId,
+          p_name: 'general-chat',
+          p_topic: 'New topic',
+        },
+      );
       expect(emitMock).toHaveBeenCalledWith('server:channel-updated', {
         serverId,
         channel: res,
@@ -564,7 +634,10 @@ describe('ServersService', () => {
     it('updateChannel throws ForbiddenException when user lacks MANAGE_CHANNELS (code 42501)', async () => {
       supabaseService.client.rpc.mockResolvedValue({
         data: null,
-        error: { code: '42501', message: 'Bạn không có quyền quản lý kênh trong máy chủ này' },
+        error: {
+          code: '42501',
+          message: 'Bạn không có quyền quản lý kênh trong máy chủ này',
+        },
       });
 
       await expect(
@@ -593,12 +666,15 @@ describe('ServersService', () => {
     it('deleteChannel throws BadRequestException when attempting to delete the only text channel (code 22023)', async () => {
       supabaseService.client.rpc.mockResolvedValue({
         data: null,
-        error: { code: '22023', message: 'Không thể xóa kênh chữ duy nhất còn lại của máy chủ' },
+        error: {
+          code: '22023',
+          message: 'Không thể xóa kênh chữ duy nhất còn lại của máy chủ',
+        },
       });
 
-      await expect(service.deleteChannel(userId, serverId, channelId)).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(
+        service.deleteChannel(userId, serverId, channelId),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('updateChannel: Deferred Barrier kiểm thử hai requests đồng thời tới RPC và emit events độc lập', async () => {
@@ -617,31 +693,37 @@ describe('ServersService', () => {
         resolveReached = resolve;
       });
 
-      supabaseService.client.rpc.mockImplementation(async (rpcName: string, params: any) => {
-        if (rpcName === 'update_server_channel') {
-          callOrder.push(params.p_name);
-          arrivedCount++;
-          if (arrivedCount === 2) {
-            resolveReached();
+      supabaseService.client.rpc.mockImplementation(
+        async (rpcName: string, params: any) => {
+          if (rpcName === 'update_server_channel') {
+            callOrder.push(params.p_name);
+            arrivedCount++;
+            if (arrivedCount === 2) {
+              resolveReached();
+            }
+            await proceedPromise;
+            return {
+              data: {
+                id: channelId,
+                serverId,
+                name: params.p_name,
+                type: 'text',
+                topic: null,
+                position: 0,
+              },
+              error: null,
+            };
           }
-          await proceedPromise;
-          return {
-            data: {
-              id: channelId,
-              serverId,
-              name: params.p_name,
-              type: 'text',
-              topic: null,
-              position: 0,
-            },
-            error: null,
-          };
-        }
-        return { data: null, error: null };
-      });
+          return { data: null, error: null };
+        },
+      );
 
-      const p1 = service.updateChannel(userId, serverId, channelId, { name: 'chan-a' });
-      const p2 = service.updateChannel(userId, serverId, channelId, { name: 'chan-b' });
+      const p1 = service.updateChannel(userId, serverId, channelId, {
+        name: 'chan-a',
+      });
+      const p2 = service.updateChannel(userId, serverId, channelId, {
+        name: 'chan-b',
+      });
 
       // Chờ cả 2 request cùng tới RPC barrier
       await reachedPromise;
@@ -655,10 +737,10 @@ describe('ServersService', () => {
       expect(res1.name).toBe('chan-a');
       expect(res2.name).toBe('chan-b');
       expect(supabaseService.client.rpc).toHaveBeenCalledTimes(2);
-      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledWith(serverId);
+      expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledWith(
+        serverId,
+      );
       expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledTimes(2);
     });
   });
 });
-
-

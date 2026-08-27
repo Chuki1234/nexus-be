@@ -13,7 +13,14 @@ export const CHAT_EVENTS = {
   USER_BLOCK_REMOVED: 'user.block.removed',
   RELATIONSHIP_INVALIDATED: 'relationship.invalidated',
   DIRECT_CALL_TERMINATED: 'direct_call.terminated',
+  FRIEND_REQUEST_RECEIVED: 'friend.request.received',
 } as const;
+
+export interface FriendRequestReceivedEvent {
+  recipientId: string;
+  requesterId: string;
+  createdAt: string;
+}
 
 export interface ConversationDeletedEvent {
   conversationId: string;
