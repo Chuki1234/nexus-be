@@ -166,4 +166,37 @@ export class AuthController {
   ): Promise<void> {
     await this.auth.deleteAccount(user, dto.email);
   }
+
+  /**
+   * POST /api/auth/verify-password
+   * Xác thực mật khẩu hiện tại trong thời gian thực.
+   */
+  @Post('verify-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  async verifyPassword(
+    @CurrentUser() user: User,
+    @Body() body: { password?: string },
+  ): Promise<{ valid: boolean }> {
+    const valid = await this.auth.verifyCurrentPassword(user, body?.password ?? '');
+    return { valid };
+  }
+
+  /**
+   * POST /api/auth/change-password
+   * Cập nhật mật khẩu mới cho tài khoản.
+   */
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  async changePassword(
+    @CurrentUser() user: User,
+    @Body() body: { currentPassword?: string; newPassword?: string },
+  ): Promise<{ success: boolean; message: string }> {
+    return this.auth.changePassword(
+      user,
+      body?.currentPassword ?? '',
+      body?.newPassword ?? '',
+    );
+  }
 }

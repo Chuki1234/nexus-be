@@ -59,4 +59,10 @@ export class UnenrollDto {
   @MinLength(1, { message: 'Thiếu factorId.' })
   @MaxLength(200, { message: 'factorId không hợp lệ.' })
   factorId: string;
+
+  @Transform(trim)
+  @IsString({ message: 'Vui lòng nhập mã xác thực từ Google Authenticator.' })
+  @MinLength(6, { message: 'Mã xác thực phải có ít nhất 6 ký tự.' })
+  @MaxLength(20, { message: 'Mã xác thực không hợp lệ.' })
+  code: string;
 }

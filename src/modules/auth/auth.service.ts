@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   InternalServerErrorException,
@@ -407,5 +408,51 @@ export class AuthService {
         `Không xoá được auth user mồ côi ${userId}: ${error.message}`,
       );
     }
+  }
+
+  async verifyCurrentPassword(user: User, password: string): Promise<boolean> {
+    if (!password || !user.email) return false;
+    try {
+      const { data, error } = await this.supabase.authClient.auth.signInWithPassword({
+        email: user.email,
+        password: password,
+      });
+      return !error && !!data?.session;
+    } catch {
+      return false;
+    }
+  }
+
+  async changePassword(
+    user: User,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ success: boolean; message: string }> {
+    if (!user.email) {
+      throw new BadRequestException('Tài khoản không có email xác thực.');
+    }
+    if (!newPassword || newPassword.length < 8) {
+      throw new BadRequestException('Mật khẩu mới phải có ít nhất 8 ký tự.');
+    }
+
+    const isValid = await this.verifyCurrentPassword(user, currentPassword);
+    if (!isValid) {
+      throw new BadRequestException('Mật khẩu hiện tại không chính xác.');
+    }
+
+    if (currentPassword === newPassword) {
+      throw new BadRequestException('Mật khẩu mới không được trùng với mật khẩu hiện tại.');
+    }
+
+    const { error } = await this.supabase.client.auth.admin.updateUserById(user.id, {
+      password: newPassword,
+    });
+
+    if (error) {
+      this.logger.error(`Đổi mật khẩu thất bại: ${error.message}`);
+      throw new InternalServerErrorException('Không thể cập nhật mật khẩu mới.');
+    }
+
+    return { success: true, message: 'Đổi mật khẩu thành công.' };
   }
 }
