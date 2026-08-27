@@ -99,23 +99,27 @@ export class ConversationsService {
     // (chưa có tin nhắn) thì đây là "message request" — phía NGƯỜI NHẬN để pending,
     // người khởi tạo (userId) vẫn accepted. Nếu đã là bạn thì đảm bảo cả hai accepted.
     const isFriend = await this.areFriends(userId, recipientId);
-    if (isFriend) {
-      await this.supabase.client
-        .from('conversation_participants')
-        .update({ request_state: 'accepted' })
-        .eq('conversation_id', convData.id);
-    } else {
-      const { count } = await this.supabase.client
-        .from('messages')
-        .select('id', { count: 'exact', head: true })
-        .eq('conversation_id', convData.id);
-      if (!count) {
+    try {
+      if (isFriend) {
         await this.supabase.client
           .from('conversation_participants')
-          .update({ request_state: 'pending' })
-          .eq('conversation_id', convData.id)
-          .eq('user_id', recipientId);
+          .update({ request_state: 'accepted' })
+          .eq('conversation_id', convData.id);
+      } else {
+        const { count } = await this.supabase.client
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('conversation_id', convData.id);
+        if (!count) {
+          await this.supabase.client
+            .from('conversation_participants')
+            .update({ request_state: 'pending' })
+            .eq('conversation_id', convData.id)
+            .eq('user_id', recipientId);
+        }
       }
+    } catch {
+      // Bỏ qua nếu cột request_state chưa được tạo trên DB
     }
 
     return {
@@ -193,13 +197,21 @@ export class ConversationsService {
     userId: string,
     conversationId: string,
   ): Promise<'pending' | 'accepted'> {
-    const { data } = await this.supabase.client
-      .from('conversation_participants')
-      .select('request_state')
-      .eq('conversation_id', conversationId)
-      .eq('user_id', userId)
-      .maybeSingle();
-    return (data?.request_state as 'pending' | 'accepted') ?? 'accepted';
+    try {
+      const { data, error } = await this.supabase.client
+        .from('conversation_participants')
+        .select('request_state')
+        .eq('conversation_id', conversationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (error) {
+        return 'accepted';
+      }
+      return (data?.request_state as 'pending' | 'accepted') ?? 'accepted';
+    } catch {
+      return 'accepted';
+    }
   }
 
   /**
@@ -231,13 +243,25 @@ export class ConversationsService {
     }
 
     // 3. Lấy tất cả participants của các conversations này để tìm người đối thoại (nếu là DM)
-    const { data: allParts, error: allPartsErr } = await this.supabase.client
+    let allParts: Array<{ conversation_id: string; user_id: string; request_state?: string }> = [];
+    const { data: allPartsData, error: allPartsErr } = await this.supabase.client
       .from('conversation_participants')
       .select('conversation_id, user_id, request_state')
       .in('conversation_id', convIds);
 
     if (allPartsErr) {
-      this.logger.error('Lỗi lấy all conversation_participants:', allPartsErr);
+      if (allPartsErr.code === '42703') {
+        // Fallback an toàn khi cột request_state chưa được tạo trên CSDL
+        const { data: fallbackParts } = await this.supabase.client
+          .from('conversation_participants')
+          .select('conversation_id, user_id')
+          .in('conversation_id', convIds);
+        allParts = (fallbackParts as any) ?? [];
+      } else {
+        this.logger.error('Lỗi lấy all conversation_participants:', allPartsErr);
+      }
+    } else {
+      allParts = (allPartsData as any) ?? [];
     }
 
     const otherUserIds = new Set<string>();
