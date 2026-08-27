@@ -49,6 +49,8 @@ export class VoiceService {
     const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,
       name: participantName,
+      // FE đọc metadata này để hiện đúng avatar trên tile gọi (thay vì chữ cái).
+      metadata: JSON.stringify({ avatarUrl: dto.avatarUrl ?? null }),
       ttl: '15m',
     });
 
