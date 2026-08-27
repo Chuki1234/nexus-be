@@ -9,6 +9,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { MediaService } from '../../infra/storage/media.service';
 import { Permission } from '../../shared/permissions';
 import { Room } from '../../shared/socket-events';
 import { ChatGateway } from '../realtime/chat.gateway';
@@ -19,6 +20,7 @@ import {
 } from './constants/server-templates.constant';
 import { CreateChannelDto } from './dto/create-channel.dto';
 import { CreateServerDto } from './dto/create-server.dto';
+import { UpdateServerDto } from './dto/update-server.dto';
 import {
   ChannelSummaryDto,
   CreateServerResponseDto,
@@ -59,6 +61,7 @@ export class ServersService {
     private readonly supabase: SupabaseService,
     private readonly chatGateway: ChatGateway,
     private readonly serverPermissions: ServerPermissionsService,
+    private readonly media: MediaService,
   ) {}
 
   /**
@@ -656,6 +659,108 @@ export class ServersService {
     }
 
     return result;
+  }
+
+  /**
+   * Cập nhật thông tin máy chủ (tên, ảnh đại diện/icon)
+   * - Chỉ Owner hoặc thành viên có quyền MANAGE_SERVER mới được cập nhật
+   * - Cập nhật bảng public.servers
+   * - Phát sự kiện server:updated tới Room.server(serverId) để toàn bộ thành viên cập nhật realtime
+   */
+  async updateServer(
+    userId: string,
+    serverId: string,
+    dto: UpdateServerDto,
+  ): Promise<{ id: string; name: string; iconUrl: string | null }> {
+    const caps = await this.serverPermissions.getCapabilities(userId, serverId);
+    if (!caps.isOwner && !caps.canManageServer) {
+      throw new ForbiddenException('Bạn không có quyền chỉnh sửa máy chủ này.');
+    }
+
+    const updates: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (dto.name !== undefined) {
+      const trimmed = dto.name.trim();
+      if (trimmed.length < 2 || trimmed.length > 100) {
+        throw new BadRequestException('Tên máy chủ phải từ 2 đến 100 ký tự.');
+      }
+      updates.name = trimmed;
+    }
+
+    if (dto.iconUrl !== undefined) {
+      updates.icon_url = dto.iconUrl ? dto.iconUrl.trim() || null : null;
+    }
+
+    const { data, error } = await this.supabase.client
+      .from('servers')
+      .update(updates)
+      .eq('id', serverId)
+      .select('id, name, icon_url')
+      .single();
+
+    if (error || !data) {
+      this.logger.error(`Cập nhật máy chủ thất bại: ${error?.message}`);
+      throw new InternalServerErrorException('Không thể cập nhật máy chủ.');
+    }
+
+    const res = {
+      id: data.id,
+      name: data.name,
+      iconUrl: data.icon_url,
+    };
+
+    // Broadcast realtime event to server room
+    try {
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:updated', {
+          serverId,
+          name: res.name,
+          iconUrl: res.iconUrl,
+        });
+    } catch (err) {
+      this.logger.warn(`Phát tán server:updated thất bại: ${err}`);
+    }
+
+    return res;
+  }
+
+  /**
+   * Upload icon máy chủ lên Supabase Storage, cập nhật cột icon_url và broadcast.
+   */
+  async uploadServerIcon(
+    userId: string,
+    serverId: string,
+    file: Express.Multer.File,
+  ): Promise<{ id: string; iconUrl: string }> {
+    const caps = await this.serverPermissions.getCapabilities(userId, serverId);
+    if (!caps.isOwner && !caps.canManageServer) {
+      throw new ForbiddenException('Bạn không có quyền chỉnh sửa máy chủ này.');
+    }
+
+    const iconUrl = await this.media.uploadServerIcon(serverId, file);
+
+    const { error } = await this.supabase.client
+      .from('servers')
+      .update({ icon_url: iconUrl, updated_at: new Date().toISOString() })
+      .eq('id', serverId);
+
+    if (error) {
+      this.logger.error(`Lưu icon_url thất bại (${serverId}): ${error.message}`);
+      throw new InternalServerErrorException('Không thể cập nhật icon máy chủ.');
+    }
+
+    try {
+      this.chatGateway.server
+        .to(Room.server(serverId))
+        .emit('server:updated', { serverId, name: '', iconUrl });
+    } catch (err) {
+      this.logger.warn(`Phát tán server:updated (icon) thất bại: ${err}`);
+    }
+
+    return { id: serverId, iconUrl };
   }
 
   /**

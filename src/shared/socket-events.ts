@@ -398,6 +398,13 @@ export interface ServerToClientEvents {
     };
   }) => void;
 
+  /** Sự kiện cập nhật thông tin máy chủ (tên, avatar icon) */
+  'server:updated': (payload: {
+    serverId: string;
+    name: string;
+    iconUrl: string | null;
+  }) => void;
+
   /** Sự kiện xóa máy chủ hoàn toàn (gửi vào server room và user rooms của từng thành viên) */
   'server:deleted': (payload: { serverId: string }) => void;
 

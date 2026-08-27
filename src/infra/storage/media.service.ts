@@ -118,6 +118,45 @@ export class MediaService {
   }
 
   /**
+   * Upload icon máy chủ vào bucket `server-icons`.
+   * Resize về 512×512 webp, path = `<serverId>/icon.webp` (ghi đè lần trước).
+   * Trả về public URL kèm `?v=<epoch>` để phá cache trình duyệt.
+   */
+  async uploadServerIcon(
+    serverId: string,
+    file: Express.Multer.File,
+  ): Promise<string> {
+    this.assertUploadable(file);
+
+    const optimized = await this.optimize(file.buffer, {
+      bucket: 'server-icons',
+      objectName: 'icon.webp',
+      width: 512,
+      height: 512,
+      quality: 82,
+    });
+
+    const path = `${serverId}/icon.webp`;
+    const { error } = await this.supabase.client.storage
+      .from('server-icons')
+      .upload(path, optimized, {
+        contentType: 'image/webp',
+        upsert: true,
+        cacheControl: '31536000',
+      });
+
+    if (error) {
+      this.logger.error(`Upload server icon thất bại (${serverId}): ${error.message}`);
+      throw new InternalServerErrorException('Không tải được ảnh lên. Vui lòng thử lại.');
+    }
+
+    const { data } = this.supabase.client.storage
+      .from('server-icons')
+      .getPublicUrl(path);
+    return `${data.publicUrl}?v=${Date.now()}`;
+  }
+
+  /**
    * Xoá ảnh khỏi bucket. Không ném lỗi khi file không tồn tại: người dùng chỉ
    * quan tâm hồ sơ hết ảnh, còn file rác trong bucket là chuyện của backend.
    */

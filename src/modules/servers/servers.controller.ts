@@ -8,8 +8,12 @@ import {
   Param,
   Patch,
   Post,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { MAX_UPLOAD_BYTES } from '../../infra/storage/media.service';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
@@ -28,6 +32,7 @@ import {
   CreateInviteLinkDto,
 } from './dto/create-invite.dto';
 import { CreateServerDto } from './dto/create-server.dto';
+import { UpdateServerDto } from './dto/update-server.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import {
   ServerChannelStructureDto,
@@ -255,6 +260,35 @@ export class ServersController {
     @Param('channelId') channelId: string,
   ): Promise<{ success: boolean; channelId: string; serverId: string }> {
     return this.servers.deleteChannel(user.id, serverId, channelId);
+  }
+
+  /**
+   * PATCH /api/servers/:serverId
+   * Cập nhật thông tin máy chủ (tên, avatar icon)
+   */
+  @Patch(':serverId')
+  @HttpCode(HttpStatus.OK)
+  updateServer(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: UpdateServerDto,
+  ): Promise<{ id: string; name: string; iconUrl: string | null }> {
+    return this.servers.updateServer(user.id, serverId, dto);
+  }
+
+  /**
+   * POST /api/servers/:serverId/icon — multipart, field `file`.
+   * Resize → Supabase Storage → cập nhật icon_url → broadcast realtime.
+   */
+  @Post(':serverId/icon')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } }))
+  uploadServerIcon(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<{ id: string; iconUrl: string }> {
+    return this.servers.uploadServerIcon(user.id, serverId, file);
   }
 
   /**
