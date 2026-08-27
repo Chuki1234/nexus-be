@@ -136,11 +136,21 @@ export class FriendsService {
       return [];
     }
 
+    const allFriendIds = rows.map((row) => this.otherUserId(row, userId));
+    const blockedSet = await this.getBlockedUserIds(userId, allFriendIds);
+    const filteredRows = blockedSet.size > 0
+      ? rows.filter((row) => !blockedSet.has(this.otherUserId(row, userId)))
+      : rows;
+
+    if (filteredRows.length === 0) {
+      return [];
+    }
+
     const profiles = await this.loadProfiles(
-      rows.map((row) => this.otherUserId(row, userId)),
+      filteredRows.map((row) => this.otherUserId(row, userId)),
     );
 
-    return rows.flatMap((row) => {
+    return filteredRows.flatMap((row) => {
       const profile = profiles.get(this.otherUserId(row, userId));
       return profile ? [this.toFriendSummary(profile, row.updated_at)] : [];
     });
@@ -508,10 +518,46 @@ export class FriendsService {
   async getAcceptedFriendUserIds(userId: string): Promise<string[]> {
     try {
       const rows = await this.listRelationships(userId, 'accepted');
-      return rows.map((row) => this.otherUserId(row, userId));
+      if (rows.length === 0) return [];
+      const allIds = rows.map((row) => this.otherUserId(row, userId));
+      const blockedSet = await this.getBlockedUserIds(userId, allIds);
+      return blockedSet.size > 0
+        ? allIds.filter((id) => !blockedSet.has(id))
+        : allIds;
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Trả về tập ID bị block theo cả 2 chiều (userId block họ, hoặc họ block userId)
+   * trong danh sách candidateIds cho trước.
+   */
+  private async getBlockedUserIds(
+    userId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    if (candidateIds.length === 0) return new Set();
+
+    const orFilter = candidateIds
+      .map(
+        (id) =>
+          `and(blocker_id.eq.${userId},blocked_user_id.eq.${id}),and(blocker_id.eq.${id},blocked_user_id.eq.${userId})`,
+      )
+      .join(',');
+
+    const { data } = await this.supabase.client
+      .from('user_blocks')
+      .select('blocker_id, blocked_user_id')
+      .or(orFilter);
+
+    const blocked = new Set<string>();
+    for (const row of (
+      data as Array<{ blocker_id: string; blocked_user_id: string }> | null
+    ) ?? []) {
+      blocked.add(row.blocker_id === userId ? row.blocked_user_id : row.blocker_id);
+    }
+    return blocked;
   }
 
   private async listRelationships(
