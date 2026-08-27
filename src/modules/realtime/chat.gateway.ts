@@ -1,5 +1,5 @@
 import { forwardRef, Inject, Logger, OnModuleInit } from '@nestjs/common';
-import { OnEvent } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -94,6 +94,7 @@ export class ChatGateway
     private readonly serverPermissionsService: ServerPermissionsService,
     private readonly presenceService: PresenceService,
     private readonly redisState: RedisStateService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   onModuleInit(): void {
@@ -1433,6 +1434,7 @@ export class ChatGateway
       .to(Room.server(serverId))
       .emit('server:member-left', { serverId, userId });
     this.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+    this.eventEmitter.emit(CHAT_EVENTS.SERVER_MEMBER_LEFT, { serverId, userId });
   }
 
   emitServerMemberJoined(serverId: string, member: ServerMemberDto): void {
@@ -1445,5 +1447,9 @@ export class ChatGateway
         role: member.role,
         member,
       });
+    this.eventEmitter.emit(CHAT_EVENTS.SERVER_MEMBER_JOINED, {
+      serverId,
+      userId: member.userId,
+    });
   }
 }

@@ -7,14 +7,18 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import * as crypto from 'node:crypto';
 import sharp from 'sharp';
 import type { PostgrestError } from '@supabase/supabase-js';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
-import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
+import {
+  CHAT_EVENTS,
+  type ServerMemberJoinedEvent,
+  type ServerMemberLeftEvent,
+} from '../realtime/constants/chat-events.constant';
 import { Permission } from '../../shared/permissions';
 import type { EditMessageDto } from './dto/edit-message.dto';
 import type { ForwardMessageDto } from './dto/forward-message.dto';
@@ -1167,6 +1171,18 @@ export class MessagesService {
     if (!isMember) {
       throw new ForbiddenException(
         'Bạn không phải là thành viên của cuộc trò chuyện này.',
+      );
+    }
+
+    // "Message request" từ người lạ: người nhận đang chờ duyệt thì CHƯA được nhắn
+    // (chỉ đọc) cho tới khi bấm "Chấp nhận". Người khởi tạo (accepted) vẫn gửi được.
+    const myRequestState = await this.conversationsService.getRequestState(
+      userId,
+      conversationId,
+    );
+    if (myRequestState === 'pending') {
+      throw new ForbiddenException(
+        'Bạn cần chấp nhận cuộc trò chuyện này trước khi nhắn tin.',
       );
     }
 
@@ -3535,6 +3551,107 @@ export class MessagesService {
       this.logger.error(
         `[Compensating Cleanup Storage Exception] correlationId=${correlationId} paths=${paths.join(', ')}: ${err?.message}`,
       );
+    }
+  }
+
+  @OnEvent(CHAT_EVENTS.SERVER_MEMBER_JOINED)
+  async handleServerMemberJoined(event: ServerMemberJoinedEvent): Promise<void> {
+    await this.createServerSystemMessage(
+      event.serverId,
+      event.userId,
+      'system_join',
+      'đã tham gia máy chủ.',
+    );
+  }
+
+  @OnEvent(CHAT_EVENTS.SERVER_MEMBER_LEFT)
+  async handleServerMemberLeft(event: ServerMemberLeftEvent): Promise<void> {
+    await this.createServerSystemMessage(
+      event.serverId,
+      event.userId,
+      'system_leave',
+      'đã rời khỏi máy chủ.',
+    );
+  }
+
+  /**
+   * Tạo tin nhắn hệ thống (system_join / system_leave) trong kênh văn bản chính của máy chủ.
+   */
+  async createServerSystemMessage(
+    serverId: string,
+    userId: string,
+    type: 'system_join' | 'system_leave',
+    content: string,
+  ): Promise<MessageResponseDto | null> {
+    try {
+      // 1. Tìm kênh chat chữ mặc định/chính (kênh text đầu tiên theo position)
+      const { data: channel, error: channelErr } = await this.supabase.client
+        .from('channels')
+        .select('id')
+        .eq('server_id', serverId)
+        .eq('type', 'text')
+        .order('position', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (channelErr || !channel) {
+        this.logger.warn(
+          `Không tìm thấy kênh văn bản để gửi tin nhắn hệ thống cho server ${serverId}`,
+        );
+        return null;
+      }
+
+      // 2. Chèn tin nhắn hệ thống vào DB
+      const { data: insertedMsg, error: insertErr } = await this.supabase.client
+        .from('messages')
+        .insert({
+          channel_id: channel.id,
+          author_id: userId,
+          type,
+          content,
+        })
+        .select('id, channel_id, author_id, type, content, created_at')
+        .single();
+
+      if (insertErr || !insertedMsg) {
+        this.logger.error(
+          `Lỗi lưu tin nhắn hệ thống (${type}) vào kênh ${channel.id}: ${insertErr?.message}`,
+        );
+        return null;
+      }
+
+      const author = await this.getAuthorProfile(userId);
+
+      const responseDto: MessageResponseDto = {
+        id: String(insertedMsg.id),
+        channelId: insertedMsg.channel_id,
+        conversationId: null,
+        authorId: userId,
+        author,
+        type,
+        content,
+        isForwarded: false,
+        externalMedia: null,
+        replyToId: null,
+        clientNonce: null,
+        editedAt: null,
+        deletedAt: null,
+        reactions: [],
+        createdAt: insertedMsg.created_at,
+      };
+
+      this.eventEmitter.emit(CHAT_EVENTS.MESSAGE_CREATED, {
+        conversationId: null,
+        channelId: channel.id,
+        message: responseDto,
+      });
+
+      return responseDto;
+    } catch (err: any) {
+      this.logger.error(
+        `createServerSystemMessage gặp lỗi: ${err?.message || err}`,
+      );
+      return null;
     }
   }
 

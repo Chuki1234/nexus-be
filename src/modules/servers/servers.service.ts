@@ -770,20 +770,7 @@ export class ServersService {
     // Broadcast member-left nếu vừa thực sự rời
     if (!rpcData?.alreadyLeft) {
       try {
-        // Broadcast tới server room
-        this.chatGateway.server
-          .to(Room.server(serverId))
-          .emit('server:member-left', {
-            serverId,
-            userId,
-          });
-        // Broadcast tới user room của chính người rời để đồng bộ tất cả các phiên / tab đang mở
-        this.chatGateway.server
-          .to(Room.user(userId))
-          .emit('server:member-left', {
-            serverId,
-            userId,
-          });
+        this.chatGateway.emitServerMemberLeft(serverId, userId);
       } catch (broadcastErr) {
         this.logger.warn(
           `Phát tán sự kiện server:member-left thất bại: ${broadcastErr}`,

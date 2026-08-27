@@ -6,8 +6,10 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { PresenceStatus } from '../../shared/dto/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
+import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
 import type {
   ConversationParticipantProfile,
   ConversationResponseDto,
@@ -43,7 +45,10 @@ const PRESENCE_VALUES = new Set<PresenceStatus>([
 export class ConversationsService {
   private readonly logger = new Logger(ConversationsService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
 
   /**
    * Tìm hoặc tạo cuộc trò chuyện trực tiếp (DM) giữa 2 người dùng.
@@ -90,6 +95,29 @@ export class ConversationsService {
 
     const recipient = await this.getParticipantProfile(recipientId);
 
+    // Trạng thái duyệt: nếu HAI người chưa là bạn bè và cuộc trò chuyện còn mới
+    // (chưa có tin nhắn) thì đây là "message request" — phía NGƯỜI NHẬN để pending,
+    // người khởi tạo (userId) vẫn accepted. Nếu đã là bạn thì đảm bảo cả hai accepted.
+    const isFriend = await this.areFriends(userId, recipientId);
+    if (isFriend) {
+      await this.supabase.client
+        .from('conversation_participants')
+        .update({ request_state: 'accepted' })
+        .eq('conversation_id', convData.id);
+    } else {
+      const { count } = await this.supabase.client
+        .from('messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('conversation_id', convData.id);
+      if (!count) {
+        await this.supabase.client
+          .from('conversation_participants')
+          .update({ request_state: 'pending' })
+          .eq('conversation_id', convData.id)
+          .eq('user_id', recipientId);
+      }
+    }
+
     return {
       id: convData.id,
       type: convData.type,
@@ -98,7 +126,80 @@ export class ConversationsService {
       recipient,
       unreadCount: 0,
       createdAt: convData.created_at,
+      requestState: 'accepted',
+      isFriend,
     };
+  }
+
+  /** Hai user có phải bạn bè (accepted) của nhau không. */
+  private async areFriends(a: string, b: string): Promise<boolean> {
+    const { data } = await this.supabase.client
+      .from('friendships')
+      .select('status')
+      .eq('status', 'accepted')
+      .or(
+        `and(user_a_id.eq.${a},user_b_id.eq.${b}),and(user_a_id.eq.${b},user_b_id.eq.${a})`,
+      )
+      .limit(1);
+    return !!(data && data.length > 0);
+  }
+
+  /**
+   * Người nhận CHẤP NHẬN một message request — mở khoá nhắn tin/gọi.
+   */
+  async acceptRequest(userId: string, conversationId: string): Promise<void> {
+    const isMember = await this.verifyMembership(userId, conversationId);
+    if (!isMember) {
+      throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+    }
+    await this.supabase.client
+      .from('conversation_participants')
+      .update({ request_state: 'accepted' })
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId);
+  }
+
+  /**
+   * Người nhận TỪ CHỐI — xoá hẳn cuộc trò chuyện (theo lựa chọn sản phẩm).
+   * Trả về danh sách participant để tầng gọi phát realtime `conversation:deleted`.
+   */
+  async declineRequest(
+    userId: string,
+    conversationId: string,
+  ): Promise<{ participantIds: string[] }> {
+    const isMember = await this.verifyMembership(userId, conversationId);
+    if (!isMember) {
+      throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+    }
+    const participantIds = await this.getParticipantIds(conversationId);
+    await this.supabase.client
+      .from('conversations')
+      .delete()
+      .eq('id', conversationId);
+
+    // Báo realtime cho cả hai phía để xoá khỏi danh sách ngay.
+    const other = participantIds.find((id) => id !== userId) ?? userId;
+    this.eventEmitter.emit(CHAT_EVENTS.CONVERSATION_DELETED, {
+      conversationId,
+      userId,
+      friendId: other,
+    });
+
+    return { participantIds };
+  }
+
+  /** Trạng thái duyệt của một user trong một DM (mặc định 'accepted'). */
+  async getRequestState(
+    userId: string,
+    conversationId: string,
+  ): Promise<'pending' | 'accepted'> {
+    const { data } = await this.supabase.client
+      .from('conversation_participants')
+      .select('request_state')
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    return (data?.request_state as 'pending' | 'accepted') ?? 'accepted';
   }
 
   /**
@@ -132,7 +233,7 @@ export class ConversationsService {
     // 3. Lấy tất cả participants của các conversations này để tìm người đối thoại (nếu là DM)
     const { data: allParts, error: allPartsErr } = await this.supabase.client
       .from('conversation_participants')
-      .select('conversation_id, user_id')
+      .select('conversation_id, user_id, request_state')
       .in('conversation_id', convIds);
 
     if (allPartsErr) {
@@ -141,9 +242,16 @@ export class ConversationsService {
 
     const otherUserIds = new Set<string>();
     const convToOtherUser = new Map<string, string>();
+    // Trạng thái duyệt của CHÍNH user trong từng DM (để tách "Người lạ" vs DM thường).
+    const myStateMap = new Map<string, 'pending' | 'accepted'>();
 
     for (const p of allParts ?? []) {
-      if (p.user_id !== userId) {
+      if (p.user_id === userId) {
+        myStateMap.set(
+          p.conversation_id as string,
+          (p.request_state as 'pending' | 'accepted') ?? 'accepted',
+        );
+      } else {
         otherUserIds.add(p.user_id as string);
         convToOtherUser.set(p.conversation_id as string, p.user_id as string);
       }
@@ -202,12 +310,12 @@ export class ConversationsService {
     for (const conv of convs as RawConversationRow[]) {
       const otherId = convToOtherUser.get(conv.id);
 
-      // Nếu là cuộc trò chuyện DM trực tiếp mà không còn quan hệ bạn bè accepted -> loại bỏ
-      if (conv.type === 'dm') {
-        if (!otherId || !acceptedFriendIds.has(otherId)) {
-          orphanConvIds.push(conv.id);
-          continue;
-        }
+      // DM phải còn người đối thoại; nếu profile người kia biến mất hẳn thì mới là
+      // mồ côi thật. KHÔNG còn xoá DM chỉ vì chưa kết bạn — DM người-lạ vẫn giữ để
+      // hiện ở mục "Người lạ" (message request) / Tin nhắn trực tiếp.
+      if (conv.type === 'dm' && (!otherId || !profileMap.has(otherId))) {
+        orphanConvIds.push(conv.id);
+        continue;
       }
 
       const recipient = otherId ? profileMap.get(otherId) : undefined;
@@ -219,10 +327,12 @@ export class ConversationsService {
         recipient,
         unreadCount: unreadMap.get(conv.id) ?? 0,
         createdAt: conv.created_at,
+        requestState: conv.type === 'dm' ? (myStateMap.get(conv.id) ?? 'accepted') : 'accepted',
+        isFriend: otherId ? acceptedFriendIds.has(otherId) : false,
       });
     }
 
-    // Tự động dọn dẹp các DM mồ côi trong background nếu có
+    // Chỉ dọn DM mồ côi THẬT (mất người đối thoại), không đụng DM người-lạ.
     if (orphanConvIds.length > 0) {
       void this.supabase.client
         .from('conversations')
@@ -273,6 +383,15 @@ export class ConversationsService {
       }
     }
 
+    const requestState =
+      rawConv.type === 'dm'
+        ? await this.getRequestState(userId, conversationId)
+        : 'accepted';
+    const isFriend =
+      rawConv.type === 'dm' && recipient
+        ? await this.areFriends(userId, recipient.id)
+        : false;
+
     return {
       id: rawConv.id,
       type: rawConv.type,
@@ -281,6 +400,8 @@ export class ConversationsService {
       recipient,
       unreadCount: 0,
       createdAt: rawConv.created_at,
+      requestState,
+      isFriend,
     };
   }
 
