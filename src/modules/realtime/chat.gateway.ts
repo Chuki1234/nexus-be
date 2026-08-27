@@ -270,9 +270,7 @@ export class ChatGateway
   }
 
   @SubscribeMessage('presence:get-snapshot')
-  async handleGetPresenceSnapshot(
-    client: TypedSocket,
-  ): Promise<{
+  async handleGetPresenceSnapshot(client: TypedSocket): Promise<{
     presences: Record<string, { status: any; lastSeenAt: string | null }>;
   }> {
     const userId = client.data.userId;
@@ -995,14 +993,12 @@ export class ChatGateway
   }): void {
     const { channelId, conversationId, message, pinned } = event;
     if (channelId) {
-      this.server
-        ?.to(Room.channel(channelId))
-        .emit('message:pin-updated', {
-          channelId,
-          conversationId: null,
-          message,
-          pinned,
-        });
+      this.server?.to(Room.channel(channelId)).emit('message:pin-updated', {
+        channelId,
+        conversationId: null,
+        message,
+        pinned,
+      });
     } else if (conversationId) {
       this.server
         ?.to(Room.conversation(conversationId))
@@ -1193,6 +1189,9 @@ export class ChatGateway
       map.set(targetId, users);
     }
 
+    // Set giữ insertion order. Xóa rồi thêm lại để phần tử cuối luôn là người
+    // có hoạt động gõ gần nhất, đồng nhất với Redis ZSET theo expiry score.
+    users.delete(userId);
     users.add(userId);
     this.broadcastTypingUpdate(targetId, isChannel);
     this.refreshTypingTimer(targetId, userId, isChannel);

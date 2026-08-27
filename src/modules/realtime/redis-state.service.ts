@@ -52,9 +52,11 @@ export class RedisStateService
   }) => void;
 
   constructor() {
-    this.instanceId =
-      process.env.INSTANCE_ID ||
-      `${os.hostname()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+    // INSTANCE_ID chỉ là nhãn deployment, không được dùng nguyên xi làm định danh
+    // một process. Nếu backend restart với cùng INSTANCE_ID, socket của process cũ
+    // sẽ mang cùng prefix và không bao giờ bị dead-instance sweeper nhận ra.
+    const instanceLabel = process.env.INSTANCE_ID || os.hostname();
+    this.instanceId = `${instanceLabel}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
     this.keyPrefix = process.env.REDIS_KEY_PREFIX || 'nexuscord:dev:';
   }
 
@@ -653,7 +655,67 @@ export class RedisStateService
         this.logger.log(`Hoàn tất dọn dẹp instance chết ${instId}`);
       }
     }
+    // Những phiên bản cũ từng xóa instance index trước khi xóa socket hashes.
+    // Quét thêm active_users để tự chữa các socket mồ côi không còn nằm trong
+    // presence:instances; nếu không chúng có thể giữ user ở idle vô thời hạn.
+    socketsCount += await this.sweepOrphanedSocketFields();
+
     return { deadInstances: deadCount, cleanedSockets: socketsCount };
+  }
+
+  private async sweepOrphanedSocketFields(): Promise<number> {
+    if (!this.client || !this.isConnected) return 0;
+
+    const activeUsersKey = this.k('presence:active_users');
+    const users = await this.client.smembers(activeUsersKey);
+    const heartbeatCache = new Map<string, boolean>();
+    let cleaned = 0;
+
+    for (const userId of users) {
+      const sockKey = this.k(`presence:sockets:${userId}`);
+      const actKey = this.k(`presence:activity:${userId}`);
+      const fields = await this.client.hkeys(sockKey);
+
+      for (const field of fields) {
+        const separator = field.lastIndexOf(':');
+        if (separator <= 0) continue;
+        const ownerInstanceId = field.slice(0, separator);
+        if (ownerInstanceId === this.instanceId) continue;
+
+        let alive = heartbeatCache.get(ownerInstanceId);
+        if (alive === undefined) {
+          alive =
+            (await this.client.exists(
+              this.k(`presence:instance:${ownerInstanceId}:heartbeat`),
+            )) === 1;
+          heartbeatCache.set(ownerInstanceId, alive);
+        }
+
+        if (!alive) {
+          await this.client.hdel(sockKey, field);
+          await this.client.hdel(actKey, field);
+          cleaned++;
+        }
+      }
+
+      const remaining = await this.client.hlen(sockKey);
+      await this.client.hset(
+        this.k(`presence:user:${userId}`),
+        'activeSocketCount',
+        remaining,
+      );
+      if (remaining === 0) {
+        const nowMs = await this.getRedisTimeMs();
+        await this.client.zadd(
+          this.k('presence:offline_deadlines'),
+          nowMs + 15000,
+          userId,
+        );
+        await this.client.zrem(this.k('presence:idle_deadlines'), userId);
+      }
+    }
+
+    return cleaned;
   }
 
   // ---------------------------------------------------------------------------
@@ -1169,6 +1231,9 @@ export class RedisStateService
 
     if (this.client) {
       try {
+        // Dọn socket do process này sở hữu trước khi xóa reverse index. Bản cũ
+        // xóa index ngay, để lại socket hash vĩnh viễn và user bị kẹt ở idle.
+        await this.cleanupOwnedPresenceSockets();
         await this.client.srem(this.k('presence:instances'), this.instanceId);
         await this.client.del(this.k(`presence:instance:${this.instanceId}:heartbeat`));
         await this.client.del(this.k(`presence:instance:${this.instanceId}:users`));
@@ -1176,6 +1241,45 @@ export class RedisStateService
       } catch {}
       this.client = null;
       this.isConnected = false;
+    }
+  }
+
+  private async cleanupOwnedPresenceSockets(): Promise<void> {
+    if (!this.client || !this.isConnected) return;
+
+    const users = await this.client.smembers(
+      this.k(`presence:instance:${this.instanceId}:users`),
+    );
+    const nowMs = await this.getRedisTimeMs();
+
+    for (const userId of users) {
+      const sockKey = this.k(`presence:sockets:${userId}`);
+      const actKey = this.k(`presence:activity:${userId}`);
+      const fields = await this.client.hkeys(sockKey);
+      const prefix = `${this.instanceId}:`;
+
+      for (const field of fields) {
+        if (field.startsWith(prefix)) {
+          await this.client.hdel(sockKey, field);
+          await this.client.hdel(actKey, field);
+        }
+      }
+
+      const remaining = await this.client.hlen(sockKey);
+      await this.client.hset(
+        this.k(`presence:user:${userId}`),
+        'activeSocketCount',
+        remaining,
+      );
+      if (remaining === 0) {
+        await this.client.srem(this.k('presence:active_users'), userId);
+        await this.client.zrem(this.k('presence:idle_deadlines'), userId);
+        await this.client.zadd(
+          this.k('presence:offline_deadlines'),
+          nowMs,
+          userId,
+        );
+      }
     }
   }
 }

@@ -2025,12 +2025,6 @@ export class MessagesService {
     if (!text) {
       throw new BadRequestException('Nội dung tin nhắn không được để trống.');
     }
-    if (text.length > 4000) {
-      throw new BadRequestException(
-        'Nội dung tin nhắn không được vượt quá 4000 ký tự.',
-      );
-    }
-
     const { data: existing, error: findErr } = await this.supabase.client
       .from('messages')
       .select(
