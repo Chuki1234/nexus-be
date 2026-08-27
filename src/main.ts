@@ -18,9 +18,10 @@ async function bootstrap() {
         req.rawBody = buf;
       },
       type: ['application/json', 'application/webhook+json', '*/*+json'],
+      limit: '50mb',
     }),
   );
-  app.use(urlencoded({ extended: true }));
+  app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   app.enableShutdownHooks();
 

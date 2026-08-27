@@ -18,7 +18,10 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { ParsePositiveBigIntPipe } from '../../common/pipes/parse-positive-bigint.pipe';
 import { EditMessageDto } from './dto/edit-message.dto';
-import { DeleteMessageQueryDto, DeleteMessageScope } from './dto/delete-message.dto';
+import {
+  DeleteMessageQueryDto,
+  DeleteMessageScope,
+} from './dto/delete-message.dto';
 import { ForwardMessageDto } from './dto/forward-message.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
@@ -30,7 +33,10 @@ import type {
 } from './dto/message-response.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { SetReactionDto } from './dto/set-reaction.dto';
-import { MessagesService, type SetReactionResponseDto } from './messages.service';
+import {
+  MessagesService,
+  type SetReactionResponseDto,
+} from './messages.service';
 
 @Controller()
 @UseGuards(SupabaseAuthGuard)
@@ -48,6 +54,15 @@ export class MessagesController {
     @Query() query: GetMessagesQueryDto,
   ): Promise<MessagesPaginationResponseDto> {
     return this.messagesService.getConversationMessages(user.id, id, query);
+  }
+
+  /** Danh sách tin nhắn đã ghim trong cuộc trò chuyện riêng. */
+  @Get('conversations/:id/pins')
+  async getConversationPins(
+    @CurrentUser() user: User,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<MessageResponseDto[]> {
+    return this.messagesService.getConversationPinnedMessages(id, user.id);
   }
 
   @Post('conversations/:id/messages')
@@ -92,7 +107,8 @@ export class MessagesController {
   @Post('conversations/:conversationId/messages/:messageId/reactions')
   async setReaction(
     @CurrentUser() user: User,
-    @Param('conversationId', new ParseUUIDPipe({ version: '4' })) conversationId: string,
+    @Param('conversationId', new ParseUUIDPipe({ version: '4' }))
+    conversationId: string,
     @Param('messageId', ParsePositiveBigIntPipe) messageId: string,
     @Body() dto: SetReactionDto,
   ): Promise<SetReactionResponseDto> {
@@ -110,7 +126,8 @@ export class MessagesController {
   @Post('conversations/:conversationId/messages/:messageId/forward')
   async forwardConversationMessage(
     @CurrentUser() user: User,
-    @Param('conversationId', new ParseUUIDPipe({ version: '4' })) conversationId: string,
+    @Param('conversationId', new ParseUUIDPipe({ version: '4' }))
+    conversationId: string,
     @Param('messageId', ParsePositiveBigIntPipe) messageId: string,
     @Body() dto: ForwardMessageDto,
   ): Promise<MessageResponseDto> {
@@ -151,11 +168,7 @@ export class MessagesController {
     @Param('channelId', ParseUUIDPipe) channelId: string,
     @Query() query: GetMessagesQueryDto,
   ): Promise<ChannelMessagesResponseDto> {
-    return this.messagesService.getChannelMessages(
-      user.id,
-      channelId,
-      query,
-    );
+    return this.messagesService.getChannelMessages(user.id, channelId, query);
   }
 
   /**
@@ -190,25 +203,25 @@ export class MessagesController {
   }
 
   /**
-   * Ghim một tin nhắn trong kênh.
+   * Ghim một tin nhắn trong DM hoặc kênh máy chủ.
    */
   @Post('messages/:id/pin')
   async pinMessage(
     @CurrentUser() user: User,
     @Param('id', ParsePositiveBigIntPipe) id: string,
   ): Promise<MessageResponseDto> {
-    return this.messagesService.setChannelMessagePin(id, user.id, true);
+    return this.messagesService.setMessagePin(id, user.id, true);
   }
 
   /**
-   * Bỏ ghim một tin nhắn trong kênh.
+   * Bỏ ghim một tin nhắn trong DM hoặc kênh máy chủ.
    */
   @Delete('messages/:id/pin')
   async unpinMessage(
     @CurrentUser() user: User,
     @Param('id', ParsePositiveBigIntPipe) id: string,
   ): Promise<MessageResponseDto> {
-    return this.messagesService.setChannelMessagePin(id, user.id, false);
+    return this.messagesService.setMessagePin(id, user.id, false);
   }
 
   /**
@@ -276,7 +289,11 @@ export class MessagesController {
     @CurrentUser() user: User,
     @Param('channelId', ParseUUIDPipe) channelId: string,
     @Body() dto: MarkReadDto,
-  ): Promise<{ success: boolean; updated?: boolean; lastReadMessageId?: string }> {
+  ): Promise<{
+    success: boolean;
+    updated?: boolean;
+    lastReadMessageId?: string;
+  }> {
     return this.messagesService.markChannelAsRead(
       user.id,
       channelId,
@@ -325,7 +342,13 @@ export class MessagesController {
   async hideMessage(
     @CurrentUser() user: User,
     @Param('id') id: string,
-  ): Promise<{ id: string; hidden: boolean; scope: 'for_me'; conversationId: string | null; channelId: string | null }> {
+  ): Promise<{
+    id: string;
+    hidden: boolean;
+    scope: 'for_me';
+    conversationId: string | null;
+    channelId: string | null;
+  }> {
     return this.messagesService.hideMessageForUser(user.id, id);
   }
 
@@ -336,7 +359,13 @@ export class MessagesController {
   async recallMessage(
     @CurrentUser() user: User,
     @Param('id') id: string,
-  ): Promise<{ id: string; deleted: boolean; scope: 'everyone'; conversationId: string | null; channelId: string | null }> {
+  ): Promise<{
+    id: string;
+    deleted: boolean;
+    scope: 'everyone';
+    conversationId: string | null;
+    channelId: string | null;
+  }> {
     return this.messagesService.recallMessageForEveryone(user.id, id);
   }
 
@@ -348,7 +377,14 @@ export class MessagesController {
     @CurrentUser() user: User,
     @Param('id') id: string,
     @Query() query?: DeleteMessageQueryDto,
-  ): Promise<{ id: string; deleted?: boolean; hidden?: boolean; scope: 'for_me' | 'everyone'; conversationId: string | null; channelId: string | null }> {
+  ): Promise<{
+    id: string;
+    deleted?: boolean;
+    hidden?: boolean;
+    scope: 'for_me' | 'everyone';
+    conversationId: string | null;
+    channelId: string | null;
+  }> {
     const scope = query?.scope ?? DeleteMessageScope.FOR_ME;
     return this.messagesService.deleteMessage(user.id, id, scope);
   }

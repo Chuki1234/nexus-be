@@ -31,8 +31,7 @@ export interface RelationshipInvalidatedPayload {
 export type MessageId = string;
 
 export type ChatTargetPayload =
-  | { conversationId: string; channelId?: never }
-  | { channelId: string; conversationId?: never };
+  { conversationId: string; channelId?: never } | { channelId: string; conversationId?: never };
 
 export interface MessageAuthorPayload {
   id: string;
@@ -76,6 +75,8 @@ export interface MessagePayload {
   externalMedia: GiphyMediaDto | null;
   attachments?: AttachmentPayload[];
   reactions?: ReactionSummaryPayload[];
+  pinnedAt?: string | null;
+  pinnedBy?: string | null;
   createdAt: string;
 }
 
@@ -171,9 +172,7 @@ export interface ClientToServerEvents {
   'presence:activity': () => void;
 
   /** Yêu cầu lấy snapshot trạng thái của bạn bè và DM peers */
-  'presence:get-snapshot': (
-    callback?: (response: PresenceSyncPayload) => void,
-  ) => void;
+  'presence:get-snapshot': (callback?: (response: PresenceSyncPayload) => void) => void;
 
   /** Client yêu cầu tham gia server room (xác thực membership phía backend). */
   'server:join': (
@@ -211,10 +210,7 @@ export interface ClientToServerEvents {
   }) => void;
 
   /** Chủ server ngắt kết nối / kick thành viên khỏi phòng thoại */
-  'voice:kick-member': (payload: {
-    serverId: string;
-    targetUserId: string;
-  }) => void;
+  'voice:kick-member': (payload: { serverId: string; targetUserId: string }) => void;
 
   /** Chủ server tắt/bật mic của thành viên trên máy chủ */
   'voice:server-mute-member': (payload: {
@@ -231,7 +227,11 @@ export interface ClientToServerEvents {
 export interface ServerToClientEvents {
   'message:created': (payload: { message: MessagePayload }) => void;
   'message:updated': (payload: { message: MessagePayload }) => void;
-  'message:deleted': (payload: { messageId: MessageId; channelId?: string | null; conversationId?: string | null }) => void;
+  'message:deleted': (payload: {
+    messageId: MessageId;
+    channelId?: string | null;
+    conversationId?: string | null;
+  }) => void;
   'message:hidden-for-user': (payload: {
     messageId: MessageId;
     userId: string;
@@ -241,7 +241,8 @@ export interface ServerToClientEvents {
   }) => void;
   'message:reaction-updated': (payload: ReactionUpdatedPayload) => void;
   'message:pin-updated': (payload: {
-    channelId: string;
+    channelId?: string | null;
+    conversationId?: string | null;
     message: MessagePayload;
     pinned: boolean;
   }) => void;
@@ -282,10 +283,7 @@ export interface ServerToClientEvents {
   }) => void;
 
   /** Thông báo cấp user-room khi cuộc trò chuyện bị xóa (ví dụ khi hủy kết bạn) */
-  'conversation:deleted': (payload: {
-    conversationId: string;
-    friendId?: string;
-  }) => void;
+  'conversation:deleted': (payload: { conversationId: string; friendId?: string }) => void;
 
   'notification:new': (payload: { notification: NotificationPayload }) => void;
 
@@ -318,20 +316,13 @@ export interface ServerToClientEvents {
   }) => void;
 
   /** Sự kiện xóa kênh trong server */
-  'server:channel-deleted': (payload: {
-    serverId: string;
-    channelId: string;
-  }) => void;
+  'server:channel-deleted': (payload: { serverId: string; channelId: string }) => void;
 
   /** Sự kiện danh sách kênh trong server bị thay đổi (tạo/sửa/xóa/đổi quyền) */
   'server:channels-invalidated': (payload: { serverId: string }) => void;
 
   /** Sự kiện thành viên mới tham gia server */
-  'server:member-joined': (payload: {
-    serverId: string;
-    userId: string;
-    role?: string;
-  }) => void;
+  'server:member-joined': (payload: { serverId: string; userId: string; role?: string }) => void;
 
   /** Nhận lời mời tham gia server trực tiếp (gửi vào user room) */
   'server:invitation-received': (payload: {
@@ -371,15 +362,10 @@ export interface ServerToClientEvents {
   }) => void;
 
   /** Sự kiện xóa máy chủ hoàn toàn (gửi vào server room và user rooms của từng thành viên) */
-  'server:deleted': (payload: {
-    serverId: string;
-  }) => void;
+  'server:deleted': (payload: { serverId: string }) => void;
 
   /** Sự kiện thành viên rời khỏi máy chủ */
-  'server:member-left': (payload: {
-    serverId: string;
-    userId: string;
-  }) => void;
+  'server:member-left': (payload: { serverId: string; userId: string }) => void;
 
   /**
    * Ai đang trong voice channel — dành cho người CHƯA vào phòng.
@@ -401,16 +387,10 @@ export interface ServerToClientEvents {
   }) => void;
 
   /** Lệnh ép buộc thành viên ngắt kết nối khỏi phòng thoại */
-  'voice:force-disconnect': (payload: {
-    serverId: string;
-    channelId?: string;
-  }) => void;
+  'voice:force-disconnect': (payload: { serverId: string; channelId?: string }) => void;
 
   /** Lệnh ép buộc tắt mic trên máy chủ */
-  'voice:force-mute': (payload: {
-    serverId: string;
-    isMuted: boolean;
-  }) => void;
+  'voice:force-mute': (payload: { serverId: string; isMuted: boolean }) => void;
 
   // Direct Call Signaling (DM 1-1 giữa bạn bè)
   'direct-call:incoming': (payload: DirectCallDto) => void;
