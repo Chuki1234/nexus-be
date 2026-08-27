@@ -35,14 +35,28 @@ describe('MessagesController', () => {
               .mockResolvedValue({ id: 'msg-1', content: 'edited' }),
             deleteMessage: jest
               .fn()
-              .mockResolvedValue({ id: 'msg-1', deleted: true, scope: 'for_me' }),
+              .mockResolvedValue({
+                id: 'msg-1',
+                deleted: true,
+                scope: 'for_me',
+              }),
             hideMessageForUser: jest
               .fn()
-              .mockResolvedValue({ id: 'msg-1', hidden: true, scope: 'for_me' }),
+              .mockResolvedValue({
+                id: 'msg-1',
+                hidden: true,
+                scope: 'for_me',
+              }),
             recallMessageForEveryone: jest
               .fn()
-              .mockResolvedValue({ id: 'msg-1', deleted: true, scope: 'everyone' }),
+              .mockResolvedValue({
+                id: 'msg-1',
+                deleted: true,
+                scope: 'everyone',
+              }),
             markAsRead: jest.fn().mockResolvedValue({ success: true }),
+            getConversationPinnedMessages: jest.fn().mockResolvedValue([]),
+            setMessagePin: jest.fn().mockResolvedValue({ id: '101' }),
           },
         },
         {
@@ -103,13 +117,22 @@ describe('MessagesController', () => {
 
   it('gọi service.recallMessageForEveryone khi POST /api/messages/:id/recall', async () => {
     const res = await controller.recallMessage(mockUser, '101');
-    expect(service.recallMessageForEveryone).toHaveBeenCalledWith('user-123', '101');
+    expect(service.recallMessageForEveryone).toHaveBeenCalledWith(
+      'user-123',
+      '101',
+    );
     expect(res.deleted).toBe(true);
   });
 
   it('gọi service.deleteMessage khi DELETE /api/messages/:id', async () => {
-    const res = await controller.deleteMessage(mockUser, '101', { scope: DeleteMessageScope.EVERYONE });
-    expect(service.deleteMessage).toHaveBeenCalledWith('user-123', '101', 'everyone');
+    const res = await controller.deleteMessage(mockUser, '101', {
+      scope: DeleteMessageScope.EVERYONE,
+    });
+    expect(service.deleteMessage).toHaveBeenCalledWith(
+      'user-123',
+      '101',
+      'everyone',
+    );
     expect(res.deleted).toBe(true);
   });
 
@@ -128,9 +151,13 @@ describe('MessagesController', () => {
   });
 
   it('gọi service.getAttachmentSignedUrl khi GET /api/conversations/:id/attachments/:attId/signed-url', async () => {
-    (service as unknown as { getAttachmentSignedUrl: jest.Mock }).getAttachmentSignedUrl = jest
+    (
+      service as unknown as { getAttachmentSignedUrl: jest.Mock }
+    ).getAttachmentSignedUrl = jest
       .fn()
-      .mockResolvedValue({ signedUrl: 'https://storage.supabase.co/signed/file.png' });
+      .mockResolvedValue({
+        signedUrl: 'https://storage.supabase.co/signed/file.png',
+      });
 
     const res = await controller.getAttachmentSignedUrl(
       mockUser,
@@ -138,7 +165,8 @@ describe('MessagesController', () => {
       'b0000000-0000-0000-0000-000000000002',
     );
     expect(
-      (service as unknown as { getAttachmentSignedUrl: jest.Mock }).getAttachmentSignedUrl,
+      (service as unknown as { getAttachmentSignedUrl: jest.Mock })
+        .getAttachmentSignedUrl,
     ).toHaveBeenCalledWith(
       'user-123',
       'a0000000-0000-0000-0000-000000000001',
@@ -147,15 +175,48 @@ describe('MessagesController', () => {
     expect(res.signedUrl).toBe('https://storage.supabase.co/signed/file.png');
   });
 
+  it('lấy danh sách ghim của DM theo user hiện tại', async () => {
+    const conversationId = 'a0000000-0000-0000-0000-000000000001';
+
+    const result = await controller.getConversationPins(
+      mockUser,
+      conversationId,
+    );
+
+    expect(service.getConversationPinnedMessages).toHaveBeenCalledWith(
+      conversationId,
+      'user-123',
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('ghim và bỏ ghim qua cùng service canonical cho DM hoặc channel', async () => {
+    await controller.pinMessage(mockUser, '9007199254740999999');
+    await controller.unpinMessage(mockUser, '9007199254740999999');
+
+    expect(service.setMessagePin).toHaveBeenNthCalledWith(
+      1,
+      '9007199254740999999',
+      'user-123',
+      true,
+    );
+    expect(service.setMessagePin).toHaveBeenNthCalledWith(
+      2,
+      '9007199254740999999',
+      'user-123',
+      false,
+    );
+  });
+
   it('gọi service.forwardConversationMessage khi POST /api/conversations/:id/messages/:msgId/forward', async () => {
-    (service as unknown as { forwardConversationMessage: jest.Mock }).forwardConversationMessage = jest
-      .fn()
-      .mockResolvedValue({
-        id: '202',
-        conversationId: 'c0000000-0000-0000-0000-000000000003',
-        content: 'Forwarded msg',
-        isForwarded: true,
-      });
+    (
+      service as unknown as { forwardConversationMessage: jest.Mock }
+    ).forwardConversationMessage = jest.fn().mockResolvedValue({
+      id: '202',
+      conversationId: 'c0000000-0000-0000-0000-000000000003',
+      content: 'Forwarded msg',
+      isForwarded: true,
+    });
 
     const res = await controller.forwardConversationMessage(
       mockUser,
@@ -168,7 +229,8 @@ describe('MessagesController', () => {
     );
 
     expect(
-      (service as unknown as { forwardConversationMessage: jest.Mock }).forwardConversationMessage,
+      (service as unknown as { forwardConversationMessage: jest.Mock })
+        .forwardConversationMessage,
     ).toHaveBeenCalledWith(
       'user-123',
       'a0000000-0000-0000-0000-000000000001',

@@ -39,6 +39,10 @@ class QueryDouble implements PromiseLike<QueryResponse> {
     return this.record('in', args);
   }
 
+  limit(...args: unknown[]) {
+    return this.record('limit', args);
+  }
+
   insert(...args: unknown[]) {
     return this.record('insert', args);
   }
@@ -76,9 +80,15 @@ class QueryDouble implements PromiseLike<QueryResponse> {
   }
 }
 
+import { DirectCallsService } from '../direct-calls/direct-calls.service';
+import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
+
 describe('FriendsService', () => {
   let service: FriendsService;
   let from: jest.Mock;
+  let rpc: jest.Mock;
+  let eventEmitter: { emit: jest.Mock };
+  let directCallsService: { emitTerminatedCall: jest.Mock };
   let queries: QueryDouble[];
   let responses: Array<{ table: string; response: QueryResponse }>;
 
@@ -125,17 +135,19 @@ describe('FriendsService', () => {
       queries.push(query);
       return query;
     });
+    rpc = jest.fn();
+    eventEmitter = { emit: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         FriendsService,
         {
           provide: SupabaseService,
-          useValue: { client: { from } },
+          useValue: { client: { from, rpc } },
         },
         {
           provide: EventEmitter2,
-          useValue: { emit: jest.fn() },
+          useValue: eventEmitter,
         },
       ],
     }).compile();
@@ -154,6 +166,7 @@ describe('FriendsService', () => {
   it('creates an ordered pending pair and returns only public profile fields', async () => {
     queue('profiles', profile(userA, 'ban_a'));
     queue('friendships', null);
+    queue('user_blocks', []);
     queue(
       'friendships',
       relationship(userA, userB, userB),
@@ -161,7 +174,7 @@ describe('FriendsService', () => {
 
     const result = await service.sendRequest(userB, '  BAN_A  ');
 
-    const insertQuery = queries[2];
+    const insertQuery = queries[3];
     expect(insertQuery.calls).toContainEqual({
       method: 'insert',
       args: [
@@ -211,9 +224,20 @@ describe('FriendsService', () => {
     );
   });
 
+  it('rejects sending friend request if blocked in user_blocks', async () => {
+    queue('profiles', profile(userB, 'ban_b'));
+    queue('friendships', null);
+    queue('user_blocks', [{ blocker_id: userB }]);
+
+    await expect(service.sendRequest(userA, 'ban_b')).rejects.toThrow(
+      'Không thể gửi lời mời kết bạn do có quan hệ chặn.',
+    );
+  });
+
   it('maps a unique race from Supabase to 409', async () => {
     queue('profiles', profile(userB, 'ban_b'));
     queue('friendships', null);
+    queue('user_blocks', []);
     queue('friendships', null, {
       code: '23505',
       message: 'duplicate key value violates unique constraint',
@@ -321,4 +345,123 @@ describe('FriendsService', () => {
       ServiceUnavailableException,
     );
   });
+
+  describe('User Blocking & Realtime Invalidation', () => {
+    it('lists blocked users via list_blocked_users RPC', async () => {
+      rpc.mockResolvedValueOnce({
+        data: [
+          {
+            id: userB,
+            username: 'ban_b',
+            display_name: 'Bạn B',
+            avatar_url: null,
+            blocked_at: now,
+          },
+        ],
+        error: null,
+      });
+
+      const blockedList = await service.listBlockedUsers(userA);
+      expect(rpc).toHaveBeenCalledWith('list_blocked_users', { p_user_id: userA });
+      expect(blockedList).toEqual([
+        {
+          id: userB,
+          username: 'ban_b',
+          displayName: 'Bạn B',
+          avatarUrl: null,
+          blockedAt: now,
+        },
+      ]);
+    });
+
+    it('falls back to querying user_blocks directly if list_blocked_users RPC fails', async () => {
+      rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'structure of query does not match function result type' },
+      });
+
+      queue('user_blocks', [{ blocked_user_id: userB, created_at: now }]);
+      queue('profiles', [profile(userB, 'ban_b')]);
+
+      const blockedList = await service.listBlockedUsers(userA);
+      expect(blockedList).toEqual([
+        {
+          id: userB,
+          username: 'ban_b',
+          displayName: null,
+          avatarUrl: null,
+          blockedAt: now,
+        },
+      ]);
+    });
+
+    it('rejects self-blocking with BadRequestException', async () => {
+      await expect(service.blockUser(userA, userA)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('blocks user, emits user:block-created and relationship:invalidated events, and terminates active calls', async () => {
+      rpc.mockResolvedValueOnce({
+        data: {
+          blocked_user: {
+            id: userB,
+            username: 'ban_b',
+            displayName: 'Bạn B',
+            avatarUrl: null,
+            blockedAt: now,
+          },
+          terminated_call_ids: ['call-123'],
+        },
+        error: null,
+      });
+
+      const result = await service.blockUser(userA, userB);
+
+      expect(rpc).toHaveBeenCalledWith('block_user', {
+        p_blocker_id: userA,
+        p_blocked_user_id: userB,
+      });
+      expect(result).toEqual({
+        id: userB,
+        username: 'ban_b',
+        displayName: 'Bạn B',
+        avatarUrl: null,
+        blockedAt: now,
+      });
+
+      // Emits block created to blocker A
+      expect(eventEmitter.emit).toHaveBeenCalledWith(CHAT_EVENTS.USER_BLOCK_CREATED, {
+        blockerId: userA,
+        blockedUser: result,
+      });
+
+      // Emits neutral invalidation to blocked user B
+      expect(eventEmitter.emit).toHaveBeenCalledWith(CHAT_EVENTS.RELATIONSHIP_INVALIDATED, {
+        targetUserId: userB,
+        invalidatedWithUserId: userA,
+      });
+
+      // Emits terminated call event
+      expect(eventEmitter.emit).toHaveBeenCalledWith(CHAT_EVENTS.DIRECT_CALL_TERMINATED, {
+        callId: 'call-123',
+      });
+    });
+
+    it('unblocks user and emits user:block-removed event', async () => {
+      rpc.mockResolvedValueOnce({ error: null });
+
+      await service.unblockUser(userA, userB);
+
+      expect(rpc).toHaveBeenCalledWith('unblock_user', {
+        p_blocker_id: userA,
+        p_blocked_user_id: userB,
+      });
+      expect(eventEmitter.emit).toHaveBeenCalledWith(CHAT_EVENTS.USER_BLOCK_REMOVED, {
+        blockerId: userA,
+        blockedUserId: userB,
+      });
+    });
+  });
 });
+

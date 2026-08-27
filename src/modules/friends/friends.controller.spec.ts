@@ -102,4 +102,27 @@ describe('FriendsController', () => {
     expect(friends.deleteRequest).toHaveBeenCalledWith(user.id, otherUserId);
     expect(friends.removeFriend).toHaveBeenCalledWith(user.id, otherUserId);
   });
+
+  it('lists blocked users, blocks a user, and unblocks a user', async () => {
+    const blockedDto = {
+      id: otherUserId,
+      username: 'ban_test',
+      displayName: 'Bạn Test',
+      avatarUrl: null,
+      blockedAt: '2026-08-22T00:00:00.000Z',
+    };
+    friends.listBlockedUsers = jest.fn().mockResolvedValue([blockedDto]);
+    friends.blockUser = jest.fn().mockResolvedValue(blockedDto);
+    friends.unblockUser = jest.fn().mockResolvedValue(undefined);
+
+    await expect(controller.listBlocked(user)).resolves.toEqual([blockedDto]);
+    expect(friends.listBlockedUsers).toHaveBeenCalledWith(user.id);
+
+    await expect(controller.blockUser(user, otherUserId)).resolves.toEqual(blockedDto);
+    expect(friends.blockUser).toHaveBeenCalledWith(user.id, otherUserId);
+
+    await expect(controller.unblockUser(user, otherUserId)).resolves.toBeUndefined();
+    expect(friends.unblockUser).toHaveBeenCalledWith(user.id, otherUserId);
+  });
 });
+

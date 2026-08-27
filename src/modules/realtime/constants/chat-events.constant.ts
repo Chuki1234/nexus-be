@@ -1,4 +1,4 @@
-import type { MessagePayload } from '../../../shared/socket-events';
+import type { MessagePayload, BlockedUserDto } from '../../../shared';
 
 export const CHAT_EVENTS = {
   MESSAGE_CREATED: 'chat.message.created',
@@ -9,6 +9,10 @@ export const CHAT_EVENTS = {
   MESSAGE_PIN_UPDATED: 'chat.message.pin_updated',
   REACTION_UPDATED: 'chat.reaction.updated',
   CONVERSATION_DELETED: 'chat.conversation.deleted',
+  USER_BLOCK_CREATED: 'user.block.created',
+  USER_BLOCK_REMOVED: 'user.block.removed',
+  RELATIONSHIP_INVALIDATED: 'relationship.invalidated',
+  DIRECT_CALL_TERMINATED: 'direct_call.terminated',
 } as const;
 
 export interface ConversationDeletedEvent {
@@ -59,4 +63,19 @@ export interface ReactionUpdatedEvent {
   action: 'added' | 'removed';
   clientMutationId?: string;
   reactions: Array<{ emoji: string; count: number }>;
+}
+
+export interface UserBlockCreatedEvent {
+  blockerId: string;
+  blockedUser: BlockedUserDto;
+}
+
+export interface UserBlockRemovedEvent {
+  blockerId: string;
+  blockedUserId: string;
+}
+
+export interface RelationshipInvalidatedEvent {
+  targetUserId: string;
+  invalidatedWithUserId: string;
 }

@@ -34,6 +34,9 @@ import {
   type MessageReadEvent,
   type MessageUpdatedEvent,
   type ReactionUpdatedEvent,
+  type UserBlockCreatedEvent,
+  type UserBlockRemovedEvent,
+  type RelationshipInvalidatedEvent,
 } from './constants/chat-events.constant';
 
 interface SocketData {
@@ -115,17 +118,19 @@ export class ChatGateway
     });
 
     // 3. Lắng nghe typing updates từ active typing sweeper
-    this.redisState.setTypingUpdateCallback(({ targetId, isChannel, userIds }) => {
-      if (isChannel) {
-        this.server
-          ?.to(Room.channel(targetId))
-          .emit('typing:updated', { channelId: targetId, userIds });
-      } else {
-        this.server
-          ?.to(Room.conversation(targetId))
-          .emit('typing:updated', { conversationId: targetId, userIds });
-      }
-    });
+    this.redisState.setTypingUpdateCallback(
+      ({ targetId, isChannel, userIds }) => {
+        if (isChannel) {
+          this.server
+            ?.to(Room.channel(targetId))
+            .emit('typing:updated', { channelId: targetId, userIds });
+        } else {
+          this.server
+            ?.to(Room.conversation(targetId))
+            .emit('typing:updated', { conversationId: targetId, userIds });
+        }
+      },
+    );
   }
 
   /**
@@ -143,7 +148,9 @@ export class ChatGateway
         let token: string | null = null;
         if (typeof rawToken === 'string') {
           const trimmed = rawToken.trim();
-          token = trimmed.startsWith('Bearer ') ? trimmed.slice(7).trim() : trimmed;
+          token = trimmed.startsWith('Bearer ')
+            ? trimmed.slice(7).trim()
+            : trimmed;
         }
 
         if (!token) {
@@ -216,18 +223,22 @@ export class ChatGateway
       this.clearUserTyping(userId);
 
       // Xử lý ngắt kết nối với grace period 15s
-      await this.presenceService.handleUserDisconnect(client.id, (offlinePayload) => {
-        for (const peerId of offlinePayload.peers) {
-          this.server.to(Room.user(peerId)).emit('presence:updated', {
-            userId: offlinePayload.userId,
-            status: 'offline',
-            lastSeenAt: offlinePayload.lastSeenAt,
-          });
-        }
-      });
+      await this.presenceService.handleUserDisconnect(
+        client.id,
+        (offlinePayload) => {
+          for (const peerId of offlinePayload.peers) {
+            this.server.to(Room.user(peerId)).emit('presence:updated', {
+              userId: offlinePayload.userId,
+              status: 'offline',
+              lastSeenAt: offlinePayload.lastSeenAt,
+            });
+          }
+        },
+      );
 
       // Tự động dọn dẹp voice states nếu user ngắt kết nối
-      const affectedServers = await this.redisState.removeUserFromAllVoiceStates(userId);
+      const affectedServers =
+        await this.redisState.removeUserFromAllVoiceStates(userId);
       for (const item of affectedServers) {
         this.server.to(Room.server(item.serverId)).emit('voice:state-updated', {
           serverId: item.serverId,
@@ -243,7 +254,9 @@ export class ChatGateway
 
   @SubscribeMessage('presence:activity')
   async handlePresenceActivity(client: TypedSocket): Promise<void> {
-    const broadcastPayload = await this.presenceService.handleUserActivity(client.id);
+    const broadcastPayload = await this.presenceService.handleUserActivity(
+      client.id,
+    );
     if (broadcastPayload) {
       for (const peerId of broadcastPayload.peers) {
         this.server.to(Room.user(peerId)).emit('presence:updated', {
@@ -258,7 +271,9 @@ export class ChatGateway
   @SubscribeMessage('presence:get-snapshot')
   async handleGetPresenceSnapshot(
     client: TypedSocket,
-  ): Promise<{ presences: Record<string, { status: any; lastSeenAt: string | null }> }> {
+  ): Promise<{
+    presences: Record<string, { status: any; lastSeenAt: string | null }>;
+  }> {
     const userId = client.data.userId;
     if (!userId) {
       return { presences: {} };
@@ -317,7 +332,11 @@ export class ChatGateway
     if (isValidUuid(payload?.conversationId)) {
       await client.leave(Room.conversation(payload.conversationId));
       if (client.data.userId) {
-        await this.removeTyping(payload.conversationId, client.data.userId, false);
+        await this.removeTyping(
+          payload.conversationId,
+          client.data.userId,
+          false,
+        );
       }
     }
     return { success: true };
@@ -346,7 +365,10 @@ export class ChatGateway
     }
 
     try {
-      await this.serverPermissionsService.assertChannelView(userId, payload.channelId);
+      await this.serverPermissionsService.assertChannelView(
+        userId,
+        payload.channelId,
+      );
     } catch (err: any) {
       this.logger.warn(
         `User ${userId} cố join channel room ${payload.channelId} nhưng thiếu quyền VIEW_CHANNEL`,
@@ -402,7 +424,9 @@ export class ChatGateway
       .maybeSingle();
 
     if (error || !member) {
-      this.logger.warn(`User ${userId} cố join server room ${payload?.serverId} nhưng không phải member`);
+      this.logger.warn(
+        `User ${userId} cố join server room ${payload?.serverId} nhưng không phải member`,
+      );
       return { success: false, error: 'Không có quyền truy cập máy chủ' };
     }
 
@@ -446,12 +470,14 @@ export class ChatGateway
         payload.serverId,
         userId,
       );
-      this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
-        serverId: payload.serverId,
-        channelId: prevChannelId,
-        userId,
-        state: null,
-      });
+      this.server
+        .to(Room.server(payload.serverId))
+        .emit('voice:state-updated', {
+          serverId: payload.serverId,
+          channelId: prevChannelId,
+          userId,
+          state: null,
+        });
       return;
     }
 
@@ -459,7 +485,10 @@ export class ChatGateway
 
     // Kiểm tra quyền xem kênh voice
     try {
-      await this.serverPermissionsService.assertChannelView(userId, payload.channelId);
+      await this.serverPermissionsService.assertChannelView(
+        userId,
+        payload.channelId,
+      );
     } catch {
       return;
     }
@@ -471,7 +500,8 @@ export class ChatGateway
       .eq('id', userId)
       .maybeSingle();
 
-    const displayName = profile?.display_name || profile?.username || 'Nexus Member';
+    const displayName =
+      profile?.display_name || profile?.username || 'Nexus Member';
     const username = profile?.username || 'nexus_member';
     const avatarUrl = profile?.avatar_url || null;
 
@@ -490,7 +520,11 @@ export class ChatGateway
       joinedAt: new Date().toISOString(),
     };
 
-    await this.redisState.setServerVoiceState(payload.serverId, userId, voiceState);
+    await this.redisState.setServerVoiceState(
+      payload.serverId,
+      userId,
+      voiceState,
+    );
 
     this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
       serverId: payload.serverId,
@@ -541,7 +575,9 @@ export class ChatGateway
         payload.serverId,
       );
       if (!caps.isOwner && !caps.canManageServer && !caps.canManageChannels) {
-        this.logger.warn(`User ${userId} không có quyền di chuyển voice member`);
+        this.logger.warn(
+          `User ${userId} không có quyền di chuyển voice member`,
+        );
         return;
       }
 
@@ -558,13 +594,11 @@ export class ChatGateway
       }
 
       // Gửi event chỉ thị chuyển kênh tới target user
-      this.server
-        .to(Room.user(payload.targetUserId))
-        .emit('voice:force-move', {
-          serverId: payload.serverId,
-          channelId: targetChannel.id,
-          channelName: targetChannel.name,
-        });
+      this.server.to(Room.user(payload.targetUserId)).emit('voice:force-move', {
+        serverId: payload.serverId,
+        channelId: targetChannel.id,
+        channelName: targetChannel.name,
+      });
 
       this.logger.log(
         `Chủ server ${userId} đã chuyển user ${payload.targetUserId} sang kênh thoại ${targetChannel.name} (${targetChannel.id})`,
@@ -614,12 +648,14 @@ export class ChatGateway
         payload.targetUserId,
       );
 
-      this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
-        serverId: payload.serverId,
-        channelId: prevChannelId,
-        userId: payload.targetUserId,
-        state: null,
-      });
+      this.server
+        .to(Room.server(payload.serverId))
+        .emit('voice:state-updated', {
+          serverId: payload.serverId,
+          channelId: prevChannelId,
+          userId: payload.targetUserId,
+          state: null,
+        });
 
       this.logger.log(
         `Chủ server ${userId} đã ngắt kết nối voice user ${payload.targetUserId}`,
@@ -657,16 +693,18 @@ export class ChatGateway
       }
 
       // Gửi event chỉ thị bật/tắt mic tới target user
-      this.server
-        .to(Room.user(payload.targetUserId))
-        .emit('voice:force-mute', {
-          serverId: payload.serverId,
-          isMuted: payload.isMuted,
-        });
+      this.server.to(Room.user(payload.targetUserId)).emit('voice:force-mute', {
+        serverId: payload.serverId,
+        isMuted: payload.isMuted,
+      });
 
       // Cập nhật trạng thái voice trong Redis nếu đang có
-      const serverStates = await this.redisState.getServerVoiceStates(payload.serverId);
-      const targetState = serverStates.find((s) => s.userId === payload.targetUserId);
+      const serverStates = await this.redisState.getServerVoiceStates(
+        payload.serverId,
+      );
+      const targetState = serverStates.find(
+        (s) => s.userId === payload.targetUserId,
+      );
       if (targetState) {
         const updatedState: VoiceMemberState = {
           ...targetState,
@@ -677,12 +715,14 @@ export class ChatGateway
           payload.targetUserId,
           updatedState,
         );
-        this.server.to(Room.server(payload.serverId)).emit('voice:state-updated', {
-          serverId: payload.serverId,
-          channelId: targetState.channelId,
-          userId: payload.targetUserId,
-          state: updatedState,
-        });
+        this.server
+          .to(Room.server(payload.serverId))
+          .emit('voice:state-updated', {
+            serverId: payload.serverId,
+            channelId: targetState.channelId,
+            userId: payload.targetUserId,
+            state: updatedState,
+          });
       }
     } catch (err) {
       this.logger.error(`Lỗi khi server-mute voice member:`, err);
@@ -721,7 +761,10 @@ export class ChatGateway
       await this.addTyping(payload.conversationId, userId, false);
     } else if (payload?.channelId && isValidUuid(payload.channelId)) {
       try {
-        await this.serverPermissionsService.assertChannelSend(userId, payload.channelId);
+        await this.serverPermissionsService.assertChannelSend(
+          userId,
+          payload.channelId,
+        );
       } catch {
         return;
       }
@@ -762,14 +805,19 @@ export class ChatGateway
   @OnEvent(CHAT_EVENTS.MESSAGE_CREATED)
   async handleMessageCreated(event: MessageCreatedEvent): Promise<void> {
     const { conversationId, channelId, message } = event;
-    this.logger.log(`[ChatGateway] handleMessageCreated: conversationId=${conversationId}, channelId=${channelId}, msgId=${message?.id}`);
+    this.logger.log(
+      `[ChatGateway] handleMessageCreated: conversationId=${conversationId}, channelId=${channelId}, msgId=${message?.id}`,
+    );
 
     if (conversationId) {
       // Broadcast tới conversation room
-      this.server?.to(Room.conversation(conversationId)).emit('message:created', { message });
+      this.server
+        ?.to(Room.conversation(conversationId))
+        .emit('message:created', { message });
 
       // Emit notification tới user room của participants khác
-      const participantIds = await this.conversationsService.getParticipantIds(conversationId);
+      const participantIds =
+        await this.conversationsService.getParticipantIds(conversationId);
       const preview = message.content
         ? message.content.length > 100
           ? message.content.slice(0, 100) + '…'
@@ -789,7 +837,9 @@ export class ChatGateway
       }
     } else if (channelId) {
       // Broadcast tới channel room
-      this.server?.to(Room.channel(channelId)).emit('message:created', { message });
+      this.server
+        ?.to(Room.channel(channelId))
+        .emit('message:created', { message });
     }
   }
 
@@ -809,15 +859,30 @@ export class ChatGateway
 
   @OnEvent(CHAT_EVENTS.MESSAGE_PIN_UPDATED)
   handleMessagePinUpdated(event: {
-    channelId: string;
+    channelId?: string | null;
+    conversationId?: string | null;
     message: MessagePayload;
     pinned: boolean;
   }): void {
-    const { channelId, message, pinned } = event;
+    const { channelId, conversationId, message, pinned } = event;
     if (channelId) {
       this.server
         ?.to(Room.channel(channelId))
-        .emit('message:pin-updated', { channelId, message, pinned });
+        .emit('message:pin-updated', {
+          channelId,
+          conversationId: null,
+          message,
+          pinned,
+        });
+    } else if (conversationId) {
+      this.server
+        ?.to(Room.conversation(conversationId))
+        .emit('message:pin-updated', {
+          channelId: null,
+          conversationId,
+          message,
+          pinned,
+        });
     }
   }
 
@@ -825,11 +890,13 @@ export class ChatGateway
   handleMessageDeleted(event: MessageDeletedEvent): void {
     const { conversationId, channelId, messageId } = event;
     if (conversationId) {
-      this.server?.to(Room.conversation(conversationId)).emit('message:deleted', {
-        channelId: null,
-        conversationId,
-        messageId,
-      });
+      this.server
+        ?.to(Room.conversation(conversationId))
+        .emit('message:deleted', {
+          channelId: null,
+          conversationId,
+          messageId,
+        });
     } else if (channelId) {
       this.server?.to(Room.channel(channelId)).emit('message:deleted', {
         channelId,
@@ -919,13 +986,45 @@ export class ChatGateway
     }
   }
 
+  @OnEvent(CHAT_EVENTS.USER_BLOCK_CREATED)
+  handleUserBlockCreated(event: UserBlockCreatedEvent): void {
+    const { blockerId, blockedUser } = event;
+    this.server
+      ?.to(Room.user(blockerId))
+      .emit('user:block-created', blockedUser);
+  }
+
+  @OnEvent(CHAT_EVENTS.USER_BLOCK_REMOVED)
+  handleUserBlockRemoved(event: UserBlockRemovedEvent): void {
+    const { blockerId, blockedUserId } = event;
+    this.server
+      ?.to(Room.user(blockerId))
+      .emit('user:block-removed', { userId: blockedUserId });
+  }
+
+  @OnEvent(CHAT_EVENTS.RELATIONSHIP_INVALIDATED)
+  handleRelationshipInvalidated(event: RelationshipInvalidatedEvent): void {
+    const { targetUserId, invalidatedWithUserId } = event;
+    this.server?.to(Room.user(targetUserId)).emit('relationship:invalidated', {
+      userId: invalidatedWithUserId,
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Typing state management helper
   // ---------------------------------------------------------------------------
 
-  private async addTyping(targetId: string, userId: string, isChannel: boolean): Promise<void> {
+  private async addTyping(
+    targetId: string,
+    userId: string,
+    isChannel: boolean,
+  ): Promise<void> {
     if (this.redisState.isDistributedActive()) {
-      const userIds = await this.redisState.startTyping(targetId, isChannel, userId);
+      const userIds = await this.redisState.startTyping(
+        targetId,
+        isChannel,
+        userId,
+      );
       this.broadcastTypingUserIds(targetId, isChannel, userIds);
       return;
     }
@@ -942,7 +1041,11 @@ export class ChatGateway
     this.refreshTypingTimer(targetId, userId, isChannel);
   }
 
-  private refreshTypingTimer(targetId: string, userId: string, isChannel: boolean): void {
+  private refreshTypingTimer(
+    targetId: string,
+    userId: string,
+    isChannel: boolean,
+  ): void {
     const timerKey = `${isChannel ? 'chan' : 'conv'}:${targetId}:${userId}`;
     const oldTimer = this.typingTimers.get(timerKey);
     if (oldTimer) {
@@ -956,9 +1059,17 @@ export class ChatGateway
     this.typingTimers.set(timerKey, timer);
   }
 
-  private async removeTyping(targetId: string, userId: string, isChannel: boolean): Promise<void> {
+  private async removeTyping(
+    targetId: string,
+    userId: string,
+    isChannel: boolean,
+  ): Promise<void> {
     if (this.redisState.isDistributedActive()) {
-      const userIds = await this.redisState.stopTyping(targetId, isChannel, userId);
+      const userIds = await this.redisState.stopTyping(
+        targetId,
+        isChannel,
+        userId,
+      );
       this.broadcastTypingUserIds(targetId, isChannel, userIds);
       return;
     }
@@ -1022,7 +1133,11 @@ export class ChatGateway
     }
   }
 
-  private broadcastTypingUserIds(targetId: string, isChannel: boolean, userIds: string[]): void {
+  private broadcastTypingUserIds(
+    targetId: string,
+    isChannel: boolean,
+    userIds: string[],
+  ): void {
     if (isChannel) {
       this.server
         ?.to(Room.channel(targetId))
@@ -1070,8 +1185,12 @@ export class ChatGateway
     },
   ): void {
     if (!this.server) return;
-    this.server.to(Room.user(inviterId)).emit('server:invitation-updated', payload);
-    this.server.to(Room.user(inviteeId)).emit('server:invitation-updated', payload);
+    this.server
+      .to(Room.user(inviterId))
+      .emit('server:invitation-updated', payload);
+    this.server
+      .to(Room.user(inviteeId))
+      .emit('server:invitation-updated', payload);
   }
 
   emitCapabilitiesUpdated(
@@ -1093,7 +1212,9 @@ export class ChatGateway
 
   emitServerMemberLeft(serverId: string, userId: string): void {
     if (!this.server) return;
-    this.server.to(Room.server(serverId)).emit('server:member-left', { serverId, userId });
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-left', { serverId, userId });
     this.server.to(Room.user(userId)).emit('server:deleted', { serverId });
   }
 }

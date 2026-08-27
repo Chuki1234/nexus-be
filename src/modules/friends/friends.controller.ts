@@ -19,6 +19,7 @@ import type {
   FriendRequestSummaryDto,
   FriendSummaryDto,
 } from './dto/friend-response.dto';
+import { BlockedUserResponseDto } from './dto/blocked-user.dto';
 import { SendRequestDto } from './dto/send-request.dto';
 import { FriendsService } from './friends.service';
 
@@ -39,6 +40,29 @@ export class FriendsController {
   @Get()
   listFriends(@CurrentUser() user: User): Promise<FriendSummaryDto[]> {
     return this.friends.listFriends(user.id);
+  }
+
+  @Get('blocked')
+  listBlocked(@CurrentUser() user: User): Promise<BlockedUserResponseDto[]> {
+    return this.friends.listBlockedUsers(user.id);
+  }
+
+  @Post(':userId/block')
+  @HttpCode(HttpStatus.OK)
+  blockUser(
+    @CurrentUser() user: User,
+    @Param('userId', new ParseUUIDPipe({ version: '4' })) targetUserId: string,
+  ): Promise<BlockedUserResponseDto> {
+    return this.friends.blockUser(user.id, targetUserId);
+  }
+
+  @Delete(':userId/block')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async unblockUser(
+    @CurrentUser() user: User,
+    @Param('userId', new ParseUUIDPipe({ version: '4' })) targetUserId: string,
+  ): Promise<void> {
+    await this.friends.unblockUser(user.id, targetUserId);
   }
 
   @Get('requests')

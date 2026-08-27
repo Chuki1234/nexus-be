@@ -11,11 +11,13 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { PresenceStatus } from '../../shared/dto/common';
 import { SupabaseService } from '../../infra/supabase/supabase.service';
 import { CHAT_EVENTS } from '../realtime/constants/chat-events.constant';
+import { DirectCallsService } from '../direct-calls/direct-calls.service';
 import type {
   FriendRequestsResponseDto,
   FriendRequestSummaryDto,
   FriendSummaryDto,
 } from './dto/friend-response.dto';
+import type { BlockedUserResponseDto } from './dto/blocked-user.dto';
 
 interface RawFriendshipRow {
   user_a_id: string;
@@ -76,6 +78,18 @@ export class FriendsService {
     const existing = await this.findRelationship(userAId, userBId);
     if (existing) {
       throw new ConflictException(this.relationshipConflictMessage(existing));
+    }
+
+    const { data: blockData } = await this.supabase.client
+      .from('user_blocks')
+      .select('blocker_id')
+      .or(
+        `and(blocker_id.eq.${requesterId},blocked_user_id.eq.${target.id}),and(blocker_id.eq.${target.id},blocked_user_id.eq.${requesterId})`,
+      )
+      .limit(1);
+
+    if (blockData && blockData.length > 0) {
+      throw new BadRequestException('Không thể gửi lời mời kết bạn do có quan hệ chặn.');
     }
 
     const { data, error } = await this.supabase.client
@@ -250,6 +264,159 @@ export class FriendsService {
     } catch (err) {
       this.logger.error('Lỗi dọn dẹp conversation khi removeFriend:', err);
     }
+  }
+
+  /**
+   * Lấy danh sách người dùng bị chặn bởi user hiện tại
+   */
+  async listBlockedUsers(userId: string): Promise<BlockedUserResponseDto[]> {
+    const { data, error } = await this.supabase.client.rpc('list_blocked_users', {
+      p_user_id: userId,
+    });
+
+    if (!error && Array.isArray(data)) {
+      return data.map((row: {
+        id: string;
+        username: string;
+        display_name: string | null;
+        avatar_url: string | null;
+        blocked_at: string;
+      }) => ({
+        id: row.id,
+        username: row.username,
+        displayName: row.display_name,
+        avatarUrl: row.avatar_url,
+        blockedAt: row.blocked_at,
+      }));
+    }
+
+    // Fallback: Nếu RPC lỗi (do schema/type mismatch trên remote DB cũ), truy vấn trực tiếp từ bảng user_blocks
+    this.logger.warn(
+      `RPC list_blocked_users lỗi (${error?.message}), chuyển sang fallback query từ bảng user_blocks.`,
+    );
+
+    const { data: blockRows, error: blockErr } = await this.supabase.client
+      .from('user_blocks')
+      .select('blocked_user_id, created_at')
+      .eq('blocker_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (blockErr) {
+      this.throwDatabaseError('Lấy danh sách người dùng bị chặn', blockErr);
+    }
+
+    if (!blockRows || blockRows.length === 0) {
+      return [];
+    }
+
+    const profiles = await this.loadProfiles(
+      blockRows.map((r) => r.blocked_user_id as string),
+    );
+
+    return blockRows.flatMap((row) => {
+      const p = profiles.get(row.blocked_user_id as string);
+      if (!p) return [];
+      return [
+        {
+          id: p.id,
+          username: p.username,
+          displayName: p.display_name ?? null,
+          avatarUrl: p.avatar_url ?? null,
+          blockedAt: row.created_at as string,
+        },
+      ];
+    });
+  }
+
+  /**
+   * Chặn người dùng: Thêm vào user_blocks, xóa bạn bè, dọn dẹp cuộc gọi active,
+   * phát event user:block-created cho người chặn và relationship:invalidated cho người bị chặn.
+   */
+  async blockUser(
+    userId: string,
+    targetUserId: string,
+  ): Promise<BlockedUserResponseDto> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Bạn không thể tự chặn chính mình.');
+    }
+
+    const { data, error } = await this.supabase.client.rpc('block_user', {
+      p_blocker_id: userId,
+      p_blocked_user_id: targetUserId,
+    });
+
+    if (error) {
+      if (error.code === '22023') {
+        throw new BadRequestException(error.message || 'Yêu cầu không hợp lệ.');
+      }
+      if (error.code === 'P0002') {
+        throw new NotFoundException('Không tìm thấy người dùng.');
+      }
+      this.throwDatabaseError('Chặn người dùng', error);
+    }
+
+    const result = data as {
+      blocked_user: {
+        id: string;
+        username: string;
+        displayName: string | null;
+        avatarUrl: string | null;
+        blockedAt: string;
+      };
+      terminated_call_ids?: string[];
+    };
+
+    const blockedUserDto: BlockedUserResponseDto = {
+      id: result.blocked_user.id,
+      username: result.blocked_user.username,
+      displayName: result.blocked_user.displayName,
+      avatarUrl: result.blocked_user.avatarUrl,
+      blockedAt: result.blocked_user.blockedAt,
+    };
+
+    // 1. Phát event user:block-created tới user-room của blocker (A)
+    this.eventEmitter.emit(CHAT_EVENTS.USER_BLOCK_CREATED, {
+      blockerId: userId,
+      blockedUser: blockedUserDto,
+    });
+
+    // 2. Phát event trung tính relationship:invalidated tới user-room của người bị chặn (B)
+    this.eventEmitter.emit(CHAT_EVENTS.RELATIONSHIP_INVALIDATED, {
+      targetUserId: targetUserId,
+      invalidatedWithUserId: userId,
+    });
+
+    // 3. Nếu có cuộc gọi bị terminate, emit direct_call.terminated qua event emitter
+    if (result.terminated_call_ids && result.terminated_call_ids.length > 0) {
+      for (const callId of result.terminated_call_ids) {
+        this.eventEmitter.emit(CHAT_EVENTS.DIRECT_CALL_TERMINATED, { callId });
+      }
+    }
+
+    return blockedUserDto;
+  }
+
+  /**
+   * Bỏ chặn người dùng: Xóa khỏi user_blocks, phát event user:block-removed cho người chặn.
+   */
+  async unblockUser(userId: string, targetUserId: string): Promise<void> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Người dùng không hợp lệ.');
+    }
+
+    const { error } = await this.supabase.client.rpc('unblock_user', {
+      p_blocker_id: userId,
+      p_blocked_user_id: targetUserId,
+    });
+
+    if (error) {
+      this.throwDatabaseError('Bỏ chặn người dùng', error);
+    }
+
+    this.eventEmitter.emit(CHAT_EVENTS.USER_BLOCK_REMOVED, {
+      blockerId: userId,
+      blockedUserId: targetUserId,
+    });
   }
 
   private async deleteRelationship(

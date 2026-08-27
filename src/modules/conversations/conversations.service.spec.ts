@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -9,12 +10,13 @@ import { ConversationsService } from './conversations.service';
 
 describe('ConversationsService', () => {
   let service: ConversationsService;
-  let mockSupabase: { client: { from: jest.Mock } };
+  let mockSupabase: { client: { from: jest.Mock; rpc: jest.Mock } };
 
   beforeEach(async () => {
     mockSupabase = {
       client: {
         from: jest.fn(),
+        rpc: jest.fn(),
       },
     };
 
@@ -35,25 +37,8 @@ describe('ConversationsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('chặn tạo DM nếu hai người chặn nhau (403)', async () => {
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'friendships') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({ data: { status: 'blocked' }, error: null }),
-          };
-        }
-        return {};
-      });
-
-      await expect(
-        service.getOrCreateDm('user-1', 'user-2'),
-      ).rejects.toThrow(ForbiddenException);
-    });
-
-    it('trả về cuộc trò chuyện hiện có và đảm bảo đủ 2 participants', async () => {
-      const mockExistingConv = {
+    it('gọi đúng RPC get_or_create_dm_conversation với tham số p_user_id và p_recipient_id', async () => {
+      const mockConv = {
         id: 'conv-123',
         type: 'dm',
         name: null,
@@ -63,49 +48,25 @@ describe('ConversationsService', () => {
         created_at: '2026-08-22T00:00:00Z',
       };
 
-      const mockRecipientProfile = {
-        id: 'user-2',
-        username: 'user2',
-        display_name: 'User Hai',
-        avatar_url: null,
-        status_message: null,
-        manual_presence: 'online',
-      };
-
-      const upsertMock = jest.fn().mockResolvedValue({ error: null });
+      mockSupabase.client.rpc.mockResolvedValue({
+        data: mockConv,
+        error: null,
+      });
 
       mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'friendships') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: { status: 'accepted' },
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversations') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: mockExistingConv,
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversation_participants') {
-          return {
-            upsert: upsertMock,
-          };
-        }
         if (table === 'profiles') {
           return {
             select: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
             maybeSingle: jest.fn().mockResolvedValue({
-              data: mockRecipientProfile,
+              data: {
+                id: 'user-2',
+                username: 'user2',
+                display_name: 'User Hai',
+                avatar_url: null,
+                status_message: null,
+                manual_presence: 'online',
+              },
               error: null,
             }),
           };
@@ -114,235 +75,60 @@ describe('ConversationsService', () => {
       });
 
       const res = await service.getOrCreateDm('user-1', 'user-2');
+
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'get_or_create_dm_conversation',
+        {
+          p_user_id: 'user-1',
+          p_recipient_id: 'user-2',
+        },
+      );
       expect(res.id).toBe('conv-123');
       expect(res.type).toBe('dm');
       expect(res.recipient?.username).toBe('user2');
       expect(res.recipient?.displayName).toBe('User Hai');
-      expect(upsertMock).toHaveBeenCalledWith(
-        [
-          { conversation_id: 'conv-123', user_id: 'user-1' },
-          { conversation_id: 'conv-123', user_id: 'user-2' },
-        ],
-        { onConflict: 'conversation_id,user_id', ignoreDuplicates: true },
-      );
     });
 
-    it('tự động chữa lành khi conversation đã tồn tại nhưng thiếu participant (self-healing)', async () => {
-      const mockOrphanConv = {
-        id: 'conv-orphan',
-        type: 'dm',
-        name: null,
-        icon_url: null,
-        owner_id: 'user-1',
-        dm_key: 'user-1:user-2',
-        created_at: '2026-08-22T00:00:00Z',
-      };
-
-      const upsertMock = jest.fn().mockResolvedValue({ error: null });
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'friendships') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: { status: 'accepted' },
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversations') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: mockOrphanConv,
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversation_participants') {
-          return {
-            upsert: upsertMock,
-          };
-        }
-        if (table === 'profiles') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: 'user-2',
-                username: 'user2',
-                display_name: 'User 2',
-                avatar_url: null,
-                status_message: null,
-                manual_presence: 'online',
-              },
-              error: null,
-            }),
-          };
-        }
-        return {};
+    it('ném ForbiddenException khi RPC trả lỗi 42501 do quan hệ chặn', async () => {
+      mockSupabase.client.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          code: '42501',
+          message: 'Không thể nhắn tin trực tiếp với người dùng này do có quan hệ chặn.',
+        },
       });
 
-      const res = await service.getOrCreateDm('user-1', 'user-2');
-      expect(res.id).toBe('conv-orphan');
-      // Đảm bảo upsert được gọi để chữa lành 2 participant vào room
-      expect(upsertMock).toHaveBeenCalledWith(
-        [
-          { conversation_id: 'conv-orphan', user_id: 'user-1' },
-          { conversation_id: 'conv-orphan', user_id: 'user-2' },
-        ],
-        { onConflict: 'conversation_id,user_id', ignoreDuplicates: true },
-      );
+      await expect(
+        service.getOrCreateDm('user-1', 'user-2'),
+      ).rejects.toThrow(ForbiddenException);
     });
 
-    it('tạo mới cuộc trò chuyện và thêm participants nếu chưa tồn tại', async () => {
-      const mockNewConv = {
-        id: 'conv-new',
-        type: 'dm',
-        name: null,
-        icon_url: null,
-        owner_id: 'user-1',
-        dm_key: 'user-1:user-2',
-        created_at: '2026-08-22T00:00:00Z',
-      };
-
-      const upsertMock = jest.fn().mockResolvedValue({ error: null });
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'friendships') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: { status: 'accepted' },
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversations') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: null,
-              error: null,
-            }),
-            insert: jest.fn().mockReturnValue({
-              select: jest.fn().mockReturnValue({
-                single: jest.fn().mockResolvedValue({
-                  data: mockNewConv,
-                  error: null,
-                }),
-              }),
-            }),
-          };
-        }
-        if (table === 'conversation_participants') {
-          return {
-            upsert: upsertMock,
-          };
-        }
-        if (table === 'profiles') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: 'user-2',
-                username: 'user2',
-                display_name: 'User 2',
-                avatar_url: null,
-                status_message: null,
-                manual_presence: 'idle',
-              },
-              error: null,
-            }),
-          };
-        }
-        return {};
+    it('ném NotFoundException khi RPC trả lỗi P0002 do người nhận không tồn tại', async () => {
+      mockSupabase.client.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          code: 'P0002',
+          message: 'Không tìm thấy người dùng nhận.',
+        },
       });
 
-      const res = await service.getOrCreateDm('user-1', 'user-2');
-      expect(res.id).toBe('conv-new');
-      expect(res.recipient?.username).toBe('user2');
-      expect(upsertMock).toHaveBeenCalled();
+      await expect(
+        service.getOrCreateDm('user-1', 'nonexistent-user'),
+      ).rejects.toThrow(NotFoundException);
     });
 
-    it('xử lý an toàn race condition khi hai user tạo đồng thời cùng 1 lúc', async () => {
-      const mockRacedConv = {
-        id: 'conv-raced',
-        type: 'dm',
-        name: null,
-        icon_url: null,
-        owner_id: 'user-2',
-        dm_key: 'user-1:user-2',
-        created_at: '2026-08-22T00:00:00Z',
-      };
-
-      mockSupabase.client.from.mockImplementation((table: string) => {
-        if (table === 'friendships') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: { status: 'accepted' },
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversations') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: null,
-              error: null,
-            }),
-            insert: jest.fn().mockReturnValue({
-              select: jest.fn().mockReturnValue({
-                single: jest.fn().mockResolvedValue({
-                  data: null,
-                  error: { code: '23505', message: 'duplicate key value violates unique constraint' },
-                }),
-              }),
-            }),
-            single: jest.fn().mockResolvedValue({
-              data: mockRacedConv,
-              error: null,
-            }),
-          };
-        }
-        if (table === 'conversation_participants') {
-          return {
-            upsert: jest.fn().mockResolvedValue({ error: null }),
-          };
-        }
-        if (table === 'profiles') {
-          return {
-            select: jest.fn().mockReturnThis(),
-            eq: jest.fn().mockReturnThis(),
-            maybeSingle: jest.fn().mockResolvedValue({
-              data: {
-                id: 'user-2',
-                username: 'user2',
-                display_name: 'User 2',
-                avatar_url: null,
-                status_message: null,
-                manual_presence: 'online',
-              },
-              error: null,
-            }),
-          };
-        }
-        return {};
+    it('ném InternalServerErrorException khi RPC trả lỗi không mong đợi khác', async () => {
+      mockSupabase.client.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          code: '50000',
+          message: 'Database connection failure',
+        },
       });
 
-      const res = await service.getOrCreateDm('user-1', 'user-2');
-      expect(res.id).toBe('conv-raced');
-      expect(res.recipient?.username).toBe('user2');
+      await expect(
+        service.getOrCreateDm('user-1', 'user-2'),
+      ).rejects.toThrow(InternalServerErrorException);
     });
   });
 

@@ -46,7 +46,7 @@ export type OverwriteTarget = 'role' | 'member';
 /** Nhãn tiếng Việt của từng trạng thái, dùng cho screen reader và tooltip. */
 export const PRESENCE_LABEL: Record<PresenceStatus, string> = {
   online: 'Trực tuyến',
-  idle: 'Đang bận',
+  idle: 'Đang vắng',
   dnd: 'Không làm phiền',
   offline: 'Ngoại tuyến',
 };
