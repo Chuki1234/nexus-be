@@ -50,4 +50,28 @@ export class ConversationsController {
   ): Promise<ConversationResponseDto> {
     return this.conversationsService.getConversationById(user.id, id);
   }
+
+  /**
+   * Chấp nhận một "message request" từ người lạ — mở khoá nhắn tin/gọi.
+   */
+  @Post(':id/accept')
+  async acceptRequest(
+    @CurrentUser() user: User,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<{ success: boolean }> {
+    await this.conversationsService.acceptRequest(user.id, id);
+    return { success: true };
+  }
+
+  /**
+   * Từ chối một "message request" — xoá hẳn cuộc trò chuyện.
+   */
+  @Post(':id/decline')
+  async declineRequest(
+    @CurrentUser() user: User,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<{ success: boolean }> {
+    await this.conversationsService.declineRequest(user.id, id);
+    return { success: true };
+  }
 }

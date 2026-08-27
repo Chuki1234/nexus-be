@@ -76,7 +76,7 @@ describe('MessagesService', () => {
   let mockSupabase: {
     client: { from: jest.Mock; rpc: jest.Mock; storage: { from: jest.Mock } };
   };
-  let mockConversationsService: { verifyMembership: jest.Mock };
+  let mockConversationsService: { verifyMembership: jest.Mock; getRequestState: jest.Mock };
   let mockEventEmitter: { emit: jest.Mock };
   let mockServerPermissionsService: {
     assertChannelView: jest.Mock;
@@ -260,6 +260,7 @@ describe('MessagesService', () => {
 
     mockConversationsService = {
       verifyMembership: jest.fn().mockResolvedValue(true),
+      getRequestState: jest.fn().mockResolvedValue('accepted'),
     };
 
     mockEventEmitter = {

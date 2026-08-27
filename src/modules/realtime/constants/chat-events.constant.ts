@@ -14,7 +14,19 @@ export const CHAT_EVENTS = {
   RELATIONSHIP_INVALIDATED: 'relationship.invalidated',
   DIRECT_CALL_TERMINATED: 'direct_call.terminated',
   FRIEND_REQUEST_RECEIVED: 'friend.request.received',
+  SERVER_MEMBER_JOINED: 'server.member.joined',
+  SERVER_MEMBER_LEFT: 'server.member.left',
 } as const;
+
+export interface ServerMemberJoinedEvent {
+  serverId: string;
+  userId: string;
+}
+
+export interface ServerMemberLeftEvent {
+  serverId: string;
+  userId: string;
+}
 
 export interface FriendRequestReceivedEvent {
   recipientId: string;
