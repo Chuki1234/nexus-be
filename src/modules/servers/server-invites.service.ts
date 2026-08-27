@@ -19,6 +19,7 @@ import {
 import { ChatGateway } from '../realtime/chat.gateway';
 import { CreateInviteLinkDto } from './dto/create-invite.dto';
 import { ServerPermissionsService } from './server-permissions.service';
+import type { ServerMemberDto } from '../../shared/dto/server-members.dto';
 
 @Injectable()
 export class ServerInvitesService {
@@ -311,6 +312,32 @@ export class ServerInvitesService {
         inviteeId: userId,
         status: 'accepted',
       });
+
+      if (data && data.success === true && !data.alreadyMember) {
+        try {
+          const { data: profile } = await this.supabase.client
+            .from('profiles')
+            .select('id, username, display_name, avatar_url, created_at')
+            .eq('id', userId)
+            .maybeSingle();
+
+          const memberDto: ServerMemberDto = {
+            userId,
+            username: profile?.username || '',
+            displayName: profile?.display_name || profile?.username || 'User',
+            avatarUrl: profile?.avatar_url || null,
+            nickname: null,
+            role: 'MEMBER',
+            joinedAt: new Date().toISOString(),
+            nexusJoinedAt: profile?.created_at || null,
+            joinMethod: 'Lời mời trực tiếp',
+          };
+
+          this.chatGateway.emitServerMemberJoined(inv.server_id, memberDto);
+        } catch (emitErr: any) {
+          this.logger.warn(`Phát tán sự kiện server:member-joined thất bại: ${emitErr?.message}`);
+        }
+      }
     }
 
     return data;
@@ -651,6 +678,32 @@ export class ServerInvitesService {
         throw new BadRequestException(error.message);
       }
       throw new InternalServerErrorException('Không thể tham gia máy chủ qua liên kết mời.');
+    }
+
+    if (data && data.success === true && !data.alreadyMember) {
+      try {
+        const { data: profile } = await this.supabase.client
+          .from('profiles')
+          .select('id, username, display_name, avatar_url, created_at')
+          .eq('id', userId)
+          .maybeSingle();
+
+        const memberDto: ServerMemberDto = {
+          userId,
+          username: profile?.username || '',
+          displayName: profile?.display_name || profile?.username || 'User',
+          avatarUrl: profile?.avatar_url || null,
+          nickname: null,
+          role: 'MEMBER',
+          joinedAt: new Date().toISOString(),
+          nexusJoinedAt: profile?.created_at || null,
+          joinMethod: `/${trimmedCode}`,
+        };
+
+        this.chatGateway.emitServerMemberJoined(data.serverId, memberDto);
+      } catch (emitErr: any) {
+        this.logger.warn(`Phát tán sự kiện server:member-joined thất bại: ${emitErr?.message}`);
+      }
     }
 
     return data;

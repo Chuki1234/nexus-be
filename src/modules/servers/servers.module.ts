@@ -10,6 +10,8 @@ import {
 } from './servers.controller';
 import { ServersService } from './servers.service';
 
+import { ServerRolesService } from './server-roles.service';
+
 @Module({
   imports: [RealtimeModule],
   controllers: [
@@ -18,7 +20,17 @@ import { ServersService } from './servers.service';
     ServerInvitationsController,
     InvitesController,
   ],
-  providers: [ServersService, ServerPermissionsService, ServerInvitesService],
-  exports: [ServersService, ServerPermissionsService, ServerInvitesService],
+  providers: [
+    ServersService,
+    ServerPermissionsService,
+    ServerInvitesService,
+    ServerRolesService,
+  ],
+  exports: [
+    ServersService,
+    ServerPermissionsService,
+    ServerInvitesService,
+    ServerRolesService,
+  ],
 })
 export class ServersModule {}

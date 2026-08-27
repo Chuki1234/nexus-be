@@ -848,7 +848,7 @@ export class ServersService {
     const userIds = members.map((m) => m.user_id);
     const { data: profiles, error: profErr } = await this.supabase.client
       .from('profiles')
-      .select('id, username, display_name, avatar_url')
+      .select('id, username, display_name, avatar_url, created_at')
       .in('id', userIds);
 
     if (profErr) {
@@ -860,16 +860,33 @@ export class ServersService {
       (profiles || []).map((p: any) => [p.id, p]),
     );
 
+    // 4. Lấy member_roles
+    const { data: memberRolesData } = await this.supabase.client
+      .from('member_roles')
+      .select('user_id, role_id')
+      .eq('server_id', serverId);
+
+    const userRolesMap = new Map<string, string[]>();
+    for (const mr of memberRolesData || []) {
+      const list = userRolesMap.get(mr.user_id) || [];
+      list.push(mr.role_id);
+      userRolesMap.set(mr.user_id, list);
+    }
+
     return members.map((m) => {
       const p = profileMap.get(m.user_id);
+      const assignedRoles = userRolesMap.get(m.user_id) || [];
       return {
         userId: m.user_id,
         username: p?.username || '',
-        displayName: p?.display_name || p?.username || 'User',
+        displayName: m.nickname || p?.display_name || p?.username || 'User',
         avatarUrl: p?.avatar_url || null,
         nickname: m.nickname || null,
         role: m.role || 'MEMBER',
+        roles: assignedRoles,
         joinedAt: m.joined_at,
+        nexusJoinedAt: p?.created_at || null,
+        joinMethod: m.role === 'OWNER' ? 'Chủ sở hữu' : 'Trực tiếp',
       };
     });
   }

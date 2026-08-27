@@ -16,6 +16,7 @@
 
 import type { DirectCallDto } from './dto/direct-calls.dto';
 import type { BlockedUserDto } from './dto/blocked-user.dto';
+import type { ServerMemberDto } from './dto/server-members.dto';
 
 export type UserBlockCreatedPayload = BlockedUserDto;
 
@@ -346,7 +347,12 @@ export interface ServerToClientEvents {
   }) => void;
 
   /** Sự kiện thành viên mới tham gia server */
-  'server:member-joined': (payload: { serverId: string; userId: string; role?: string }) => void;
+  'server:member-joined': (payload: {
+    serverId: string;
+    userId: string;
+    role?: string;
+    member?: ServerMemberDto;
+  }) => void;
 
   /** Nhận lời mời tham gia server trực tiếp (gửi vào user room) */
   'server:invitation-received': (payload: {
@@ -390,6 +396,14 @@ export interface ServerToClientEvents {
 
   /** Sự kiện thành viên rời khỏi máy chủ */
   'server:member-left': (payload: { serverId: string; userId: string }) => void;
+
+  /** Sự kiện vai trò của thành viên trong máy chủ được cập nhật */
+  'server:member-role-updated': (payload: {
+    serverId: string;
+    userId: string;
+    roleId: string;
+    action: 'added' | 'removed';
+  }) => void;
 
   /**
    * Ai đang trong voice channel — dành cho người CHƯA vào phòng.
