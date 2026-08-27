@@ -20,6 +20,7 @@ import {
   type VoiceMemberState,
   type VoiceServerStatesSyncPayload,
 } from '../../shared/socket-events';
+import type { ServerMemberDto } from '../../shared/dto/server-members.dto';
 export { Room };
 import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
@@ -1216,5 +1217,17 @@ export class ChatGateway
       .to(Room.server(serverId))
       .emit('server:member-left', { serverId, userId });
     this.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+  }
+
+  emitServerMemberJoined(serverId: string, member: ServerMemberDto): void {
+    if (!this.server) return;
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-joined', {
+        serverId,
+        userId: member.userId,
+        role: member.role,
+        member,
+      });
   }
 }
