@@ -34,6 +34,9 @@ import {
 import { ServerInvitesService } from './server-invites.service';
 import { ServerPermissionsService } from './server-permissions.service';
 import { ServersService } from './servers.service';
+import { ServerRolesService } from './server-roles.service';
+import { CreateRoleDto, UpdateRoleDto } from './dto/server-roles.dto';
+import type { ServerRoleDto } from './dto/server-roles.dto';
 
 @Controller('servers')
 @UseGuards(SupabaseAuthGuard)
@@ -42,6 +45,7 @@ export class ServersController {
     private readonly servers: ServersService,
     private readonly permissions: ServerPermissionsService,
     private readonly invites: ServerInvitesService,
+    private readonly rolesService: ServerRolesService,
   ) {}
 
   /**
@@ -219,7 +223,7 @@ export class ServersController {
 
   /**
    * DELETE /api/servers/:serverId
-   * Xóa máy chủ (Chỉ dành cho Owner)
+   * Xóa máy chủ (Chỉ dành for Owner)
    */
   @Delete(':serverId')
   @HttpCode(HttpStatus.OK)
@@ -228,6 +232,81 @@ export class ServersController {
     @Param('serverId') serverId: string,
   ): Promise<{ success: boolean; serverId: string }> {
     return this.servers.deleteServer(user.id, serverId);
+  }
+
+
+  /**
+   * GET /api/servers/:serverId/roles
+   */
+  @Get(':serverId/roles')
+  getServerRoles(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+  ): Promise<ServerRoleDto[]> {
+    return this.rolesService.listRoles(serverId, user.id);
+  }
+
+  /**
+   * POST /api/servers/:serverId/roles
+   */
+  @Post(':serverId/roles')
+  createServerRole(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: CreateRoleDto,
+  ): Promise<ServerRoleDto> {
+    return this.rolesService.createRole(serverId, user.id, dto);
+  }
+
+  /**
+   * PATCH /api/servers/:serverId/roles/:roleId
+   */
+  @Patch(':serverId/roles/:roleId')
+  updateServerRole(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('roleId') roleId: string,
+    @Body() dto: UpdateRoleDto,
+  ): Promise<ServerRoleDto> {
+    return this.rolesService.updateRole(serverId, roleId, user.id, dto);
+  }
+
+  /**
+   * DELETE /api/servers/:serverId/roles/:roleId
+   */
+  @Delete(':serverId/roles/:roleId')
+  deleteServerRole(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('roleId') roleId: string,
+  ): Promise<{ success: boolean }> {
+    return this.rolesService.deleteRole(serverId, roleId, user.id);
+  }
+
+  /**
+   * POST /api/servers/:serverId/members/:userId/roles/:roleId
+   */
+  @Post(':serverId/members/:userId/roles/:roleId')
+  assignMemberRole(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('userId') targetUserId: string,
+    @Param('roleId') roleId: string,
+  ): Promise<{ success: boolean; capabilities: any }> {
+    return this.rolesService.assignMemberRole(serverId, targetUserId, roleId, user.id);
+  }
+
+  /**
+   * DELETE /api/servers/:serverId/members/:userId/roles/:roleId
+   */
+  @Delete(':serverId/members/:userId/roles/:roleId')
+  removeMemberRole(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('userId') targetUserId: string,
+    @Param('roleId') roleId: string,
+  ): Promise<{ success: boolean; capabilities: any }> {
+    return this.rolesService.removeMemberRole(serverId, targetUserId, roleId, user.id);
   }
 
   /**

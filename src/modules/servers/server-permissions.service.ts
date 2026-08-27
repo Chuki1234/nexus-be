@@ -154,6 +154,13 @@ export class ServerPermissionsService {
     }
   }
 
+  async assertCanManageRoles(userId: string, serverId: string): Promise<void> {
+    const caps = await this.getCapabilities(userId, serverId);
+    if (!caps.canManageRoles && !caps.isOwner) {
+      throw new ForbiddenException('Bạn không có quyền quản lý vai trò trong máy chủ này.');
+    }
+  }
+
   /**
    * Tính quyền hiệu lực (Effective Permissions) của user trên một channel cụ thể
    * theo đúng thuật toán 5 bước chuẩn Discord bitfield.
