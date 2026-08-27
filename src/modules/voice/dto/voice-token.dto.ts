@@ -12,6 +12,11 @@ export class RequestVoiceTokenDto {
   @IsOptional()
   @IsString()
   displayName?: string;
+
+  /** Ảnh đại diện của người tham gia — nhét vào metadata token để tile hiện đúng ảnh. */
+  @IsOptional()
+  @IsString()
+  avatarUrl?: string;
 }
 
 export interface VoiceTokenResponseDto {
