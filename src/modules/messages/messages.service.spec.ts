@@ -2517,6 +2517,23 @@ describe('MessagesService', () => {
       expect(res.attachments?.[0].signedUrl).toBe(
         'https://storage.target.signed/new-uuid.gif',
       );
+      expect(mockSupabase.client.rpc).toHaveBeenCalledWith(
+        'create_conversation_message',
+        expect.objectContaining({
+          p_attachments: [
+            expect.objectContaining({
+              storagePath: expect.stringContaining(
+                `conversations/${targetConvId}/`,
+              ),
+              filename: 'Tài_liệu_animation.gif',
+              mimeType: 'image/gif',
+              sizeBytes: 2500000,
+              width: 800,
+              height: 600,
+            }),
+          ],
+        }),
+      );
     });
 
     it('3. Chặn user không phải thành viên source hoặc target (403 Forbidden)', async () => {

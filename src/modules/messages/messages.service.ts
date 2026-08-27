@@ -3219,10 +3219,10 @@ export class MessagesService {
     const correlationId = crypto.randomUUID();
     const copiedPaths: string[] = [];
     const newAttachmentsData: {
-      storage_path: string;
+      storagePath: string;
       filename: string;
-      mime_type: string;
-      size_bytes: number | string;
+      mimeType: string;
+      sizeBytes: number | string;
       width: number | null;
       height: number | null;
     }[] = [];
@@ -3268,10 +3268,14 @@ export class MessagesService {
 
         copiedPaths.push(targetStoragePath);
         newAttachmentsData.push({
-          storage_path: targetStoragePath,
+          // create_conversation_message/create_channel_message use the
+          // canonical camelCase attachment contract. Passing database column
+          // names here makes sizeBytes null inside PostgreSQL and attachment-
+          // only forwards fail with SQLSTATE 22023.
+          storagePath: targetStoragePath,
           filename: att.filename,
-          mime_type: att.mime_type,
-          size_bytes: att.size_bytes,
+          mimeType: att.mime_type,
+          sizeBytes: att.size_bytes,
           width: att.width,
           height: att.height,
         });
