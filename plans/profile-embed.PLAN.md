@@ -106,7 +106,7 @@ Test case dự kiến:
 
 ### Kết quả Phase 2
 - Ngày hoàn thành: 2026-08-28
-- Commit: frontend `n/a` · backend `<điền sau khi push>`
+- Commit: frontend `n/a` · backend `0fd93b6`
 - Kết quả test: unit test `6/6 pass` (server-preview.spec.ts) · `nest build` sạch
 - Đánh giá theo 3 tiêu chí:
   - [x] **UI/UX** — n/a (backend)
@@ -211,7 +211,7 @@ Test case dự kiến:
 | Phase | Duyệt lúc | Hoàn thành lúc | Test pass | Commit |
 | --- | --- | --- | --- | --- |
 | 1 | 2026-08-28 | 2026-08-28 | unit 19/19 | fe a2511af · be c4bbe52 |
-| 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be (điền sau) |
+| 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be 0fd93b6 |
 | 3 | | | | |
 | 4 | | | | |
 
