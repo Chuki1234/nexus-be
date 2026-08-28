@@ -38,6 +38,7 @@ interface RawServerRow {
   name: string;
   template_id?: string;
   icon_url: string | null;
+  system_channel_id?: string | null;
   created_at?: string;
   channel_structure?: unknown;
   channel_structure_revision?: number;
@@ -280,7 +281,7 @@ export class ServersService {
     const { data: servers, error: serverError } = await this.supabase.client
       .from('servers')
       .select(
-        'id, name, template_id, icon_url, created_at, channel_structure, channel_structure_revision, channel_structure_updated_at',
+        'id, name, template_id, icon_url, system_channel_id, created_at, channel_structure, channel_structure_revision, channel_structure_updated_at',
       )
       .in('id', serverIds)
       .order('created_at', { ascending: true });
@@ -339,6 +340,7 @@ export class ServersService {
         name: server.name,
         templateId: server.template_id,
         iconUrl: server.icon_url ?? null,
+        systemChannelId: server.system_channel_id ?? null,
         unread: serverUnread,
         mentionCount: serverMentions,
         channels: serverChannels,
@@ -671,7 +673,12 @@ export class ServersService {
     userId: string,
     serverId: string,
     dto: UpdateServerDto,
-  ): Promise<{ id: string; name: string; iconUrl: string | null }> {
+  ): Promise<{
+    id: string;
+    name: string;
+    iconUrl: string | null;
+    systemChannelId: string | null;
+  }> {
     const caps = await this.serverPermissions.getCapabilities(userId, serverId);
     if (!caps.isOwner && !caps.canManageServer) {
       throw new ForbiddenException('Bạn không có quyền chỉnh sửa máy chủ này.');
@@ -693,11 +700,29 @@ export class ServersService {
       updates.icon_url = dto.iconUrl ? dto.iconUrl.trim() || null : null;
     }
 
+    if (dto.systemChannelId !== undefined) {
+      // Kênh hệ thống phải là kênh CHỮ thuộc chính máy chủ này.
+      const { data: chan } = await this.supabase.client
+        .from('channels')
+        .select('id, type')
+        .eq('id', dto.systemChannelId)
+        .eq('server_id', serverId)
+        .maybeSingle();
+
+      if (!chan) {
+        throw new BadRequestException('Kênh hệ thống không thuộc máy chủ này.');
+      }
+      if ((chan as { type: string }).type !== 'text') {
+        throw new BadRequestException('Kênh hệ thống phải là kênh chữ.');
+      }
+      updates.system_channel_id = dto.systemChannelId;
+    }
+
     const { data, error } = await this.supabase.client
       .from('servers')
       .update(updates)
       .eq('id', serverId)
-      .select('id, name, icon_url')
+      .select('id, name, icon_url, system_channel_id')
       .single();
 
     if (error || !data) {
@@ -709,6 +734,7 @@ export class ServersService {
       id: data.id,
       name: data.name,
       iconUrl: data.icon_url,
+      systemChannelId: data.system_channel_id ?? null,
     };
 
     // Broadcast realtime event to server room

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -8,11 +9,13 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import type { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
@@ -327,12 +330,18 @@ export class MessagesController {
    * Chỉnh sửa tin nhắn của chính mình.
    */
   @Patch('messages/:id')
+  @UseInterceptors(
+    FilesInterceptor('files', 5, {
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
   async editMessage(
     @CurrentUser() user: User,
     @Param('id') id: string,
     @Body() dto: EditMessageDto,
+    @UploadedFiles() files?: Express.Multer.File[],
   ): Promise<MessageResponseDto> {
-    return this.messagesService.editMessage(user.id, id, dto);
+    return this.messagesService.editMessage(user.id, id, dto, files);
   }
 
   /**
@@ -367,6 +376,66 @@ export class MessagesController {
     channelId: string | null;
   }> {
     return this.messagesService.recallMessageForEveryone(user.id, id);
+  }
+
+  /**
+   * Proxy tải file/ảnh từ CDN bên ngoài (Discord, Google Drive, v.v.)
+   * để vượt qua rào cản CORS trên trình duyệt khi người dùng dán clipboard rich text/media.
+   */
+  @Post('messages/proxy-attachment')
+  async proxyAttachment(
+    @CurrentUser() user: User,
+    @Body() body: { url: string; filename?: string },
+    @Res() res: Response,
+  ): Promise<void> {
+    const { url, filename } = body;
+    if (!url || !/^https?:\/\//i.test(url)) {
+      throw new BadRequestException('URL không hợp lệ');
+    }
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      });
+
+      if (!response.ok) {
+        throw new BadRequestException(
+          `Không thể tải tệp từ nguồn ngoài: HTTP ${response.status}`,
+        );
+      }
+
+      const contentLength = response.headers.get('content-length');
+      if (contentLength && Number(contentLength) > 10 * 1024 * 1024) {
+        throw new BadRequestException('Tệp vượt quá giới hạn 10MB');
+      }
+
+      const contentType =
+        response.headers.get('content-type') || 'application/octet-stream';
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      if (buffer.length > 10 * 1024 * 1024) {
+        throw new BadRequestException('Tệp vượt quá giới hạn 10MB');
+      }
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', buffer.length);
+      if (filename) {
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${encodeURIComponent(filename)}"`,
+        );
+      }
+      res.status(200).send(buffer);
+    } catch (err: any) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException(
+        `Lỗi khi tải tệp từ URL: ${err?.message || 'Không thể kết nối'}`,
+      );
+    }
   }
 
   /**

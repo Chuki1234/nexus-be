@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Length } from 'class-validator';
+import { IsOptional, IsString, IsUUID, Length } from 'class-validator';
 
 export class UpdateServerDto {
   @IsOptional()
@@ -9,4 +9,9 @@ export class UpdateServerDto {
   @IsOptional()
   @IsString()
   iconUrl?: string | null;
+
+  /** Kênh chữ chính nhận tin nhắn tham gia/rời máy chủ. */
+  @IsOptional()
+  @IsUUID('4', { message: 'Kênh hệ thống không hợp lệ' })
+  systemChannelId?: string;
 }
