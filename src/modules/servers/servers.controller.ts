@@ -274,7 +274,12 @@ export class ServersController {
     @CurrentUser() user: User,
     @Param('serverId') serverId: string,
     @Body() dto: UpdateServerDto,
-  ): Promise<{ id: string; name: string; iconUrl: string | null }> {
+  ): Promise<{
+    id: string;
+    name: string;
+    iconUrl: string | null;
+    systemChannelId: string | null;
+  }> {
     return this.servers.updateServer(user.id, serverId, dto);
   }
 

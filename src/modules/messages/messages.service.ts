@@ -101,6 +101,12 @@ const ALLOWED_MIME_TYPES = new Set([
   'text/plain',
   'application/zip',
   'application/x-zip-compressed',
+  'application/x-7z-compressed',
+  'application/x-tar',
+  'application/gzip',
+  'application/vnd.rar',
+  'application/x-rar-compressed',
+  'application/x-rar',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
 
@@ -127,6 +133,12 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   'text/plain': '.txt',
   'application/zip': '.zip',
   'application/x-zip-compressed': '.zip',
+  'application/x-7z-compressed': '.7z',
+  'application/x-tar': '.tar',
+  'application/gzip': '.gz',
+  'application/vnd.rar': '.rar',
+  'application/x-rar-compressed': '.rar',
+  'application/x-rar': '.rar',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
     '.docx',
 };
@@ -203,6 +215,36 @@ function normalizeMimeType(mimeType: string, filename: string): string {
     return 'application/zip';
   }
   if (
+    lower === 'application/x-7z-compressed' ||
+    lower === 'application/x-7z' ||
+    ext === '.7z'
+  ) {
+    return 'application/x-7z-compressed';
+  }
+  if (
+    lower === 'application/x-tar' ||
+    lower === 'application/tar' ||
+    ext === '.tar'
+  ) {
+    return 'application/x-tar';
+  }
+  if (
+    lower === 'application/gzip' ||
+    lower === 'application/x-gzip' ||
+    ext === '.gz' ||
+    ext === '.tgz'
+  ) {
+    return 'application/gzip';
+  }
+  if (
+    lower === 'application/vnd.rar' ||
+    lower === 'application/x-rar-compressed' ||
+    lower === 'application/x-rar' ||
+    ext === '.rar'
+  ) {
+    return 'application/vnd.rar';
+  }
+  if (
     lower ===
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     ext === '.docx'
@@ -213,12 +255,13 @@ function normalizeMimeType(mimeType: string, filename: string): string {
 }
 
 function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
-  if (buffer.length < 4) return false;
+  if (buffer.length < 2) return false;
   if (mimeType === 'image/jpeg') {
-    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   }
   if (mimeType === 'image/png') {
     return (
+      buffer.length >= 4 &&
       buffer[0] === 0x89 &&
       buffer[1] === 0x50 &&
       buffer[2] === 0x4e &&
@@ -227,6 +270,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
   }
   if (mimeType === 'image/gif') {
     return (
+      buffer.length >= 4 &&
       buffer[0] === 0x47 &&
       buffer[1] === 0x49 &&
       buffer[2] === 0x46 &&
@@ -241,7 +285,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'image/bmp') {
-    return buffer[0] === 0x42 && buffer[1] === 0x4d;
+    return buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d;
   }
   if (mimeType === 'image/svg+xml') {
     const str = buffer
@@ -258,8 +302,8 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'audio/mpeg') {
-    const hasId3Header = buffer.toString('ascii', 0, 3) === 'ID3';
-    const hasMpegFrameSync = buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0;
+    const hasId3Header = buffer.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3';
+    const hasMpegFrameSync = buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0;
     return hasId3Header || hasMpegFrameSync;
   }
   if (mimeType === 'video/mp4') {
@@ -275,7 +319,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'video/ogg') {
-    return buffer.toString('ascii', 0, 4) === 'OggS';
+    return buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'OggS';
   }
   if (mimeType === 'video/x-msvideo') {
     return (
@@ -304,25 +348,56 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'video/x-flv') {
-    return buffer.toString('ascii', 0, 3) === 'FLV';
+    return buffer.length >= 3 && buffer.toString('ascii', 0, 3) === 'FLV';
   }
   if (mimeType === 'application/pdf') {
-    return buffer.toString('ascii', 0, 4) === '%PDF';
+    return buffer.length >= 4 && buffer.toString('ascii', 0, 4) === '%PDF';
   }
   if (
     mimeType === 'application/zip' ||
     mimeType === 'application/x-zip-compressed'
   ) {
     return (
-      (buffer[0] === 0x50 &&
+      buffer.length >= 4 &&
+      ((buffer[0] === 0x50 &&
         buffer[1] === 0x4b &&
         buffer[2] === 0x03 &&
         buffer[3] === 0x04) ||
       (buffer[0] === 0x50 &&
         buffer[1] === 0x4b &&
         buffer[2] === 0x05 &&
-        buffer[3] === 0x06)
+        buffer[3] === 0x06))
     );
+  }
+  if (mimeType === 'application/x-7z-compressed') {
+    return (
+      buffer.length >= 6 &&
+      buffer[0] === 0x37 &&
+      buffer[1] === 0x7a &&
+      buffer[2] === 0xbc &&
+      buffer[3] === 0xaf &&
+      buffer[4] === 0x27 &&
+      buffer[5] === 0x1c
+    );
+  }
+  if (
+    mimeType === 'application/vnd.rar' ||
+    mimeType === 'application/x-rar-compressed' ||
+    mimeType === 'application/x-rar'
+  ) {
+    return (
+      buffer.length >= 4 &&
+      buffer[0] === 0x52 &&
+      buffer[1] === 0x61 &&
+      buffer[2] === 0x72 &&
+      buffer[3] === 0x21
+    );
+  }
+  if (mimeType === 'application/gzip') {
+    return buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b;
+  }
+  if (mimeType === 'application/x-tar') {
+    return buffer.length >= 256;
   }
   if (
     mimeType ===
@@ -2036,11 +2111,10 @@ export class MessagesService {
     userId: string,
     messageId: string,
     dto: EditMessageDto,
+    files?: Express.Multer.File[],
   ): Promise<MessageResponseDto> {
-    const text = dto.content ? dto.content.trim() : '';
-    if (!text) {
-      throw new BadRequestException('Nội dung tin nhắn không được để trống.');
-    }
+    const text = dto.content?.trim() || null;
+    const uploadFiles = files || [];
     const { data: existing, error: findErr } = await this.supabase.client
       .from('messages')
       .select(
@@ -2081,9 +2155,97 @@ export class MessagesService {
       );
     }
 
+    let existingAttachmentCount = 0;
+    let existingAttachmentBytes = 0;
+    if (!text || uploadFiles.length > 0) {
+      const { data: existingAttachments, error: attachmentReadError } =
+        await this.supabase.client
+          .from('attachments')
+          .select('id, size_bytes')
+          .eq('message_id', messageId);
+      if (attachmentReadError) {
+        this.logger.error(
+          'Lỗi kiểm tra tệp đính kèm khi sửa tin nhắn:',
+          attachmentReadError,
+        );
+        throw new InternalServerErrorException(
+          'Không thể kiểm tra tệp đính kèm của tin nhắn.',
+        );
+      }
+      existingAttachmentCount = existingAttachments?.length || 0;
+      existingAttachmentBytes = (existingAttachments || []).reduce(
+        (sum, item) => sum + Number(item.size_bytes || 0),
+        0,
+      );
+    }
+
+    if (!text && existingAttachmentCount === 0 && uploadFiles.length === 0) {
+      throw new BadRequestException(
+        'Tin nhắn phải có nội dung văn bản hoặc ít nhất một tệp đính kèm.',
+      );
+    }
+
+    if (existingAttachmentCount + uploadFiles.length > 5) {
+      throw new BadRequestException(
+        'Tin nhắn chỉ được có tối đa 5 tệp đính kèm.',
+      );
+    }
+
+    const processedFiles = await this.prepareEditedAttachmentFiles(
+      uploadFiles,
+      existingAttachmentBytes,
+    );
+
     // No-op check: nếu nội dung sau normalize giống hệt nội dung canonical
-    if (raw.content === text) {
+    if (raw.content === text && processedFiles.length === 0) {
       return this.hydrateMessageResponseDto(raw, userId);
+    }
+
+    const uploadedPaths: string[] = [];
+    if (processedFiles.length > 0) {
+      const scope = raw.conversation_id
+        ? `conversations/${raw.conversation_id}`
+        : `channels/${raw.channel_id}`;
+      const attachmentRows: Record<string, unknown>[] = [];
+
+      try {
+        for (const item of processedFiles) {
+          const storagePath = `${scope}/${crypto.randomUUID()}${item.ext}`;
+          const { error: uploadError } = await this.supabase.client.storage
+            .from('message-attachments')
+            .upload(storagePath, item.file.buffer, {
+              contentType: item.file.mimetype,
+              upsert: false,
+            });
+          if (uploadError) throw uploadError;
+
+          uploadedPaths.push(storagePath);
+          attachmentRows.push({
+            message_id: messageId,
+            storage_path: storagePath,
+            filename: item.normalizedFilename,
+            mime_type: item.file.mimetype,
+            size_bytes: item.file.size,
+            width: item.width,
+            height: item.height,
+          });
+        }
+
+        const { error: insertError } = await this.supabase.client
+          .from('attachments')
+          .insert(attachmentRows);
+        if (insertError) throw insertError;
+      } catch (error: unknown) {
+        if (uploadedPaths.length > 0) {
+          await this.supabase.client.storage
+            .from('message-attachments')
+            .remove(uploadedPaths);
+        }
+        this.logger.error('Lỗi thêm tệp khi chỉnh sửa tin nhắn:', error);
+        throw new InternalServerErrorException(
+          'Không thể thêm tệp vào tin nhắn.',
+        );
+      }
     }
 
     const now = new Date(serverNow).toISOString();
@@ -2106,6 +2268,15 @@ export class MessagesService {
       .maybeSingle();
 
     if (updateErr || !updated) {
+      if (uploadedPaths.length > 0) {
+        await this.supabase.client
+          .from('attachments')
+          .delete()
+          .in('storage_path', uploadedPaths);
+        await this.supabase.client.storage
+          .from('message-attachments')
+          .remove(uploadedPaths);
+      }
       if (updateErr) {
         this.logger.error('Lỗi cập nhật tin nhắn:', updateErr);
       }
@@ -2142,6 +2313,117 @@ export class MessagesService {
     });
 
     return result;
+  }
+
+  private async prepareEditedAttachmentFiles(
+    files: Express.Multer.File[],
+    existingBytes: number,
+  ): Promise<
+    {
+      file: Express.Multer.File;
+      normalizedFilename: string;
+      width: number | null;
+      height: number | null;
+      ext: string;
+    }[]
+  > {
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
+    const MAX_TOTAL_FILE_SIZE = 30 * 1024 * 1024;
+    const batchBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+    if (existingBytes + batchBytes > MAX_TOTAL_FILE_SIZE) {
+      throw new BadRequestException(
+        'Tổng dung lượng tệp đính kèm vượt quá giới hạn 30MB.',
+      );
+    }
+
+    const processed: {
+      file: Express.Multer.File;
+      normalizedFilename: string;
+      width: number | null;
+      height: number | null;
+      ext: string;
+    }[] = [];
+
+    for (const file of files) {
+      const normalizedFilename = normalizeFilename(file.originalname);
+      file.mimetype = normalizeMimeType(file.mimetype, file.originalname);
+      if (file.size > MAX_FILE_SIZE) {
+        throw new BadRequestException(
+          `File "${normalizedFilename}" vượt quá dung lượng tối đa 10MB.`,
+        );
+      }
+      if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+        throw new BadRequestException(
+          `Định dạng file "${file.mimetype}" không được hỗ trợ.`,
+        );
+      }
+      if (
+        file.mimetype ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      ) {
+        const docxCheck = validateDocxBuffer(file.buffer);
+        if (!docxCheck.valid) {
+          throw new BadRequestException(
+            `Tệp "${normalizedFilename}" không phải là tài liệu Word (.docx) hợp lệ: ${docxCheck.reason}`,
+          );
+        }
+      } else if (!checkMagicBytes(file.buffer, file.mimetype)) {
+        throw new BadRequestException(
+          `Tệp "${normalizedFilename}" có nội dung không khớp với định dạng ${file.mimetype}.`,
+        );
+      }
+
+      let width: number | null = null;
+      let height: number | null = null;
+      if (file.mimetype.startsWith('image/')) {
+        try {
+          const animated =
+            file.mimetype === 'image/gif' || file.mimetype === 'image/webp';
+          const metadata = await sharp(file.buffer, {
+            limitInputPixels: 100_000_000,
+            animated,
+          }).metadata();
+          const pages =
+            animated && metadata.pages && metadata.pages > 0
+              ? metadata.pages
+              : 1;
+          width = metadata.width ?? null;
+          height = metadata.pageHeight
+            ? metadata.pageHeight
+            : metadata.height
+              ? Math.floor(metadata.height / pages)
+              : null;
+          if (
+            !width ||
+            !height ||
+            width > 4096 ||
+            height > 4096 ||
+            pages > 300
+          ) {
+            throw new Error('unsafe-image-dimensions');
+          }
+          if (
+            width * height > 25_000_000 ||
+            width * height * pages > 100_000_000
+          ) {
+            throw new Error('unsafe-image-budget');
+          }
+        } catch {
+          throw new BadRequestException(
+            `Hình ảnh "${normalizedFilename}" bị lỗi hoặc vượt quá giới hạn xử lý.`,
+          );
+        }
+      }
+
+      processed.push({
+        file,
+        normalizedFilename,
+        width,
+        height,
+        ext: MIME_EXTENSION_MAP[file.mimetype] || '',
+      });
+    }
+    return processed;
   }
 
   /**
@@ -3555,7 +3837,9 @@ export class MessagesService {
   }
 
   @OnEvent(CHAT_EVENTS.SERVER_MEMBER_JOINED)
-  async handleServerMemberJoined(event: ServerMemberJoinedEvent): Promise<void> {
+  async handleServerMemberJoined(
+    event: ServerMemberJoinedEvent,
+  ): Promise<void> {
     await this.createServerSystemMessage(
       event.serverId,
       event.userId,
@@ -3584,22 +3868,55 @@ export class MessagesService {
     content: string,
   ): Promise<MessageResponseDto | null> {
     try {
-      // 1. Tìm kênh chat chữ mặc định/chính (kênh text đầu tiên theo position)
-      const { data: channel, error: channelErr } = await this.supabase.client
-        .from('channels')
-        .select('id')
-        .eq('server_id', serverId)
-        .eq('type', 'text')
-        .order('position', { ascending: true })
-        .limit(1)
+      // 1. Xác định kênh nhận tin nhắn hệ thống:
+      //    a) Ưu tiên system_channel_id do chủ máy chủ chỉ định
+      //    b) Fallback về kênh chữ đầu tiên theo position nếu chưa đặt / kênh đã xoá
+      let channelId: string | null = null;
+
+      const { data: serverRow } = await this.supabase.client
+        .from('servers')
+        .select('system_channel_id')
+        .eq('id', serverId)
         .maybeSingle();
 
-      if (channelErr || !channel) {
+      const sysChannelId = (
+        serverRow as { system_channel_id?: string | null } | null
+      )?.system_channel_id;
+
+      if (sysChannelId) {
+        // Xác nhận kênh vẫn tồn tại & là kênh chữ của server này
+        const { data: sysChan } = await this.supabase.client
+          .from('channels')
+          .select('id')
+          .eq('id', sysChannelId)
+          .eq('server_id', serverId)
+          .eq('type', 'text')
+          .maybeSingle();
+        if (sysChan) {
+          channelId = (sysChan as { id: string }).id;
+        }
+      }
+
+      if (!channelId) {
+        const { data: firstChannel } = await this.supabase.client
+          .from('channels')
+          .select('id')
+          .eq('server_id', serverId)
+          .eq('type', 'text')
+          .order('position', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        channelId = (firstChannel as { id: string } | null)?.id ?? null;
+      }
+
+      if (!channelId) {
         this.logger.warn(
           `Không tìm thấy kênh văn bản để gửi tin nhắn hệ thống cho server ${serverId}`,
         );
         return null;
       }
+
+      const channel = { id: channelId };
 
       // 2. Chèn tin nhắn hệ thống vào DB
       const { data: insertedMsg, error: insertErr } = await this.supabase.client

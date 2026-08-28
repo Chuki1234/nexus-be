@@ -364,6 +364,7 @@ describe('ServersService', () => {
           iconUrl: null,
           unread: false,
           mentionCount: 0,
+          systemChannelId: null,
           channelStructure: null,
           channels: [
             {

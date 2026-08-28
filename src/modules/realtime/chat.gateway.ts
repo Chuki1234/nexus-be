@@ -465,7 +465,7 @@ export class ChatGateway
     const userId = client.data.userId;
     if (!userId || !isValidUuid(payload?.serverId)) return;
 
-    if (payload.channelId === null) {
+    if (payload.channelId === null || payload.channelId === undefined || payload.channelId === '') {
       // User rời khỏi kênh voice trong server
       const prevChannelId = await this.redisState.removeServerVoiceState(
         payload.serverId,
