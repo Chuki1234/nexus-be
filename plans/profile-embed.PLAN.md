@@ -32,7 +32,7 @@ Ba loại URL nội bộ hỗ trợ (same-origin):
 ---
 
 ## Phase 1: Util nhận diện link nội bộ + Shared DTO
-Status: APPROVED 
+Status: DONE 
 
 Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
 - **Feature**: util `resolveInternalLink(url)` nhận diện đúng 3 loại URL nội bộ same-origin
@@ -60,7 +60,7 @@ Test case dự kiến:
 
 ### Kết quả Phase 1
 - Ngày hoàn thành: 2026-08-28
-- Commit: frontend `<điền sau khi push>` · backend `<điền sau khi push>`
+- Commit: frontend `a2511af` · backend `c4bbe52`
 - Kết quả test: unit test `19/19 pass` (internal-link.spec.ts) · E2E Playwright `n/a`
 - Đánh giá theo 3 tiêu chí:
   - [x] **UI/UX** — n/a (phase logic thuần, chưa có UI)
@@ -71,7 +71,7 @@ Test case dự kiến:
 - Migration DB: chưa cần
 - Vấn đề phát sinh / ghi chú: util nhận `origin` qua tham số (mặc định `location.origin`) để test
   không phụ thuộc môi trường trình duyệt; chỉ khớp same-origin nên link ngoài an toàn tuyệt đối.
-- PR: `<điền sau khi tạo>`
+- PR: FE Chuki1234/nexus-fe#37 · BE Chuki1234/nexus-be#26
 
 ---
 
@@ -205,7 +205,7 @@ Test case dự kiến:
 ## Nhật ký duyệt & hoàn thành (bảng tóm tắt nhanh — chi tiết xem mục "Kết quả Phase N" ở trên)
 | Phase | Duyệt lúc | Hoàn thành lúc | Test pass | Commit |
 | --- | --- | --- | --- | --- |
-| 1 | | | | |
+| 1 | 2026-08-28 | 2026-08-28 | unit 19/19 | fe a2511af · be c4bbe52 |
 | 2 | | | | |
 | 3 | | | | |
 | 4 | | | | |
