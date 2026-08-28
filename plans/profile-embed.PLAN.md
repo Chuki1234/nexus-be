@@ -300,7 +300,7 @@ Test case dự kiến:
 
 ### Kết quả Phase 6
 - Ngày hoàn thành: 2026-08-29
-- Commit: frontend `<điền sau khi push>` · backend `<điền sau khi push>`
+- Commit: frontend `a9c2fa3` · backend `060101d`
 - Kết quả test: BE `server-preview 6/6` · FE `chat-link-embed 7/7` (regression FE 106/106) ·
   `check:shared` sạch · `nest build` + `ng build` sạch
 - Đánh giá theo 3 tiêu chí:
@@ -324,7 +324,7 @@ Test case dự kiến:
 | 3 | 2026-08-29 | 2026-08-29 | unit 19+4+65 | fe 3f95a36 |
 | 4 | 2026-08-29 | 2026-08-29 | unit 7+15+65 | fe cc1959f |
 | 5 | 2026-08-29 | 2026-08-29 | unit 105/105 | fe d5c7cd7 |
-| 6 | 2026-08-29 | 2026-08-29 | be6+fe106 | (điền sau) |
+| 6 | 2026-08-29 | 2026-08-29 | be6+fe106 | fe a9c2fa3 · be 060101d |
 
 ---
 
