@@ -306,7 +306,9 @@ Test case dự kiến:
   - [ ] **UI/UX** — card giàu như mock
   - [ ] **Feature** — đủ field, tag chips
   - [ ] **Data** — migration áp đúng, không lộ field nhạy cảm, onlineCount đúng nguồn
-- Migration DB: `backend/migrations/<...>.sql` — trạng thái: chờ mentor áp
+- Migration DB: `nexus-be/supabase/migrations/20260829120000_server_description_tags.sql` (thêm cột
+  `description` + `tags` vào bảng `servers`) — trạng thái: ĐÃ TẠO, **chờ mentor áp trên Supabase**. Sau
+  khi mentor xác nhận mới nối code (DTO/service/UI). `onlineCount` lấy từ `PresenceService` ở bước code.
 - Vấn đề phát sinh / ghi chú:
 - PR: FE #37 · BE #26
 
