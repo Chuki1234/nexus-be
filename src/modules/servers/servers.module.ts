@@ -6,6 +6,7 @@ import { ServerPermissionsService } from './server-permissions.service';
 import {
   InvitesController,
   ServerInvitationsController,
+  ServerPreviewController,
   ServersController,
   ServerTemplatesController,
 } from './servers.controller';
@@ -20,6 +21,7 @@ import { ServerRolesService } from './server-roles.service';
     ServerTemplatesController,
     ServerInvitationsController,
     InvitesController,
+    ServerPreviewController,
   ],
   providers: [
     ServersService,

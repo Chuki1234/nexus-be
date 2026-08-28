@@ -27,6 +27,7 @@ import {
   ServerWithChannelsDto,
 } from './dto/server-response.dto';
 import { ServerMemberDto } from '../../shared/dto/server-members.dto';
+import { ServerPreviewDto } from '../../shared/dto/server-invitations.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import {
   ServerChannelStructureDto,
@@ -53,6 +54,10 @@ interface RawChannelRow {
   position: number;
 }
 
+/** `servers.id` là `uuid` — chặn id rác trước khi bắn query xuống Postgres. */
+const SERVER_ID_UUID_REGEX =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 @Injectable()
 export class ServersService {
   private readonly logger = new Logger(ServersService.name);
@@ -69,6 +74,55 @@ export class ServersService {
    */
   getTemplates(): readonly ServerTemplateDefinition[] {
     return SERVER_TEMPLATES;
+  }
+
+  /**
+   * Xem trước công khai của một máy chủ theo id — GET /api/servers/:serverId/preview.
+   *
+   * Dùng cho card "giới thiệu máy chủ" khi dán link `origin/channels/:serverId`
+   * vào khung chat. Endpoint để public (giống `getInvitePreview`) nên CHỈ được
+   * trả field công khai an toàn: id, tên, icon, banner, số thành viên — tuyệt đối
+   * không trả `owner_id` hay dữ liệu nhạy cảm khác.
+   *
+   * Validate `serverId` là uuid trước khi query (400 nếu sai) để không đẩy chuỗi
+   * rác xuống Postgres, và trả 404 rõ ràng khi máy chủ không tồn tại thay vì để
+   * lỗi 500 chung chung.
+   */
+  async getServerPreview(serverId: string): Promise<ServerPreviewDto> {
+    const trimmed = serverId?.trim();
+    if (!trimmed || !SERVER_ID_UUID_REGEX.test(trimmed)) {
+      throw new BadRequestException('Mã máy chủ không hợp lệ.');
+    }
+
+    const { data: server, error } = await this.supabase.client
+      .from('servers')
+      .select('id, name, icon_url, banner_url')
+      .eq('id', trimmed)
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(`Tra cứu server preview thất bại: ${error.message}`);
+      throw new InternalServerErrorException('Lỗi tra cứu thông tin máy chủ.');
+    }
+
+    if (!server) {
+      throw new NotFoundException('Máy chủ không tồn tại hoặc đã bị xóa.');
+    }
+
+    // Đếm thành viên tách riêng (head:true → chỉ lấy count, không kéo hàng) —
+    // giống cách getInvitePreview đếm, tránh join làm phồng payload.
+    const { count: memberCount } = await this.supabase.client
+      .from('server_members')
+      .select('*', { count: 'exact', head: true })
+      .eq('server_id', trimmed);
+
+    return {
+      serverId: server.id,
+      name: server.name,
+      iconUrl: server.icon_url ?? null,
+      bannerUrl: server.banner_url ?? null,
+      memberCount: memberCount ?? 1,
+    };
   }
 
   /**

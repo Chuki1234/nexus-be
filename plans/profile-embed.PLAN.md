@@ -76,7 +76,7 @@ Test case dự kiến:
 ---
 
 ## Phase 2: Backend endpoint GET /api/servers/:id/preview (public)
-Status: PENDING
+Status: DONE
 
 Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
 - **Data**: `GET /api/servers/:serverId/preview` trả `ServerPreviewDto` (id, name, iconUrl,
@@ -105,17 +105,22 @@ Test case dự kiến:
 - E2E / workflow test (Playwright): (chưa — verify bằng unit + gọi thử ở Phase 4)
 
 ### Kết quả Phase 2
-- Ngày hoàn thành:
-- Commit: frontend `<n/a>` · backend `<sha ngắn>`
-- Kết quả test: unit test `<x/y pass>`
+- Ngày hoàn thành: 2026-08-28
+- Commit: frontend `n/a` · backend `<điền sau khi push>`
+- Kết quả test: unit test `6/6 pass` (server-preview.spec.ts) · `nest build` sạch
 - Đánh giá theo 3 tiêu chí:
-  - [ ] **UI/UX** — n/a
-  - [ ] **Feature** — endpoint public hoạt động cho member lẫn khách
-  - [ ] **Data** — validate uuid, 400/404 đúng, không lộ field nhạy cảm
+  - [x] **UI/UX** — n/a (backend)
+  - [x] **Feature** — endpoint public `GET /api/servers/:serverId/preview` (ServerPreviewController,
+    không guard) hoạt động cho cả khách chưa đăng nhập; delegate về ServersService.getServerPreview
+  - [x] **Data** — validate uuid (400), 404 khi không có server, chỉ trả field công khai
+    (serverId/name/iconUrl/bannerUrl/memberCount), không lộ owner_id; đếm member bằng head:true (không N+1)
 - Migration DB: chưa cần (dùng bảng servers + server_members có sẵn)
-- Vấn đề phát sinh / ghi chú:
-- PR:
-
+- Vấn đề phát sinh / ghi chú: khi viết test phát hiện 2 spec CŨ của Minh Tài đã hỏng sẵn từ baseline
+  do constructor drift — `servers.service.spec.ts` thiếu provider `MediaService`,
+  `servers.controller.spec.ts` thiếu `ServerRolesService`. KHÔNG sửa (thuộc trang Minh Tài); thay
+  vào đó tách test feature sang file mới độc lập `server-preview.spec.ts` (khởi tạo bằng `new`, không
+  qua Nest DI) để không đụng vùng người khác. Nên báo Minh Tài 2 spec này đang đỏ.
+- PR: BE Chuki1234/nexus-be#26
 ---
 
 ## Phase 3: Embed USER profile + ghép vào khung chat
@@ -206,7 +211,7 @@ Test case dự kiến:
 | Phase | Duyệt lúc | Hoàn thành lúc | Test pass | Commit |
 | --- | --- | --- | --- | --- |
 | 1 | 2026-08-28 | 2026-08-28 | unit 19/19 | fe a2511af · be c4bbe52 |
-| 2 | | | | |
+| 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be (điền sau) |
 | 3 | | | | |
 | 4 | | | | |
 

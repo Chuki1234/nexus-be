@@ -24,6 +24,7 @@ import {
   ServerInviteCandidateDto,
   ServerInviteLinkResponseDto,
   ServerInvitePreviewDto,
+  ServerPreviewDto,
 } from '../../shared/dto/server-invitations.dto';
 import { ServerTemplateDefinition } from './constants/server-templates.constant';
 import { CreateChannelDto } from './dto/create-channel.dto';
@@ -471,5 +472,27 @@ export class InvitesController {
     alreadyMember: boolean;
   }> {
     return this.invites.joinByInviteCode(user.id, code);
+  }
+}
+
+/**
+ * Controller công khai xem trước thông tin máy chủ.
+ *
+ * Tách riêng khỏi `ServersController` (đang `@UseGuards(SupabaseAuthGuard)` ở cấp
+ * class) vì route này CỐ Ý không cần đăng nhập — để người nhận link giới thiệu
+ * `origin/channels/:serverId` xem được card dù chưa vào server, giống
+ * `InvitesController` cho link mời. Route `:serverId/preview` là đoạn literal
+ * riêng nên không đụng các route `:serverId/...` có guard của controller kia.
+ */
+@Controller('servers')
+export class ServerPreviewController {
+  constructor(private readonly servers: ServersService) {}
+
+  @Get(':serverId/preview')
+  @HttpCode(HttpStatus.OK)
+  getServerPreview(
+    @Param('serverId') serverId: string,
+  ): Promise<ServerPreviewDto> {
+    return this.servers.getServerPreview(serverId);
   }
 }
