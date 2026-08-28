@@ -945,6 +945,257 @@ export class ServersService {
   }
 
   /**
+   * Trục xuất (Kick) thành viên khỏi máy chủ.
+   * Yêu cầu caller có quyền KICK_MEMBERS (hoặc là OWNER/ADMIN).
+   * Không thể trục xuất Chủ sở hữu máy chủ.
+   */
+  async kickServerMember(
+    operatorUserId: string,
+    serverId: string,
+    targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    if (!serverId || !targetUserId) {
+      throw new BadRequestException('Tham số không hợp lệ.');
+    }
+
+    if (operatorUserId === targetUserId) {
+      throw new BadRequestException('Không thể tự trục xuất chính mình. Vui lòng dùng tính năng rời máy chủ.');
+    }
+
+    // 1. Kiểm tra quyền của operator
+    const capabilities = await this.serverPermissions.getCapabilities(operatorUserId, serverId);
+    if (!capabilities.canKickMembers) {
+      throw new ForbiddenException('Bạn không có quyền trục xuất thành viên khỏi máy chủ này.');
+    }
+
+    // 2. Kiểm tra target user không phải là Owner của server
+    const { data: server, error: sErr } = await this.supabase.client
+      .from('servers')
+      .select('owner_id')
+      .eq('id', serverId)
+      .maybeSingle();
+
+    if (sErr || !server) {
+      throw new NotFoundException('Máy chủ không tồn tại.');
+    }
+
+    if (server.owner_id === targetUserId) {
+      throw new ForbiddenException('Không thể trục xuất chủ sở hữu máy chủ.');
+    }
+
+    // 3. Thực hiện xóa membership qua RPC leave_server (đã có advisory lock & xóa member_roles)
+    const { data: rpcData, error: rpcError } = await this.supabase.client.rpc(
+      'leave_server',
+      {
+        p_server_id: serverId,
+        p_user_id: targetUserId,
+      },
+    );
+
+    if (rpcError) {
+      this.logger.error(`Kick thành viên thất bại: ${rpcError.message}`);
+      throw new InternalServerErrorException('Không thể trục xuất thành viên.');
+    }
+
+    // 4. Realtime Broadcast
+    try {
+      this.chatGateway.emitServerMemberKicked(serverId, targetUserId, operatorUserId);
+    } catch (broadcastErr) {
+      this.logger.warn(`Phát tán sự kiện server:member-kicked thất bại: ${broadcastErr}`);
+    }
+
+    return {
+      success: true,
+      serverId,
+      targetUserId,
+    };
+  }
+
+  /**
+   * Cấm thành viên (Ban) khỏi máy chủ.
+   * Yêu cầu caller có quyền BAN_MEMBERS (hoặc OWNER/ADMIN).
+   * Không thể cấm Chủ sở hữu máy chủ.
+   */
+  async banServerMember(
+    operatorUserId: string,
+    serverId: string,
+    targetUserId: string,
+    reason?: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string; reason?: string }> {
+    if (!serverId || !targetUserId) {
+      throw new BadRequestException('Tham số không hợp lệ.');
+    }
+
+    if (operatorUserId === targetUserId) {
+      throw new BadRequestException('Không thể tự cấm chính mình.');
+    }
+
+    // 1. Kiểm tra quyền của operator
+    const capabilities = await this.serverPermissions.getCapabilities(operatorUserId, serverId);
+    if (!capabilities.canBanMembers) {
+      throw new ForbiddenException('Bạn không có quyền cấm thành viên khỏi máy chủ này.');
+    }
+
+    // 2. Kiểm tra target user không phải Owner
+    const { data: server, error: sErr } = await this.supabase.client
+      .from('servers')
+      .select('owner_id')
+      .eq('id', serverId)
+      .maybeSingle();
+
+    if (sErr || !server) {
+      throw new NotFoundException('Máy chủ không tồn tại.');
+    }
+
+    if (server.owner_id === targetUserId) {
+      throw new ForbiddenException('Không thể cấm chủ sở hữu máy chủ.');
+    }
+
+    // 3. Thực hiện xóa membership qua RPC leave_server
+    const { error: rpcError } = await this.supabase.client.rpc('leave_server', {
+      p_server_id: serverId,
+      p_user_id: targetUserId,
+    });
+
+    if (rpcError) {
+      this.logger.error(`Ban thành viên thất bại khi xoá membership: ${rpcError.message}`);
+      throw new InternalServerErrorException('Không thể cấm thành viên.');
+    }
+
+    // 4. Ghi nhận thông tin cấm vào server_bans (nếu có table hoặc store)
+    const { error: banErr } = await this.supabase.client.from('server_bans').upsert({
+      server_id: serverId,
+      user_id: targetUserId,
+      reason: reason || null,
+      banned_by: operatorUserId,
+      created_at: new Date().toISOString(),
+    });
+
+    if (banErr && banErr.code !== 'PGRST205') {
+      this.logger.error(`Lưu bản ghi server_bans thất bại: ${banErr.message}`);
+    }
+
+    // 5. Broadcast realtime WS
+    try {
+      this.chatGateway.emitServerMemberBanned(serverId, targetUserId, operatorUserId, reason);
+    } catch (broadcastErr) {
+      this.logger.warn(`Phát tán sự kiện server:member-banned thất bại: ${broadcastErr}`);
+    }
+
+    return {
+      success: true,
+      serverId,
+      targetUserId,
+      reason,
+    };
+  }
+
+  /**
+   * Danh sách thành viên bị cấm (Banned Users) của máy chủ.
+   * Yêu cầu caller có quyền BAN_MEMBERS hoặc là Owner/Admin.
+   */
+  async listServerBans(
+    operatorUserId: string,
+    serverId: string,
+  ): Promise<Array<{
+    id: string;
+    userId: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    reason: string | null;
+    bannedAt: string;
+    bannedBy: string;
+  }>> {
+    const capabilities = await this.serverPermissions.getCapabilities(operatorUserId, serverId);
+    if (!capabilities.canBanMembers) {
+      throw new ForbiddenException('Bạn không có quyền xem danh sách thành viên bị cấm.');
+    }
+
+    const { data: bans, error } = await this.supabase.client
+      .from('server_bans')
+      .select('server_id, user_id, reason, banned_by, created_at, profiles:user_id(username, display_name, avatar_url)')
+      .eq('server_id', serverId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      if (error.code === 'PGRST205') {
+        return [];
+      }
+      this.logger.error(`Lấy danh sách server_bans thất bại: ${error.message}`);
+      return [];
+    }
+
+    return (bans || []).map((b: any) => ({
+      id: `${b.server_id}_${b.user_id}`,
+      userId: b.user_id,
+      username: b.profiles?.username || 'Unknown',
+      displayName: b.profiles?.display_name || b.profiles?.username || 'Thành viên bị cấm',
+      avatarUrl: b.profiles?.avatar_url || null,
+      reason: b.reason || null,
+      bannedAt: b.created_at,
+      bannedBy: b.banned_by,
+    }));
+  }
+
+  /**
+   * Bỏ cấm (Unban) thành viên khỏi máy chủ.
+   * Yêu cầu caller có quyền BAN_MEMBERS.
+   */
+  async unbanServerMember(
+    operatorUserId: string,
+    serverId: string,
+    targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    if (!serverId || !targetUserId) {
+      throw new BadRequestException('Tham số không hợp lệ.');
+    }
+
+    const capabilities = await this.serverPermissions.getCapabilities(operatorUserId, serverId);
+    if (!capabilities.canBanMembers) {
+      throw new ForbiddenException('Bạn không có quyền gỡ cấm thành viên khỏi máy chủ này.');
+    }
+
+    const { error } = await this.supabase.client
+      .from('server_bans')
+      .delete()
+      .match({ server_id: serverId, user_id: targetUserId });
+
+    if (error && error.code !== 'PGRST205') {
+      this.logger.error(`Bỏ cấm server_bans thất bại: ${error.message}`);
+      throw new InternalServerErrorException('Không thể bỏ cấm thành viên.');
+    }
+
+    try {
+      this.chatGateway.emitServerMemberUnbanned(serverId, targetUserId);
+    } catch (broadcastErr) {
+      this.logger.warn(`Phát tán sự kiện server:member-unbanned thất bại: ${broadcastErr}`);
+    }
+
+    return {
+      success: true,
+      serverId,
+      targetUserId,
+    };
+  }
+
+  /**
+   * Kiểm tra người dùng có đang bị cấm khỏi máy chủ hay không.
+   */
+  async checkUserBanned(serverId: string, userId: string): Promise<boolean> {
+    const { data: ban, error } = await this.supabase.client
+      .from('server_bans')
+      .select('user_id')
+      .match({ server_id: serverId, user_id: userId })
+      .maybeSingle();
+
+    if (error || !ban) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Lấy danh sách thành viên thực tế của server (kèm thông tin profile).
    * Yêu cầu caller phải là thành viên của server.
    */

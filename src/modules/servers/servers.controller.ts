@@ -28,6 +28,7 @@ import {
 } from '../../shared/dto/server-invitations.dto';
 import { ServerTemplateDefinition } from './constants/server-templates.constant';
 import { CreateChannelDto } from './dto/create-channel.dto';
+import { CreateServerBanDto } from './dto/create-server-ban.dto';
 import {
   CreateDirectInvitationDto,
   CreateInviteLinkDto,
@@ -391,6 +392,61 @@ export class ServersController {
     @Param('serverId') serverId: string,
   ): Promise<{ success: boolean; serverId: string; alreadyLeft: boolean }> {
     return this.servers.leaveServer(user.id, serverId);
+  }
+
+  /**
+   * DELETE /api/servers/:serverId/members/:targetUserId
+   * Trục xuất (Kick) thành viên khỏi máy chủ (Yêu cầu quyền KICK_MEMBERS hoặc Owner/Admin)
+   */
+  @Delete(':serverId/members/:targetUserId')
+  @HttpCode(HttpStatus.OK)
+  kickServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('targetUserId') targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    return this.servers.kickServerMember(user.id, serverId, targetUserId);
+  }
+
+  /**
+   * POST /api/servers/:serverId/bans
+   * Cấm (Ban) thành viên khỏi máy chủ (Yêu cầu quyền BAN_MEMBERS hoặc Owner/Admin)
+   */
+  @Post(':serverId/bans')
+  @HttpCode(HttpStatus.CREATED)
+  banServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: CreateServerBanDto,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string; reason?: string }> {
+    return this.servers.banServerMember(user.id, serverId, dto.targetUserId, dto.reason);
+  }
+
+  /**
+   * GET /api/servers/:serverId/bans
+   * Lấy danh sách các thành viên bị cấm trong máy chủ
+   */
+  @Get(':serverId/bans')
+  @HttpCode(HttpStatus.OK)
+  listServerBans(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+  ) {
+    return this.servers.listServerBans(user.id, serverId);
+  }
+
+  /**
+   * DELETE /api/servers/:serverId/bans/:targetUserId
+   * Bỏ cấm (Unban) thành viên khỏi máy chủ (Yêu cầu quyền BAN_MEMBERS hoặc Owner/Admin)
+   */
+  @Delete(':serverId/bans/:targetUserId')
+  @HttpCode(HttpStatus.OK)
+  unbanServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('targetUserId') targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    return this.servers.unbanServerMember(user.id, serverId, targetUserId);
   }
 }
 
