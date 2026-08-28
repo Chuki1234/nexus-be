@@ -177,7 +177,7 @@ Test case dự kiến:
 ---
 
 ## Phase 4: Embed SERVER (invite + introduction) + nút hành động
-Status: PENDING
+Status: DONE
 
 Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
 - **Feature**: mở rộng `chat-link-embed` xử lý `server-invite` (dùng
@@ -203,18 +203,22 @@ Test case dự kiến:
   thấy card server + nút.
 
 ### Kết quả Phase 4
-- Ngày hoàn thành:
-- Commit: frontend `<sha ngắn>` · backend `<n/a>`
-- Kết quả test: unit `<x/y>` · E2E Playwright `<x/y>`
+- Ngày hoàn thành: 2026-08-29
+- Commit: frontend `cc1959f` · backend `n/a`
+- Kết quả test: unit `chat-link-embed 7/7 · servers-api 15/15 · conversation 65/65` · E2E Playwright `hoãn` (xem ghi chú)
 - Đánh giá theo 3 tiêu chí:
-  - [ ] **UI/UX** — card server đồng bộ, Material, loading/error
-  - [ ] **Feature** — invite + introduction đúng hành vi, nút điều hướng đúng
-  - [ ] **Data** — endpoint preview trả field an toàn, xử lý invite hết hạn
+  - [x] **UI/UX** — card máy chủ (icon/tên/số thành viên) đồng bộ token; nút `mat-flat-button` +
+    `mat-icon`: "Tham gia" (invite) / "Xem server" (introduction); skeleton khi tải; invite hết hạn/hết
+    lượt → chặn nút + hiện lý do
+  - [x] **Feature** — invite `/invite/:code` → `getInvitePreview` + nút Tham gia; introduction
+    `/channels/:serverId` → `getServerPreview` + nút Xem server; cache dedupe tĩnh (nhiều tin cùng link
+    chỉ 1 request); lỗi/không tồn tại → ẩn card, link inline còn nguyên
+  - [x] **Data** — `getServerPreview` gọi endpoint public, KHÔNG gắn Authorization header; mọi data qua NestJS
 - Migration DB: chưa cần
-- Vấn đề phát sinh / ghi chú:
-- PR:
-
----
+- Vấn đề phát sinh / ghi chú: browser/E2E verify VẪN hoãn (như Phase 3) do WIP chưa commit của người khác
+  (`user-panel.ts/.html` + `account-switch.service.ts` + `features/profile/modals/`) làm full app build fail.
+  Không đụng các file đó; unit test (graph-scoped) đã phủ đủ cả 3 loại link.
+- PR: FE Chuki1234/nexus-fe#37
 
 ## Nhật ký duyệt & hoàn thành (bảng tóm tắt nhanh — chi tiết xem mục "Kết quả Phase N" ở trên)
 | Phase | Duyệt lúc | Hoàn thành lúc | Test pass | Commit |
@@ -222,18 +226,34 @@ Test case dự kiến:
 | 1 | 2026-08-28 | 2026-08-28 | unit 19/19 | fe a2511af · be c4bbe52 |
 | 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be 0fd93b6 |
 | 3 | 2026-08-29 | 2026-08-29 | unit 19+4+65 | fe 3f95a36 |
-| 4 | | | | |
+| 4 | 2026-08-29 | 2026-08-29 | unit 7+15+65 | fe cc1959f |
 
 ---
 
 ## Tổng kết trang (điền ở Bước 9 — CHỈ SAU KHI đã xong tất cả phase, trước khi bàn giao mentor)
-- Ngày hoàn thành trang:
-- Tổng số phase đã làm:
-- Kết quả hồi quy toàn bộ: unit `<x/y pass>` · E2E Playwright `<x/y pass>`
+- Ngày hoàn thành trang: 2026-08-29
+- Tổng số phase đã làm: 4/4 (DONE)
+- Kết quả hồi quy toàn bộ: FE unit `106/106` (internal-link 19 · chat-link-embed 7 · servers-api 15 ·
+  conversation 65) · BE unit `6/6` (server-preview) · E2E Playwright `HOÃN` (xem phần còn thiếu)
 - Đánh giá tổng thể theo 3 tiêu chí cho TOÀN BỘ feature:
-  - **UI/UX**:
-  - **Feature**:
-  - **Data**:
-- Migration DB đã dùng: không có
+  - **UI/UX**: card hồ sơ tái dùng `app-profile-preview-card` + card máy chủ (icon/tên/số thành viên)
+    đồng bộ design token; nút hành động dùng Angular Material (`mat-stroked/flat-button` + `mat-icon`);
+    có loading skeleton, fallback ẩn card, trạng thái invite hết hạn. CHƯA verify trực quan trên trình
+    duyệt (build full app bị chặn bởi WIP người khác — xem dưới).
+  - **Feature**: 3 loại URL nội bộ same-origin render đúng — hồ sơ `/u/:username`, lời mời `/invite/:code`
+    (nút Tham gia), giới thiệu `/channels/:serverId` (nút Xem server); dữ liệu live + cache dedupe; tôn
+    trọng quyền xem (không thấy → ẩn card); link NGOÀI giữ nguyên placeholder cũ (không áp dụng embed).
+  - **Data**: mọi data qua NestJS (LUẬT CỨNG #1) — hồ sơ qua `/api/profiles/:username`, server qua
+    `/api/invites/:code` và endpoint mới `/api/servers/:id/preview` (public, validate uuid, 400/404, chỉ
+    field công khai, không lộ owner_id, đếm member head:true). DTO `ServerPreviewDto` mirror FE↔BE.
+- Migration DB đã dùng: không có (dùng bảng `servers` + `server_members` có sẵn).
 - Phần còn thiếu / để lại cho sau:
-- PR cuối cùng:
+  1) **Verify trực quan browser + E2E Playwright**: HOÃN vì FE working tree có WIP CHƯA COMMIT của người
+     khác đang lỗi biên dịch (`layouts/.../user-panel/user-panel.ts/.html` thiếu import Material + file mới
+     `core/auth/account-switch.service.ts`, `features/profile/modals/`) làm dev-server build cả app fail.
+     Unit test (graph-scoped) đã phủ đủ. Khi WIP đó compile lại → chạy dev server verify + viết E2E.
+  2) Đã CÀI thiếu dependency `@ngx-translate/core@16.0.4` vào `package.json` (20 file import nó nhưng chưa
+     khai — pre-existing, chặn build toàn FE).
+  3) 2 spec cũ `servers.service.spec.ts` / `servers.controller.spec.ts` (trang Minh Tài) đỏ sẵn từ baseline
+     do constructor drift — đã tách test feature ra file riêng, KHÔNG sửa; có task riêng để Minh Tài xử lý.
+- PR cuối cùng: FE Chuki1234/nexus-fe#37 · BE Chuki1234/nexus-be#26
