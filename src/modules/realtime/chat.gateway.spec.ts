@@ -5,6 +5,7 @@ import { ConversationsService } from '../conversations/conversations.service';
 import { ServerPermissionsService } from '../servers/server-permissions.service';
 import { PresenceService } from './presence.service';
 import { RedisStateService } from './redis-state.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ChatGateway, TypedSocket } from './chat.gateway';
 
 describe('ChatGateway', () => {
@@ -81,6 +82,7 @@ describe('ChatGateway', () => {
         },
         { provide: PresenceService, useValue: presenceServiceMock },
         { provide: RedisStateService, useValue: redisStateMock },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
 
