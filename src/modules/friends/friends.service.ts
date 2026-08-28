@@ -455,6 +455,55 @@ export class FriendsService {
     });
   }
 
+  /**
+   * Danh sách userId mà user hiện tại đã TẮT THÔNG BÁO DM (đồng bộ theo tài khoản).
+   */
+  async listMutedUserIds(userId: string): Promise<string[]> {
+    const { data, error } = await this.supabase.client
+      .from('dm_notification_mutes')
+      .select('muted_user_id')
+      .eq('user_id', userId);
+
+    if (error) {
+      this.throwDatabaseError('Tải danh sách tắt thông báo', error);
+    }
+
+    return ((data as Array<{ muted_user_id: string }> | null) ?? []).map(
+      (row) => row.muted_user_id,
+    );
+  }
+
+  /** Tắt thông báo DM từ một người (idempotent). */
+  async muteUser(userId: string, targetUserId: string): Promise<void> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Người dùng không hợp lệ.');
+    }
+
+    const { error } = await this.supabase.client
+      .from('dm_notification_mutes')
+      .upsert(
+        { user_id: userId, muted_user_id: targetUserId },
+        { onConflict: 'user_id,muted_user_id', ignoreDuplicates: true },
+      );
+
+    if (error) {
+      this.throwDatabaseError('Tắt thông báo người dùng', error);
+    }
+  }
+
+  /** Bật lại thông báo DM từ một người (idempotent). */
+  async unmuteUser(userId: string, targetUserId: string): Promise<void> {
+    const { error } = await this.supabase.client
+      .from('dm_notification_mutes')
+      .delete()
+      .eq('user_id', userId)
+      .eq('muted_user_id', targetUserId);
+
+    if (error) {
+      this.throwDatabaseError('Bật lại thông báo người dùng', error);
+    }
+  }
+
   private async deleteRelationship(
     userId: string,
     otherUserId: string,

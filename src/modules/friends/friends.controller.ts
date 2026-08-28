@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   UseGuards,
 } from '@nestjs/common';
 import type { User } from '@supabase/supabase-js';
@@ -63,6 +64,29 @@ export class FriendsController {
     @Param('userId', new ParseUUIDPipe({ version: '4' })) targetUserId: string,
   ): Promise<void> {
     await this.friends.unblockUser(user.id, targetUserId);
+  }
+
+  @Get('mutes')
+  listMutes(@CurrentUser() user: User): Promise<string[]> {
+    return this.friends.listMutedUserIds(user.id);
+  }
+
+  @Put(':userId/mute')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async muteUser(
+    @CurrentUser() user: User,
+    @Param('userId', new ParseUUIDPipe({ version: '4' })) targetUserId: string,
+  ): Promise<void> {
+    await this.friends.muteUser(user.id, targetUserId);
+  }
+
+  @Delete(':userId/mute')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async unmuteUser(
+    @CurrentUser() user: User,
+    @Param('userId', new ParseUUIDPipe({ version: '4' })) targetUserId: string,
+  ): Promise<void> {
+    await this.friends.unmuteUser(user.id, targetUserId);
   }
 
   @Get('requests')

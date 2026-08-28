@@ -101,6 +101,12 @@ const ALLOWED_MIME_TYPES = new Set([
   'text/plain',
   'application/zip',
   'application/x-zip-compressed',
+  'application/x-7z-compressed',
+  'application/x-tar',
+  'application/gzip',
+  'application/vnd.rar',
+  'application/x-rar-compressed',
+  'application/x-rar',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
 
@@ -127,6 +133,12 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   'text/plain': '.txt',
   'application/zip': '.zip',
   'application/x-zip-compressed': '.zip',
+  'application/x-7z-compressed': '.7z',
+  'application/x-tar': '.tar',
+  'application/gzip': '.gz',
+  'application/vnd.rar': '.rar',
+  'application/x-rar-compressed': '.rar',
+  'application/x-rar': '.rar',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
     '.docx',
 };
@@ -203,6 +215,36 @@ function normalizeMimeType(mimeType: string, filename: string): string {
     return 'application/zip';
   }
   if (
+    lower === 'application/x-7z-compressed' ||
+    lower === 'application/x-7z' ||
+    ext === '.7z'
+  ) {
+    return 'application/x-7z-compressed';
+  }
+  if (
+    lower === 'application/x-tar' ||
+    lower === 'application/tar' ||
+    ext === '.tar'
+  ) {
+    return 'application/x-tar';
+  }
+  if (
+    lower === 'application/gzip' ||
+    lower === 'application/x-gzip' ||
+    ext === '.gz' ||
+    ext === '.tgz'
+  ) {
+    return 'application/gzip';
+  }
+  if (
+    lower === 'application/vnd.rar' ||
+    lower === 'application/x-rar-compressed' ||
+    lower === 'application/x-rar' ||
+    ext === '.rar'
+  ) {
+    return 'application/vnd.rar';
+  }
+  if (
     lower ===
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     ext === '.docx'
@@ -213,12 +255,13 @@ function normalizeMimeType(mimeType: string, filename: string): string {
 }
 
 function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
-  if (buffer.length < 4) return false;
+  if (buffer.length < 2) return false;
   if (mimeType === 'image/jpeg') {
-    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   }
   if (mimeType === 'image/png') {
     return (
+      buffer.length >= 4 &&
       buffer[0] === 0x89 &&
       buffer[1] === 0x50 &&
       buffer[2] === 0x4e &&
@@ -227,6 +270,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
   }
   if (mimeType === 'image/gif') {
     return (
+      buffer.length >= 4 &&
       buffer[0] === 0x47 &&
       buffer[1] === 0x49 &&
       buffer[2] === 0x46 &&
@@ -241,7 +285,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'image/bmp') {
-    return buffer[0] === 0x42 && buffer[1] === 0x4d;
+    return buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d;
   }
   if (mimeType === 'image/svg+xml') {
     const str = buffer
@@ -258,8 +302,8 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'audio/mpeg') {
-    const hasId3Header = buffer.toString('ascii', 0, 3) === 'ID3';
-    const hasMpegFrameSync = buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0;
+    const hasId3Header = buffer.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3';
+    const hasMpegFrameSync = buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0;
     return hasId3Header || hasMpegFrameSync;
   }
   if (mimeType === 'video/mp4') {
@@ -275,7 +319,7 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'video/ogg') {
-    return buffer.toString('ascii', 0, 4) === 'OggS';
+    return buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'OggS';
   }
   if (mimeType === 'video/x-msvideo') {
     return (
@@ -304,25 +348,56 @@ function checkMagicBytes(buffer: Buffer, mimeType: string): boolean {
     );
   }
   if (mimeType === 'video/x-flv') {
-    return buffer.toString('ascii', 0, 3) === 'FLV';
+    return buffer.length >= 3 && buffer.toString('ascii', 0, 3) === 'FLV';
   }
   if (mimeType === 'application/pdf') {
-    return buffer.toString('ascii', 0, 4) === '%PDF';
+    return buffer.length >= 4 && buffer.toString('ascii', 0, 4) === '%PDF';
   }
   if (
     mimeType === 'application/zip' ||
     mimeType === 'application/x-zip-compressed'
   ) {
     return (
-      (buffer[0] === 0x50 &&
+      buffer.length >= 4 &&
+      ((buffer[0] === 0x50 &&
         buffer[1] === 0x4b &&
         buffer[2] === 0x03 &&
         buffer[3] === 0x04) ||
       (buffer[0] === 0x50 &&
         buffer[1] === 0x4b &&
         buffer[2] === 0x05 &&
-        buffer[3] === 0x06)
+        buffer[3] === 0x06))
     );
+  }
+  if (mimeType === 'application/x-7z-compressed') {
+    return (
+      buffer.length >= 6 &&
+      buffer[0] === 0x37 &&
+      buffer[1] === 0x7a &&
+      buffer[2] === 0xbc &&
+      buffer[3] === 0xaf &&
+      buffer[4] === 0x27 &&
+      buffer[5] === 0x1c
+    );
+  }
+  if (
+    mimeType === 'application/vnd.rar' ||
+    mimeType === 'application/x-rar-compressed' ||
+    mimeType === 'application/x-rar'
+  ) {
+    return (
+      buffer.length >= 4 &&
+      buffer[0] === 0x52 &&
+      buffer[1] === 0x61 &&
+      buffer[2] === 0x72 &&
+      buffer[3] === 0x21
+    );
+  }
+  if (mimeType === 'application/gzip') {
+    return buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b;
+  }
+  if (mimeType === 'application/x-tar') {
+    return buffer.length >= 256;
   }
   if (
     mimeType ===
