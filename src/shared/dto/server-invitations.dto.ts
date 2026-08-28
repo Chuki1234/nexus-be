@@ -66,3 +66,18 @@ export interface ServerInvitePreviewDto {
   isExpired: boolean;
   isMaxUsed: boolean;
 }
+
+/**
+ * Xem trước công khai của một máy chủ theo id: `GET /api/servers/:serverId/preview`.
+ *
+ * Dùng cho card "giới thiệu máy chủ" khi dán link `origin/channels/:serverId` vào
+ * khung chat. Chỉ chứa field công khai an toàn — KHÔNG owner_id, không dữ liệu
+ * nhạy cảm — để endpoint có thể để public (người nhận chưa vào server vẫn xem được).
+ */
+export interface ServerPreviewDto {
+  serverId: string;
+  name: string;
+  iconUrl: string | null;
+  bannerUrl: string | null;
+  memberCount: number;
+}

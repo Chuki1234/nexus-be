@@ -411,6 +411,12 @@ export interface ServerToClientEvents {
   /** Sự kiện thành viên rời khỏi máy chủ */
   'server:member-left': (payload: { serverId: string; userId: string }) => void;
 
+  /** Sự kiện thành viên bị kick khỏi máy chủ */
+  'server:member-kicked': (payload: { serverId: string; userId: string; kickedBy: string }) => void;
+
+  /** Sự kiện thành viên bị ban khỏi máy chủ */
+  'server:member-banned': (payload: { serverId: string; userId: string; bannedBy: string; reason?: string }) => void;
+
   /** Sự kiện vai trò của thành viên trong máy chủ được cập nhật */
   'server:member-role-updated': (payload: {
     serverId: string;
