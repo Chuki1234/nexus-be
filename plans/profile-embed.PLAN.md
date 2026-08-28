@@ -124,7 +124,7 @@ Test case dự kiến:
 ---
 
 ## Phase 3: Embed USER profile + ghép vào khung chat
-Status: PENDING
+Status: DONE
 
 Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
 - **UI/UX**: dán link `origin/u/:username` → hiện card snapshot dùng lại
@@ -154,17 +154,26 @@ Test case dự kiến:
   gửi link ngoài → không có card mới.
 
 ### Kết quả Phase 3
-- Ngày hoàn thành:
-- Commit: frontend `<sha ngắn>` · backend `<n/a>`
-- Kết quả test: unit `<x/y>` · E2E Playwright `<x/y>`
+- Ngày hoàn thành: 2026-08-29
+- Commit: frontend `3f95a36` · backend `n/a`
+- Kết quả test: unit `internal-link 19/19 · chat-link-embed 4/4 · conversation 65/65 (compile+render OK)` ·
+  E2E Playwright `hoãn` (xem ghi chú)
 - Đánh giá theo 3 tiêu chí:
-  - [ ] **UI/UX** — reuse preview-card, Material button/icon, loading/error đủ
-  - [ ] **Feature** — live+cache, tôn trọng quyền xem, không đụng link ngoài
-  - [ ] **Data** — dùng API qua NestJS (không query thẳng Supabase)
+  - [x] **UI/UX** — tái dùng `app-profile-preview-card` (đồng bộ thẻ Setting), nút "Xem hồ sơ"
+    `mat-stroked-button` + `mat-icon`, có skeleton khi loading, fallback ẩn card khi không có hồ sơ
+  - [x] **Feature** — dữ liệu live qua `ProfileLookupService` (cache/dedupe), tôn trọng quyền xem
+    (lookup null → ẩn card, link inline còn nguyên); link NGOÀI giữ nguyên placeholder cũ (2 block)
+  - [x] **Data** — đi qua NestJS (`ProfileLookupService` → `/api/profiles/:username`), không query Supabase thẳng
 - Migration DB: chưa cần
 - Vấn đề phát sinh / ghi chú:
-- PR:
-
+  1) Phát hiện `@ngx-translate/core` bị THIẾU khai trong `package.json` (20 file import, cả `profile-preview-card`)
+     → build toàn FE fail. Đã cài `@ngx-translate/core@16.0.4` (khớp API `provideTranslateService`, peer Angular >=16)
+     và thêm vào `package.json`. Đây là lỗi dependency pre-existing, không do feature.
+  2) FE working tree đang có WIP CHƯA COMMIT của người khác đang hỏng biên dịch — `user-panel.ts/.html`
+     (thiếu import Material) + file mới `account-switch.service.ts`, `features/profile/modals/` — làm
+     dev-server build (full app) fail. KHÔNG đụng/commit các file này. Vì builder unit-test chạy graph-scoped
+     nên test của feature vẫn xanh; nhưng browser/E2E verify HOÃN tới khi WIP đó compile lại. Cần báo chủ WIP.
+- PR: FE Chuki1234/nexus-fe#37
 ---
 
 ## Phase 4: Embed SERVER (invite + introduction) + nút hành động
@@ -212,7 +221,7 @@ Test case dự kiến:
 | --- | --- | --- | --- | --- |
 | 1 | 2026-08-28 | 2026-08-28 | unit 19/19 | fe a2511af · be c4bbe52 |
 | 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be 0fd93b6 |
-| 3 | | | | |
+| 3 | 2026-08-29 | 2026-08-29 | unit 19+4+65 | fe 3f95a36 |
 | 4 | | | | |
 
 ---
