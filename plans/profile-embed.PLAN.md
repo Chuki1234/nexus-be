@@ -220,6 +220,98 @@ Test case dự kiến:
   Không đụng các file đó; unit test (graph-scoped) đã phủ đủ cả 3 loại link.
 - PR: FE Chuki1234/nexus-fe#37
 
+## Phase 5: Tương tác card — bỏ nút "xem chi tiết", click vào tên
+Status: DONE
+
+Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
+- **UI/UX**: BỎ nút "Xem hồ sơ" ở card user và nút "Xem server" ở card introduction. Tên (displayName /
+  server name) trở thành phần bấm được, **hover → gạch dưới**. Giữ nút "Tham gia" cho card invite.
+- **Feature**: click tên USER → mở **dialog preview hồ sơ** qua `ProfileDialogService.open(username, profile)`
+  (truyền profile đã load để không refetch). Click tên SERVER (introduction/invite) → điều hướng
+  `/channels/:serverId`. Link ngoài không đổi.
+
+File/folder dự kiến:
+- frontend:
+  - `src/app/shared/ui/profile-card/profile-preview-card.component.ts` (HẠ TẦNG DÙNG CHUNG — thêm input
+    `nameInteractive` + output `nameClick`, style hover gạch dưới; mặc định false để trang Setting không đổi)
+  - `src/app/features/dashboard/conversation/components/chat-link-embed/chat-link-embed.{ts,html,spec.ts}`
+    (inject `ProfileDialogService`, wire `nameClick`, bỏ nút, server name → routerLink)
+  - `playwright.config.ts` + `e2e/chat-link-embed.e2e.ts` (setup Playwright + E2E 4 luồng)
+- backend: (không)
+
+Tiêu chí hoàn thành:
+- User card không còn nút; click tên mở dialog; hover gạch dưới. Server card introduction: tên → điều hướng,
+  không còn nút "Xem server"; invite giữ "Tham gia".
+- Trang Setting (dùng `profile-preview-card`) KHÔNG đổi hành vi (nameInteractive mặc định false).
+
+Test case dự kiến:
+- Unit: chat-link-embed — click tên user gọi `ProfileDialogService.open`; không còn nút "Xem hồ sơ";
+  server introduction tên có routerLink `/channels/:id`.
+- E2E (Playwright): dán /u/:username → card → click tên → dialog hiện; link ngoài → không embed.
+
+### Kết quả Phase 5
+- Ngày hoàn thành: 2026-08-29
+- Commit: frontend `d5c7cd7` · backend `n/a`
+- Kết quả test: unit `chat-link-embed 6/6 · servers-api 15/15 · conversation 65/65 · internal-link 19/19`
+  (regression 105/105) · E2E `3 test đã author` (playwright.config.ts + e2e/chat-link-embed.e2e.ts) —
+  chạy cần `npx playwright install` + storageState đăng nhập
+- Đánh giá theo 3 tiêu chí:
+  - [x] **UI/UX** — bỏ nút "Xem hồ sơ"/"Xem server"; tên hover → gạch dưới; user click tên → dialog,
+    server click tên → điều hướng; invite giữ nút "Tham gia"
+  - [x] **Feature** — `ProfileDialogService.open(username)` cho user; server name `routerLink`
+    (/channels/:id hoặc /invite/:code); invite hết hạn → không cho tham gia + lý do
+  - [x] **Data** — không đổi (dùng dữ liệu đã load)
+- Migration DB: chưa cần
+- Vấn đề phát sinh / ghi chú: (1) sửa HẠ TẦNG DÙNG CHUNG `profile-preview-card` — thêm input
+  `nameInteractive` + output `nameClick`, mặc định false nên trang Setting KHÔNG đổi. (2) Cài
+  `@playwright/test` + script `e2e`. (3) Visual live cần đăng nhập → agent không tự nhập credential được,
+  đã phủ bằng unit + author E2E để người dùng chạy.
+- PR: FE Chuki1234/nexus-fe#37
+---
+
+## Phase 6: Làm giàu card server như ảnh mock (description / tags / online / founding date)
+Status: APPROVED
+
+Mục tiêu (gắn với 1+ trong 3 tiêu chí UI/UX - Feature - Data):
+- **Data**: card server hiển thị như mock — mô tả, tags, số Trực tuyến, "Thành lập từ" (created_at). Cần
+  DỮ LIỆU MỚI: thêm cột `description text` và `tags text[]` vào bảng `servers`; endpoint preview trả thêm
+  `description`, `tags`, `createdAt`, `onlineCount`.
+- **UI/UX**: card server = icon + tên (clickable) + "N Trực tuyến · M thành viên" + "Thành lập từ …" +
+  mô tả (hoặc placeholder "Chưa có mô tả…") + hàng tag chip.
+
+File/folder dự kiến:
+- backend:
+  - `backend/migrations/<timestamp>_add_server_description_tags.sql` (ALTER TABLE servers ADD description, tags)
+    — **mentor Luke áp trên Supabase**, chờ xác nhận rồi mới nối code.
+  - `src/modules/servers/servers.service.ts` (getServerPreview: select thêm description/tags/created_at;
+    onlineCount từ presence — cần xác định nguồn presence, có thể tách nhỏ)
+  - `src/shared/dto/server-invitations.dto.ts` (ServerPreviewDto: thêm description/tags/createdAt/onlineCount) — mirror FE↔BE
+- frontend:
+  - `src/app/core/api/servers-api.service.ts` (kiểu trả mới)
+  - `chat-link-embed.{ts,html,spec.ts}` (UI card server giàu + tag chips)
+
+Tiêu chí hoàn thành:
+- Endpoint trả đủ field mới; card render như mock; không lộ field nhạy cảm.
+- onlineCount đúng nguồn presence (nếu chưa sẵn → ghi "chờ" và tạm ẩn, không chặn phần còn lại).
+
+Test case dự kiến:
+- Unit: getServerPreview trả field mới; servers-api map đúng; chat-link-embed render tags/mô tả/founding date.
+- E2E (Playwright): dán /channels/:id → card giàu hiện đủ mục.
+
+### Kết quả Phase 6
+- Ngày hoàn thành:
+- Commit: frontend `<sha>` · backend `<sha>`
+- Kết quả test: unit `<x/y>` · E2E `<x/y>`
+- Đánh giá theo 3 tiêu chí:
+  - [ ] **UI/UX** — card giàu như mock
+  - [ ] **Feature** — đủ field, tag chips
+  - [ ] **Data** — migration áp đúng, không lộ field nhạy cảm, onlineCount đúng nguồn
+- Migration DB: `backend/migrations/<...>.sql` — trạng thái: chờ mentor áp
+- Vấn đề phát sinh / ghi chú:
+- PR: FE #37 · BE #26
+
+---
+
 ## Nhật ký duyệt & hoàn thành (bảng tóm tắt nhanh — chi tiết xem mục "Kết quả Phase N" ở trên)
 | Phase | Duyệt lúc | Hoàn thành lúc | Test pass | Commit |
 | --- | --- | --- | --- | --- |
@@ -227,6 +319,8 @@ Test case dự kiến:
 | 2 | 2026-08-28 | 2026-08-28 | unit 6/6 | be 0fd93b6 |
 | 3 | 2026-08-29 | 2026-08-29 | unit 19+4+65 | fe 3f95a36 |
 | 4 | 2026-08-29 | 2026-08-29 | unit 7+15+65 | fe cc1959f |
+| 5 | 2026-08-29 | 2026-08-29 | unit 105/105 | fe d5c7cd7 |
+| 6 | | | | |
 
 ---
 
