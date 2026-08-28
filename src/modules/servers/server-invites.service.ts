@@ -664,6 +664,25 @@ export class ServerInvitesService {
       throw new BadRequestException('Mã mời không hợp lệ.');
     }
 
+    // Ban Protection Guard
+    const { data: invData } = await this.supabase.client
+      .from('invites')
+      .select('server_id')
+      .eq('code', trimmedCode)
+      .maybeSingle();
+
+    if (invData?.server_id) {
+      const { data: banData } = await this.supabase.client
+        .from('server_bans')
+        .select('user_id')
+        .match({ server_id: invData.server_id, user_id: userId })
+        .maybeSingle();
+
+      if (banData) {
+        throw new ForbiddenException('Bạn đã bị cấm khỏi máy chủ này và không thể gia nhập lại bằng liên kết mời.');
+      }
+    }
+
     const { data, error } = await this.supabase.client.rpc('join_server_by_invite_code', {
       p_code: trimmedCode,
       p_user_id: userId,

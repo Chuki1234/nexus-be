@@ -14,6 +14,7 @@ import { SERVER_TEMPLATES } from './constants/server-templates.constant';
 import { CreateServerDto } from './dto/create-server.dto';
 import { ServersService } from './servers.service';
 import { ServerPermissionsService } from './server-permissions.service';
+import { MediaService } from '../../infra/storage/media.service';
 
 describe('ServersService', () => {
   let service: ServersService;
@@ -33,7 +34,22 @@ describe('ServersService', () => {
         }),
       },
       emitChannelsInvalidated: jest.fn(),
-    };
+      emitServerMemberLeft: jest.fn((serverId: string, userId: string) => {
+        chatGatewayMock.server.to(Room.server(serverId)).emit('server:member-left', { serverId, userId });
+        chatGatewayMock.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+      }),
+      emitServerMemberKicked: jest.fn((serverId: string, userId: string, kickedBy: string) => {
+        chatGatewayMock.server.to(Room.server(serverId)).emit('server:member-kicked', { serverId, userId, kickedBy });
+        chatGatewayMock.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+      }),
+      emitServerMemberBanned: jest.fn((serverId: string, userId: string, bannedBy: string, reason?: string) => {
+        chatGatewayMock.server.to(Room.server(serverId)).emit('server:member-banned', { serverId, userId, bannedBy, reason });
+        chatGatewayMock.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+      }),
+      emitServerMemberUnbanned: jest.fn((serverId: string, userId: string) => {
+        chatGatewayMock.server.to(Room.server(serverId)).emit('server:member-unbanned', { serverId, userId });
+      }),
+    } as any;
 
     supabaseService = {
       client: {
@@ -63,6 +79,12 @@ describe('ServersService', () => {
             assertChannelView: jest.fn().mockResolvedValue(undefined),
             assertChannelSend: jest.fn().mockResolvedValue(undefined),
             assertChannelAttach: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: MediaService,
+          useValue: {
+            uploadServerIcon: jest.fn(),
           },
         },
       ],
@@ -741,6 +763,179 @@ describe('ServersService', () => {
         serverId,
       );
       expect(chatGatewayMock.emitChannelsInvalidated).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('kickServerMember', () => {
+    it('thành công khi operator có quyền canKickMembers và target không phải Owner', async () => {
+      const operatorId = 'op-1';
+      const serverId = 'srv-1';
+      const targetId = 'target-1';
+
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canKickMembers: true,
+      });
+
+      supabaseService.client.from.mockReturnValue({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        maybeSingle: jest.fn().mockResolvedValue({
+          data: { owner_id: 'owner-999' },
+          error: null,
+        }),
+      });
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: { success: true },
+        error: null,
+      });
+
+      const res = await service.kickServerMember(operatorId, serverId, targetId);
+      expect(res).toEqual({
+        success: true,
+        serverId,
+        targetUserId: targetId,
+      });
+      expect(supabaseService.client.rpc).toHaveBeenCalledWith('leave_server', {
+        p_server_id: serverId,
+        p_user_id: targetId,
+      });
+    });
+
+    it('báo ForbiddenException khi operator không có quyền canKickMembers', async () => {
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canKickMembers: false,
+      });
+
+      await expect(
+        service.kickServerMember('user-no-perm', 'srv-1', 'target-1'),
+      ).rejects.toThrow('Bạn không có quyền trục xuất thành viên khỏi máy chủ này.');
+    });
+
+    it('báo ForbiddenException khi cố gắng kick Owner của server', async () => {
+      const ownerId = 'owner-123';
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canKickMembers: true,
+      });
+
+      supabaseService.client.from.mockReturnValue({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        maybeSingle: jest.fn().mockResolvedValue({
+          data: { owner_id: ownerId },
+          error: null,
+        }),
+      });
+
+      await expect(
+        service.kickServerMember('operator-1', 'srv-1', ownerId),
+      ).rejects.toThrow('Không thể trục xuất chủ sở hữu máy chủ.');
+    });
+  });
+
+  describe('banServerMember & listServerBans', () => {
+    it('thành công khi operator có quyền canBanMembers và ghi nhận ban', async () => {
+      const serverId = 'srv-10';
+      const operatorId = 'op-1';
+      const targetId = 'target-2';
+      const reason = 'Spam liên tục';
+
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canBanMembers: true,
+      });
+
+      supabaseService.client.from.mockImplementation((table: string) => {
+        if (table === 'servers') {
+          return {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            maybeSingle: jest.fn().mockResolvedValue({
+              data: { owner_id: 'owner-other' },
+              error: null,
+            }),
+          };
+        }
+        if (table === 'server_bans') {
+          return {
+            upsert: jest.fn().mockResolvedValue({ error: null }),
+          };
+        }
+        return {};
+      });
+
+      supabaseService.client.rpc.mockResolvedValue({
+        data: { success: true },
+        error: null,
+      });
+
+      const res = await service.banServerMember(operatorId, serverId, targetId, reason);
+
+      expect(res).toEqual({
+        success: true,
+        serverId,
+        targetUserId: targetId,
+        reason,
+      });
+      expect(chatGatewayMock.emitServerMemberBanned).toHaveBeenCalledWith(
+        serverId,
+        targetId,
+        operatorId,
+        reason,
+      );
+    });
+
+    it('báo ForbiddenException khi operator không có quyền canBanMembers', async () => {
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canBanMembers: false,
+      });
+
+      await expect(
+        service.banServerMember('user-no-perm', 'srv-1', 'target-1'),
+      ).rejects.toThrow('Bạn không có quyền cấm thành viên khỏi máy chủ này.');
+    });
+
+    it('báo ForbiddenException khi cố gắng ban Owner của server', async () => {
+      const ownerId = 'owner-99';
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canBanMembers: true,
+      });
+
+      supabaseService.client.from.mockReturnValue({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        maybeSingle: jest.fn().mockResolvedValue({
+          data: { owner_id: ownerId },
+          error: null,
+        }),
+      });
+
+      await expect(
+        service.banServerMember('operator-1', 'srv-1', ownerId),
+      ).rejects.toThrow('Không thể cấm chủ sở hữu máy chủ.');
+    });
+
+    it('thành công unbanServerMember khi operator có quyền canBanMembers', async () => {
+      const serverId = 'srv-10';
+      const operatorId = 'op-1';
+      const targetId = 'target-2';
+
+      jest.spyOn((service as any).serverPermissions, 'getCapabilities').mockResolvedValue({
+        canBanMembers: true,
+      });
+
+      supabaseService.client.from.mockReturnValue({
+        delete: jest.fn().mockReturnThis(),
+        match: jest.fn().mockResolvedValue({ error: null }),
+      });
+
+      const res = await service.unbanServerMember(operatorId, serverId, targetId);
+
+      expect(res).toEqual({
+        success: true,
+        serverId,
+        targetUserId: targetId,
+      });
+      expect(chatGatewayMock.emitServerMemberUnbanned).toHaveBeenCalledWith(serverId, targetId);
     });
   });
 });

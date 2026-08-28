@@ -1437,6 +1437,39 @@ export class ChatGateway
     this.eventEmitter.emit(CHAT_EVENTS.SERVER_MEMBER_LEFT, { serverId, userId });
   }
 
+  emitServerMemberKicked(serverId: string, userId: string, kickedBy: string): void {
+    if (!this.server) return;
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-kicked', { serverId, userId, kickedBy });
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-left', { serverId, userId });
+    this.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+    this.eventEmitter.emit(CHAT_EVENTS.SERVER_MEMBER_LEFT, { serverId, userId });
+  }
+
+  /** Broadcast sự kiện cấm thành viên khỏi máy chủ */
+  emitServerMemberBanned(serverId: string, userId: string, bannedBy: string, reason?: string): void {
+    if (!this.server) return;
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-banned', { serverId, userId, bannedBy, reason });
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-left', { serverId, userId });
+    this.server.to(Room.user(userId)).emit('server:deleted', { serverId });
+    this.eventEmitter.emit(CHAT_EVENTS.SERVER_MEMBER_LEFT, { serverId, userId });
+  }
+
+  /** Broadcast sự kiện bỏ cấm thành viên */
+  emitServerMemberUnbanned(serverId: string, userId: string): void {
+    if (!this.server) return;
+    this.server
+      .to(Room.server(serverId))
+      .emit('server:member-unbanned' as any, { serverId, userId });
+  }
+
   emitServerMemberJoined(serverId: string, member: ServerMemberDto): void {
     if (!this.server) return;
     this.server

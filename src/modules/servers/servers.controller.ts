@@ -24,9 +24,11 @@ import {
   ServerInviteCandidateDto,
   ServerInviteLinkResponseDto,
   ServerInvitePreviewDto,
+  ServerPreviewDto,
 } from '../../shared/dto/server-invitations.dto';
 import { ServerTemplateDefinition } from './constants/server-templates.constant';
 import { CreateChannelDto } from './dto/create-channel.dto';
+import { CreateServerBanDto } from './dto/create-server-ban.dto';
 import {
   CreateDirectInvitationDto,
   CreateInviteLinkDto,
@@ -396,6 +398,61 @@ export class ServersController {
   ): Promise<{ success: boolean; serverId: string; alreadyLeft: boolean }> {
     return this.servers.leaveServer(user.id, serverId);
   }
+
+  /**
+   * DELETE /api/servers/:serverId/members/:targetUserId
+   * Trục xuất (Kick) thành viên khỏi máy chủ (Yêu cầu quyền KICK_MEMBERS hoặc Owner/Admin)
+   */
+  @Delete(':serverId/members/:targetUserId')
+  @HttpCode(HttpStatus.OK)
+  kickServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('targetUserId') targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    return this.servers.kickServerMember(user.id, serverId, targetUserId);
+  }
+
+  /**
+   * POST /api/servers/:serverId/bans
+   * Cấm (Ban) thành viên khỏi máy chủ (Yêu cầu quyền BAN_MEMBERS hoặc Owner/Admin)
+   */
+  @Post(':serverId/bans')
+  @HttpCode(HttpStatus.CREATED)
+  banServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Body() dto: CreateServerBanDto,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string; reason?: string }> {
+    return this.servers.banServerMember(user.id, serverId, dto.targetUserId, dto.reason);
+  }
+
+  /**
+   * GET /api/servers/:serverId/bans
+   * Lấy danh sách các thành viên bị cấm trong máy chủ
+   */
+  @Get(':serverId/bans')
+  @HttpCode(HttpStatus.OK)
+  listServerBans(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+  ) {
+    return this.servers.listServerBans(user.id, serverId);
+  }
+
+  /**
+   * DELETE /api/servers/:serverId/bans/:targetUserId
+   * Bỏ cấm (Unban) thành viên khỏi máy chủ (Yêu cầu quyền BAN_MEMBERS hoặc Owner/Admin)
+   */
+  @Delete(':serverId/bans/:targetUserId')
+  @HttpCode(HttpStatus.OK)
+  unbanServerMember(
+    @CurrentUser() user: User,
+    @Param('serverId') serverId: string,
+    @Param('targetUserId') targetUserId: string,
+  ): Promise<{ success: boolean; serverId: string; targetUserId: string }> {
+    return this.servers.unbanServerMember(user.id, serverId, targetUserId);
+  }
 }
 
 /**
@@ -476,5 +533,27 @@ export class InvitesController {
     alreadyMember: boolean;
   }> {
     return this.invites.joinByInviteCode(user.id, code);
+  }
+}
+
+/**
+ * Controller công khai xem trước thông tin máy chủ.
+ *
+ * Tách riêng khỏi `ServersController` (đang `@UseGuards(SupabaseAuthGuard)` ở cấp
+ * class) vì route này CỐ Ý không cần đăng nhập — để người nhận link giới thiệu
+ * `origin/channels/:serverId` xem được card dù chưa vào server, giống
+ * `InvitesController` cho link mời. Route `:serverId/preview` là đoạn literal
+ * riêng nên không đụng các route `:serverId/...` có guard của controller kia.
+ */
+@Controller('servers')
+export class ServerPreviewController {
+  constructor(private readonly servers: ServersService) {}
+
+  @Get(':serverId/preview')
+  @HttpCode(HttpStatus.OK)
+  getServerPreview(
+    @Param('serverId') serverId: string,
+  ): Promise<ServerPreviewDto> {
+    return this.servers.getServerPreview(serverId);
   }
 }
