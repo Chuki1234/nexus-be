@@ -13,6 +13,7 @@ import { MediaService } from '../../infra/storage/media.service';
 import { Permission } from '../../shared/permissions';
 import { Room } from '../../shared/socket-events';
 import { ChatGateway } from '../realtime/chat.gateway';
+import { PresenceService } from '../realtime/presence.service';
 import { ServerPermissionsService } from './server-permissions.service';
 import {
   SERVER_TEMPLATES,
@@ -67,6 +68,7 @@ export class ServersService {
     private readonly chatGateway: ChatGateway,
     private readonly serverPermissions: ServerPermissionsService,
     private readonly media: MediaService,
+    private readonly presence: PresenceService,
   ) {}
 
   /**
@@ -96,7 +98,7 @@ export class ServersService {
 
     const { data: server, error } = await this.supabase.client
       .from('servers')
-      .select('id, name, icon_url, banner_url')
+      .select('id, name, icon_url, banner_url, description, tags, created_at')
       .eq('id', trimmed)
       .maybeSingle();
 
@@ -109,19 +111,31 @@ export class ServersService {
       throw new NotFoundException('Máy chủ không tồn tại hoặc đã bị xóa.');
     }
 
-    // Đếm thành viên tách riêng (head:true → chỉ lấy count, không kéo hàng) —
-    // giống cách getInvitePreview đếm, tránh join làm phồng payload.
-    const { count: memberCount } = await this.supabase.client
+    // Lấy danh sách user_id thành viên để vừa đếm tổng, vừa đếm số đang trực
+    // tuyến qua presence. Kéo cột `user_id` (không phải `*`) để nhẹ payload.
+    const { data: members } = await this.supabase.client
       .from('server_members')
-      .select('*', { count: 'exact', head: true })
+      .select('user_id')
       .eq('server_id', trimmed);
+
+    const memberIds: string[] = (members ?? []).map(
+      (m: { user_id: string }) => m.user_id,
+    );
+    const memberCount = memberIds.length || 1;
+    const onlineCount = memberIds.filter(
+      (id) => this.presence.getEffectiveStatus(id) !== 'offline',
+    ).length;
 
     return {
       serverId: server.id,
       name: server.name,
       iconUrl: server.icon_url ?? null,
       bannerUrl: server.banner_url ?? null,
-      memberCount: memberCount ?? 1,
+      memberCount,
+      description: server.description ?? null,
+      tags: Array.isArray(server.tags) ? server.tags : [],
+      createdAt: server.created_at,
+      onlineCount,
     };
   }
 

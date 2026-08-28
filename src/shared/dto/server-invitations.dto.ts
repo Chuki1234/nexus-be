@@ -80,4 +80,12 @@ export interface ServerPreviewDto {
   iconUrl: string | null;
   bannerUrl: string | null;
   memberCount: number;
+  /** Mô tả ngắn (Phase 6). `null` khi server chưa đặt. */
+  description: string | null;
+  /** Tag chủ đề (Phase 6). Mảng rỗng khi chưa có. */
+  tags: string[];
+  /** ISO timestamp ngày tạo — hiển thị "Thành lập từ …". */
+  createdAt: string;
+  /** Số thành viên đang trực tuyến (không offline), tính từ presence. */
+  onlineCount: number;
 }
